@@ -599,7 +599,7 @@ export async function startEngineFacade(options: EngineFacadeOptions): Promise<E
   };
 
   // ---- events -------------------------------------------------------------
-  type Subscriber = { directory: string | null; global: boolean; write: (event: V1Event, directory: string | null) => void };
+  type Subscriber = { directory: string | null; global: boolean; write: (event: V1Event, directory: string | null) => void; end: () => void };
   const subscribers = new Set<Subscriber>();
   const streamController = new AbortController();
   let streamStarted = false;
@@ -673,7 +673,7 @@ export async function startEngineFacade(options: EngineFacadeOptions): Promise<E
       res.write(`data: ${JSON.stringify(payload)}\n\n`);
     };
     write({ type: "server.connected", properties: {} }, null);
-    const subscriber: Subscriber = { directory, global, write };
+    const subscriber: Subscriber = { directory, global, write, end: () => res.end() };
     subscribers.add(subscriber);
     const heartbeat = setInterval(() => {
       const beat = { type: "server.heartbeat", properties: {} };
@@ -1283,10 +1283,18 @@ export async function startEngineFacade(options: EngineFacadeOptions): Promise<E
     refreshConfig,
     close: async () => {
       streamController.abort();
-      for (const subscriber of subscribers) subscribers.delete(subscriber);
+      // Event streams stay open until ended; end them so the server can close.
+      for (const subscriber of subscribers) {
+        subscribers.delete(subscriber);
+        try {
+          subscriber.end();
+        } catch {
+          // already closed
+        }
+      }
       const closed = new Promise<void>((resolve) => server.close(() => resolve()));
       server.closeAllConnections?.();
-      await closed;
+      await Promise.race([closed, new Promise<void>((resolve) => setTimeout(resolve, 3_000).unref?.())]);
     },
   };
 }

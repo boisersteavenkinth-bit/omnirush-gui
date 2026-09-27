@@ -159,7 +159,58 @@ export const OmniRushTitleRecovery = async (input: {
       service: "omnirush.title", level, message: "Automatic title generation", extra: diagnostic,
     } }).catch(() => undefined);
   };
+  /** Requests the 2.x hooks stripped the marker from: the marker and the body as sent. */
+  const sent = new WeakMap<Request, { id: string; body: string | undefined }>();
   return {
+    // The 2.x engine does not use the global fetch: the plugin bridge
+    // (omnirush-engine2.ts) hands these the real outgoing request and its
+    // response (the engine's session "http.request" / "http.response" hooks).
+    // The marker never reaches a provider, and a rejected optional title
+    // parameter is retried without it, as the fetch patch does for 1.x.
+    "omnirush.http.request": async (event: { request: Request }) => {
+      const request = event?.request;
+      const id = request?.headers.get(HEADER);
+      if (!request || !id) return;
+      const headers = new Headers(request.headers);
+      headers.delete(HEADER);
+      const body = request.body ? await request.clone().text() : undefined;
+      const next = new Request(request.url, { method: request.method, headers, body, signal: request.signal });
+      sent.set(next, { id, body });
+      event.request = next;
+    },
+    "omnirush.http.response": async (event: { request: Request; response: Response }) => {
+      const entry = event?.request ? sent.get(event.request) : undefined;
+      if (!entry) return;
+      sent.delete(event.request);
+      const attempt = attempts.get(entry.id);
+      if (!attempt) return;
+      const response = event.response;
+      if (response.ok) {
+        report(attempt, "accepted", response.status);
+        return;
+      }
+      report(attempt, failure(response.status), response.status);
+      if (attempt.retried || response.status !== 400 || entry.body === undefined) return;
+      const recovered = correction(entry.body, await errorBody(response));
+      if (!recovered || attempts.get(entry.id) !== attempt || event.request.signal.aborted) return;
+      attempt.retried = true;
+      report(attempt, "retrying_parameter", response.status, recovered.parameter);
+      const headers = new Headers(event.request.headers);
+      headers.delete("content-length");
+      try {
+        const retry = await globalThis.fetch(event.request.url, {
+          method: event.request.method,
+          headers,
+          body: recovered.body,
+          signal: AbortSignal.any([event.request.signal, AbortSignal.timeout(DEADLINE_MS)]),
+        });
+        report(attempt, retry.ok ? "accepted_after_recovery" : failure(retry.status), retry.status);
+        void response.body?.cancel().catch(() => undefined);
+        event.response = retry;
+      } catch {
+        report(attempt, event.request.signal.aborted ? "cancelled" : "transport_failed");
+      }
+    },
     "chat.headers": async (request: {
       sessionID: string; agent: string; model: { id: string; providerID: string };
     }, output: { headers: Record<string, string> }) => {

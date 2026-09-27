@@ -385,6 +385,29 @@ export default {
       });
     }
 
+    // Hooks OmniRush plugins offer for the 2.x engine only (the 1.x engine has no counterpart):
+    // the real outgoing model request and its response, and each request's tool definitions.
+    const httpRequestHooks = hooks("omnirush.http.request");
+    const httpResponseHooks = hooks("omnirush.http.response");
+    if (httpRequestHooks.length) {
+      await ctx.session.hook("http.request", async (event: any) => {
+        for (const hook of httpRequestHooks) await hook(event, event);
+      });
+    }
+    if (httpResponseHooks.length) {
+      await ctx.session.hook("http.response", async (event: any) => {
+        for (const hook of httpResponseHooks) await hook(event, event);
+      });
+    }
+    const toolSchemaHooks = hooks("omnirush.tools.transform");
+    if (toolSchemaHooks.length) {
+      await ctx.session.hook("context", async (event: any) => {
+        if (!isRec(event.tools)) return;
+        const input = await hookInput(event);
+        for (const hook of toolSchemaHooks) await hook({ sessionID: input.sessionID, model: input.model }, { tools: event.tools });
+      });
+    }
+
     const headerHooks = hooks("chat.headers");
     if (headerHooks.length) {
       await ctx.session.hook("model.request", async (event: any) => {
