@@ -14,7 +14,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from "fs";
-import { dirname, join, resolve } from "path";
+import { basename, dirname, join, resolve } from "path";
 import { tmpdir } from "os";
 import { fileURLToPath } from "url";
 
@@ -293,8 +293,14 @@ if (shouldDownloadOpencode) {
     process.exit(1);
   }
 
-  // bsdtar (Windows 10+ tar.exe) and GNU tar both read gzip tarballs.
-  const tarResult = spawnSync("tar", ["-xzf", archivePath, "-C", extractDir], { stdio: "inherit" });
+  // bsdtar (Windows 10+ tar.exe) and GNU tar both read gzip tarballs. Paths
+  // are relative to the temp dir: Git Bash's GNU tar on Windows reads
+  // "C:\..." as a remote host ("Cannot connect to C: resolve failed").
+  const tarResult = spawnSync(
+    "tar",
+    ["-xzf", basename(archivePath), "-C", basename(extractDir)],
+    { stdio: "inherit", cwd: tmpdir() },
+  );
   if (tarResult.status !== 0) {
     process.exit(tarResult.status ?? 1);
   }
