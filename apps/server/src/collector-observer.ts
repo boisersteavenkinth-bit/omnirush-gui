@@ -183,10 +183,12 @@ function turnModelFromMessages(messages: unknown): CollectorSessionModel | null 
     const providerId = optionalTraceString(info.providerID) ?? optionalTraceString(model.providerID);
     const modelId = optionalTraceString(info.modelID) ?? optionalTraceString(model.modelID) ?? optionalTraceString(model.id);
     if (!providerId && !modelId) continue;
+    // The 2.x engine's own model record says "default" when no variant was picked (1.x wrote none).
+    const nativeVariant = optionalTraceString(model.variant);
     return {
       provider_id: providerId,
       model_id: modelId,
-      variant: optionalTraceString(info.variant) ?? optionalTraceString(model.variant) ?? userVariant,
+      variant: optionalTraceString(info.variant) ?? (nativeVariant === "default" ? null : nativeVariant) ?? userVariant,
       agent: optionalTraceString(info.agent) ?? optionalTraceString(info.mode) ?? userAgent,
     };
   }

@@ -24,6 +24,7 @@
  * `_c<callID>`, …) so a part read from a message list and the same part built from live events
  * (engine2/events.ts) agree.
  */
+import { withNativeFields } from "./native.js";
 import { arr, isRecord, num, omitUndefined, record, str, unwrap, type JsonRecord } from "./util.js";
 
 export type V1Message = { info: JsonRecord; parts: JsonRecord[] };
@@ -701,6 +702,11 @@ function v1CompactionMessages(message: JsonRecord, ctx: MessageContext, model: M
 export function v1Messages(messages: unknown[], ctx: MessageContext): V1Message[] {
   const list = messages.filter(isRecord);
   const out: V1Message[] = [];
+  const mappedFrom = new Map<JsonRecord, V1Message[]>();
+  const emit = (message: JsonRecord, mapped: V1Message[]) => {
+    mappedFrom.set(message, mapped);
+    out.push(...mapped);
+  };
   let agent = ctx.agent ?? "build";
   let model = ctx.model;
   let lastUserId = "";
@@ -743,12 +749,12 @@ export function v1Messages(messages: unknown[], ctx: MessageContext): V1Message[
           { system: str(sent, "system"), tools: record(sent, "tools") },
         );
         lastUserId = String(mapped.info.id);
-        out.push(mapped);
+        emit(message, [mapped]);
         return;
       }
       case "skill": {
         const mapped = v1UserMessage(message, ctx, str(message, "text") ?? "", [], true, agent, model);
-        out.push(mapped);
+        emit(message, [mapped]);
         return;
       }
       case "assistant": {
@@ -756,21 +762,22 @@ export function v1Messages(messages: unknown[], ctx: MessageContext): V1Message[
         agent = String(mapped.info.agent ?? agent);
         const stepModel = modelRef(message.model);
         if (stepModel) model = { ...stepModel, ...(model?.variant && !stepModel.variant ? { variant: model.variant } : {}) };
-        out.push(mapped);
+        emit(message, [mapped]);
         return;
       }
       case "shell":
-        out.push(...v1ShellMessages(message, ctx, agent, model));
+        emit(message, v1ShellMessages(message, ctx, agent, model));
         return;
       case "compaction":
-        out.push(...v1CompactionMessages(message, ctx, model));
+        emit(message, v1CompactionMessages(message, ctx, model));
         return;
       default:
-        // system, location-switched, idle: context records the 1.x engine never listed.
+        // system, location-switched, idle: context records the 1.x engine never listed
+        // (withNativeFields adds them as parts of the nearest message).
         return;
     }
   });
-  return out;
+  return withNativeFields(out, list, mappedFrom, ctx.sessionID);
 }
 
 export type SessionShapeOptions = {

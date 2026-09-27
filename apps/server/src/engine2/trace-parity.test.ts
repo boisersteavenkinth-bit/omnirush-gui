@@ -24,21 +24,28 @@ function typeOf(value: unknown): string {
   return typeof value;
 }
 
+const NATIVE_PART_TYPES = new Set(["agent-switched", "model-switched", "location-switched", "system", "idle"]);
+
+/**
+ * What the 2.x trace lacks or changes against the 1.x trace (the 2.x
+ * engine's own fields and parts are additions, engine2/native.ts, and are
+ * not reported).
+ */
 function shapeDiff(a: unknown, b: unknown, path = "$", out: string[] = []): string[] {
   if (typeOf(a) !== typeOf(b)) {
     out.push(`${path}: ${typeOf(a)} != ${typeOf(b)}`);
     return out;
   }
   if (Array.isArray(a) && Array.isArray(b)) {
-    if (a.length !== b.length) out.push(`${path}: length ${a.length} != ${b.length}`);
-    for (let index = 0; index < Math.min(a.length, b.length); index++) shapeDiff(a[index], b[index], `${path}[${index}]`, out);
+    const right = path.endsWith(".parts") ? b.filter((part) => !NATIVE_PART_TYPES.has(String((part as { type?: string }).type))) : b;
+    if (a.length !== right.length) out.push(`${path}: length ${a.length} != ${right.length}`);
+    for (let index = 0; index < Math.min(a.length, right.length); index++) shapeDiff(a[index], right[index], `${path}[${index}]`, out);
     return out;
   }
   if (a && b && typeof a === "object") {
     const ka = Object.keys(a as object);
     const kb = Object.keys(b as object);
     for (const key of ka) if (!kb.includes(key)) out.push(`${path}.${key}: only on 1.x`);
-    for (const key of kb) if (!ka.includes(key)) out.push(`${path}.${key}: only on 2.x`);
     for (const key of ka) if (kb.includes(key)) shapeDiff((a as Record<string, unknown>)[key], (b as Record<string, unknown>)[key], `${path}.${key}`, out);
   }
   return out;
@@ -176,6 +183,8 @@ describe("the uploaded trace over the 2.x engine matches the 1.x engine's", () =
   test("two parallel sub-agents: same events, messages and sub-agent sessions", async () => {
     const v1 = fixture("v1-sub");
     const v2 = fixture("v2-sub");
+    // As the engine records it in the app: no variant picked reads as "default" on each step.
+    for (const node of flatten(v2)) for (const message of node.messages) if (message.type === "assistant" && message.model && typeof message.model === "object") (message.model as Record<string, unknown>).variant = "default";
     const before = await observe(startV1Engine(v1), String(v1.session.id));
     const after = await observe(await startV2Engine(v2), String(v2.session.id));
     const labels = (collector: RecordingCollector) => collector.entries.map((entry) => (entry.kind === "trace" ? entry.type : entry.kind));

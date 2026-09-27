@@ -22,20 +22,32 @@ function typeOf(value: unknown): string {
   return typeof value;
 }
 
-/** Every key path whose presence or value type differs between two JSON values. */
+/** Part types only the 2.x engine records (context records carried as parts, engine2/native.ts). */
+const NATIVE_PART_TYPES = new Set(["agent-switched", "model-switched", "location-switched", "system", "idle"]);
+
+/**
+ * Every 1.x key path the adapter's record lacks or writes with another value
+ * type ("only in 1.x" / type mismatches), and the key paths it adds (the 2.x
+ * engine's own fields, "only in adapter"). Parts are paired after leaving out
+ * the 2.x-only part types.
+ */
 function shapeDiff(a: unknown, b: unknown, path = "$", out: string[] = []): string[] {
   if (typeOf(a) !== typeOf(b)) {
     out.push(`${path}: ${typeOf(a)} != ${typeOf(b)}`);
     return out;
   }
   if (Array.isArray(a) && Array.isArray(b)) {
+    let right = b;
     if (path.endsWith(".parts")) {
+      const native = b.filter((part) => NATIVE_PART_TYPES.has(String((part as { type?: string }).type)));
+      for (const part of native) out.push(`${path}[type=${(part as { type: string }).type}]: only in adapter`);
+      right = b.filter((part) => !native.includes(part));
       const ta = a.map((part) => (part as { type?: string }).type).join(",");
-      const tb = b.map((part) => (part as { type?: string }).type).join(",");
+      const tb = right.map((part) => (part as { type?: string }).type).join(",");
       if (ta !== tb) out.push(`${path}: part types [${ta}] != [${tb}]`);
     }
-    if (a.length !== b.length) out.push(`${path}: length ${a.length} != ${b.length}`);
-    for (let index = 0; index < Math.min(a.length, b.length); index++) shapeDiff(a[index], b[index], `${path}[${index}]`, out);
+    if (a.length !== right.length) out.push(`${path}: length ${a.length} != ${right.length}`);
+    for (let index = 0; index < Math.min(a.length, right.length); index++) shapeDiff(a[index], right[index], `${path}[${index}]`, out);
     return out;
   }
   if (a && b && typeof a === "object") {
@@ -47,6 +59,13 @@ function shapeDiff(a: unknown, b: unknown, path = "$", out: string[] = []): stri
   }
   return out;
 }
+
+function pick(value: Record<string, unknown>, keys: string[]): Record<string, unknown> {
+  return Object.fromEntries(keys.filter((key) => key in value).map((key) => [key, value[key]]));
+}
+
+/** The 1.x problems of a diff: whatever is not an addition. */
+const regressions = (diff: string[]) => diff.filter((line) => !line.endsWith(": only in adapter"));
 
 function mapTree(tree: Tree, parentModel?: { providerID: string; modelID: string }): { messages: V1Message[]; children: Array<ReturnType<typeof mapTree>> } {
   const session = tree.session as { id: string; parentID?: string; location?: { directory?: string } };
@@ -79,16 +98,17 @@ function compareTrees(v1: Tree, mapped: Mapped, path: string, out: string[]): vo
 
 describe("2.x messages in the 1.x shape (uploaded trace parity)", () => {
   for (const scenario of ["p1", "sub", "nest", "patch", "tools"]) {
-    test(`${scenario}: every message, part and field the 1.x engine wrote, and no other`, () => {
+    test(`${scenario}: every message, part and field the 1.x engine wrote, in its place and shape`, () => {
       const out: string[] = [];
       compareTrees(fixture(`v1-${scenario}`), mapTree(fixture(`v2-${scenario}`)), "root", out);
-      expect(out).toEqual([]);
+      expect(regressions(out)).toEqual([]);
     });
   }
 
   test("p1: the uploaded messages, field for field", () => {
     const [user, first, second, third, answer] = mapTree(fixture("v2-p1")).messages;
-    expect(user!.info).toEqual({
+    // 1.x fields, exactly; the 2.x engine's own fields sit next to them (next test).
+    expect(pick(user!.info, ["id", "sessionID", "role", "time", "summary", "agent", "model"])).toEqual({
       id: "msg_0e0eb02300010Ie6K3lQAqUici",
       sessionID: "ses_f1f14fdf6ffe32y5eLxrDN6MFs",
       role: "user",
@@ -97,18 +117,18 @@ describe("2.x messages in the 1.x shape (uploaded trace parity)", () => {
       agent: "build",
       model: { providerID: "mock", modelID: "mock-model" },
     });
-    expect(user!.parts).toEqual([{
+    expect(user!.parts.map((part) => pick(part, ["id", "sessionID", "messageID", "type", "text"]))).toEqual([{
       id: "prt_0e0eb02300010Ie6K3lQAqUici_u0",
       sessionID: "ses_f1f14fdf6ffe32y5eLxrDN6MFs",
       messageID: "msg_0e0eb02300010Ie6K3lQAqUici",
       type: "text",
       text: "PARITY-1 create the notes file",
     }]);
-    expect(first!.info).toEqual({
+    expect(pick(first!.info, ["id", "sessionID", "role", "time", "parentID", "modelID", "providerID", "mode", "agent", "path", "cost", "tokens", "finish"])).toEqual({
       id: "msg_0e0eb029c001Gb432955hHZq2J",
       sessionID: "ses_f1f14fdf6ffe32y5eLxrDN6MFs",
       role: "assistant",
-      time: { created: 1790479893170, completed: 1790479893443 },
+      time: { created: 1790479893170, completed: 1790479893443, streamed: 1790479893305 },
       parentID: "msg_0e0eb02300010Ie6K3lQAqUici",
       modelID: "mock-model",
       providerID: "mock",
@@ -120,7 +140,7 @@ describe("2.x messages in the 1.x shape (uploaded trace parity)", () => {
       finish: "tool-calls",
     });
     expect(first!.parts.map((part) => part.type)).toEqual(["step-start", "reasoning", "tool", "step-finish"]);
-    expect(first!.parts[2]).toEqual({
+    expect(pick(first!.parts[2]!, ["id", "sessionID", "messageID", "type", "callID", "tool", "state"])).toEqual({
       id: "prt_0e0eb029c001Gb432955hHZq2J_c_call_2_0",
       sessionID: "ses_f1f14fdf6ffe32y5eLxrDN6MFs",
       messageID: "msg_0e0eb029c001Gb432955hHZq2J",
@@ -132,8 +152,9 @@ describe("2.x messages in the 1.x shape (uploaded trace parity)", () => {
         input: { command: "ls -a", description: "List files" },
         output: ".\n..\n",
         title: "List files",
-        metadata: { output: ".\n..\n", truncated: false, exit: 0 },
+        metadata: { output: ".\n..\n", truncated: false, exit: 0, status: "completed" },
         time: { start: 1790479893299, end: 1790479893435 },
+        content: [{ type: "text", text: ".\n..\n" }],
       },
     });
     expect(first!.parts[3]).toEqual({
@@ -148,14 +169,15 @@ describe("2.x messages in the 1.x shape (uploaded trace parity)", () => {
     const write = second!.parts.find((part) => part.type === "tool") as { tool: string; state: { input: unknown; metadata: unknown; title: string } };
     expect(write.tool).toBe("write");
     expect(write.state.input).toEqual({ filePath: "/work/proj/notes.md", content: "# Notes\nline one\n" });
-    expect(write.state.metadata).toEqual({ diagnostics: {}, filepath: "/work/proj/notes.md", exists: false, truncated: false });
+    expect(pick(write.state.metadata as Record<string, unknown>, ["diagnostics", "filepath", "exists", "truncated"])).toEqual({ diagnostics: {}, filepath: "/work/proj/notes.md", exists: false, truncated: false });
     expect(write.state.title).toBe("work/proj/notes.md");
     const edit = third!.parts.find((part) => part.type === "tool") as { tool: string; state: { input: unknown; metadata: Record<string, unknown> } };
     expect(edit.tool).toBe("edit");
     expect(edit.state.input).toEqual({ filePath: "/work/proj/notes.md", oldString: "line one", newString: "line one\nline two" });
-    expect(Object.keys(edit.state.metadata)).toEqual(["diagnostics", "diff", "filediff", "truncated"]);
+    expect(Object.keys(edit.state.metadata)).toEqual(["diagnostics", "diff", "filediff", "truncated", "files"]);
     expect(edit.state.metadata.filediff).toMatchObject({ file: "/work/proj/notes.md", additions: 1, deletions: 0 });
-    expect(answer!.parts.map((part) => part.type)).toEqual(["step-start", "reasoning", "text", "step-finish"]);
+    // The turn's 2.x idle marker (its outcome) closes the last reply as a part of its own type.
+    expect(answer!.parts.map((part) => part.type)).toEqual(["step-start", "reasoning", "text", "step-finish", "idle"]);
     expect(answer!.info.finish).toBe("stop");
   });
 
@@ -187,6 +209,101 @@ describe("2.x messages in the 1.x shape (uploaded trace parity)", () => {
   });
 });
 
+describe("the 2.x engine's own fields ride along (additive)", () => {
+  test("p1: step, tool and turn records keep what 2.x recorded", () => {
+    const [user, first, , third, answer] = mapTree(fixture("v2-p1")).messages;
+    expect(user!.info).toMatchObject({ type: "user", text: "PARITY-1 create the notes file" });
+    expect(first!.info).toMatchObject({
+      type: "assistant",
+      model: { id: "mock-model", providerID: "mock" },
+      rawFinish: "tool_calls",
+      time: { created: 1790479893170, streamed: 1790479893305, completed: 1790479893443 },
+    });
+    const shell = first!.parts[2] as Record<string, any>;
+    expect(shell).toMatchObject({
+      tool: "bash",
+      name: "shell",
+      executed: false,
+      time: { created: 1790479893236, ran: 1790479893299, completed: 1790479893435 },
+      state: { content: [{ type: "text", text: ".\n..\n" }], metadata: { status: "completed" } },
+    });
+    const reasoning = first!.parts[1] as Record<string, any>;
+    expect(reasoning).toMatchObject({ state: { reasoningField: "reasoning_content" }, time: { created: 1790479893188, completed: 1790479893285 } });
+    const edit = third!.parts.find((part) => part.type === "tool") as Record<string, any>;
+    // Native input keys the 1.x input names differently, and the native file list.
+    expect(edit.state.v2).toEqual({ input: { path: "/work/proj/notes.md" } });
+    expect(edit.state.metadata.files[0]).toMatchObject({ file: "notes.md", status: "modified", additions: 1, deletions: 0 });
+    // The turn's idle marker, with its outcome.
+    expect(answer!.parts.at(-1)).toEqual({
+      id: "msg_0e0eb0600001Z6P4VHgDiDmR03",
+      time: { created: 1790479894016 },
+      type: "idle",
+      outcome: "succeeded",
+      sessionID: "ses_f1f14fdf6ffe32y5eLxrDN6MFs",
+      messageID: answer!.info.id,
+    });
+  });
+
+  test("patch: the model switch before the prompt and the native patch file list", () => {
+    const [user, reply] = mapTree(fixture("v2-patch")).messages;
+    expect(user!.parts[0]).toMatchObject({ type: "model-switched", model: { id: "gpt-5.1-mock", providerID: "mock" }, messageID: user!.info.id });
+    const patch = reply!.parts.find((part) => part.type === "tool") as Record<string, any>;
+    expect(patch.name).toBe("patch");
+    expect(patch.state.metadata.files.map((file: Record<string, unknown>) => file.relativePath)).toEqual(["work/proj/notes.md", "work/proj/extra.md"]);
+    expect(patch.state.metadata.v2.files.map((file: Record<string, unknown>) => [file.file, file.status])).toEqual([["notes.md", "modified"], ["extra.md", "added"]]);
+    expect(reply!.info).toMatchObject({ model: { id: "gpt-5.1-mock", providerID: "mock", variant: "default" } });
+    expect(reply!.info.variant).toBeUndefined();
+  });
+
+  test("provider state, snapshots and errors: 1.x values in place, 2.x values next to them", () => {
+    const [message] = v1Messages([{
+      id: "msg_x",
+      type: "assistant",
+      agent: "build",
+      model: { id: "gpt-6-astra", providerID: "omnirush", variant: "default" },
+      snapshot: { start: "aaa", end: "bbb", files: ["math.js"] },
+      providerState: { responseId: "resp_1", serviceTier: "default" },
+      error: { type: "provider.rate-limit", message: "slow down", status: 429 },
+      retry: { attempt: 1, at: 5, error: { type: "provider.rate-limit", message: "slow down" } },
+      content: [
+        { type: "text", text: "hi", state: { itemId: "msg_item", phase: "final_answer" } },
+        {
+          type: "tool", id: "call_1", name: "browser_observe", executed: true, providerState: { itemId: "fc_1" }, providerResultState: { ok: 1 },
+          state: { status: "completed", input: {}, content: [{ type: "text", text: "seen" }, { type: "file", uri: "data:image/png;base64,QUJD", mime: "image/png" }], metadata: {} },
+          time: { created: 1, ran: 2, completed: 3 },
+        },
+      ],
+      finish: "stop",
+      time: { created: 1, completed: 4 },
+    }], { sessionID: "ses_1", directory: "/work", root: "/work" });
+    expect(message!.info).toMatchObject({
+      error: { name: "APIError", data: { message: "slow down", statusCode: 429, isRetryable: true }, type: "provider.rate-limit", message: "slow down", status: 429 },
+      snapshot: { start: "aaa", end: "bbb", files: ["math.js"] },
+      providerState: { responseId: "resp_1", serviceTier: "default" },
+      retry: { attempt: 1 },
+    });
+    const text = message!.parts.find((part) => part.type === "text")!;
+    expect(text).toMatchObject({ metadata: { openai: { itemId: "msg_item", phase: "final_answer" } }, state: { itemId: "msg_item", phase: "final_answer" } });
+    const tool = message!.parts.find((part) => part.type === "tool") as Record<string, any>;
+    expect(tool).toMatchObject({ metadata: { openai: { itemId: "fc_1" } }, providerState: { itemId: "fc_1" }, providerResultState: { ok: 1 }, executed: true });
+    // The screenshot's bytes are in state.attachments once; the native content points at them.
+    expect(tool.state.attachments[0].url).toBe("data:image/png;base64,QUJD");
+    expect(tool.state.content[1]).toEqual({ type: "file", uri: "sameAs:state.attachments[0].url", mime: "image/png" });
+    expect(message!.parts.map((part) => part.type)).toEqual(["step-start", "text", "tool", "step-finish", "patch"]);
+  });
+
+  test("a prompt's image is written once; the native file entry keeps its other fields", () => {
+    const [message] = v1Messages([{
+      id: "msg_u", type: "user", text: "look", time: { created: 1 },
+      files: [{ uri: "data:image/png;base64,QUJD", name: "a.png", mention: { start: 0, end: 4 } }],
+    }], { sessionID: "ses_1" });
+    const file = message!.parts.find((part) => part.type === "file")!;
+    expect(file).toMatchObject({ url: "data:image/png;base64,QUJD", filename: "a.png", name: "a.png", mention: { start: 0, end: 4 } });
+    expect(file.uri).toBeUndefined();
+    expect(message!.info).toMatchObject({ type: "user", text: "look", files: [{ uri: "sameAs:parts[1].url", name: "a.png" }] });
+  });
+});
+
 describe("live events and read-back agree", () => {
   test("parts built from the 2.x stream carry the ids and fields of the same parts read back", async () => {
     const tree = fixture("v2-sub");
@@ -208,7 +325,7 @@ describe("live events and read-back agree", () => {
     }
     const read = mapTree(tree, { providerID: "mock", modelID: "mock-model" });
     const all = [read, ...read.children].flatMap((node) => node.messages.flatMap((message) => message.parts));
-    const assistantParts = all.filter((part) => part.type !== "text" || !String(part.id).endsWith("_u0"));
+    const assistantParts = all.filter((part) => String(part.id).startsWith("prt_") && (part.type !== "text" || !String(part.id).endsWith("_u0")));
     expect(assistantParts.length).toBeGreaterThan(10);
     for (const part of assistantParts) {
       const seen = live.get(String(part.id));

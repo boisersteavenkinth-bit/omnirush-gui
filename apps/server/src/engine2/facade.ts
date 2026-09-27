@@ -194,12 +194,25 @@ export async function startEngineFacade(options: EngineFacadeOptions): Promise<E
     const url = new URL(`${upstream}${path}`);
     if (init.directory) url.searchParams.set("location[directory]", init.directory);
     for (const [key, value] of Object.entries(init.query ?? {})) if (value !== undefined) url.searchParams.set(key, value);
-    const response = await fetchImpl(url, {
+    const send = () => fetchImpl(url, {
       method,
       headers: { authorization: upstreamAuth, ...(init.body !== undefined ? { "content-type": "application/json" } : {}) },
       body: init.body !== undefined ? JSON.stringify(init.body) : undefined,
       signal: init.signal,
     });
+    // Reads are retried through a transient engine failure (a 5xx or a dropped connection).
+    let response: Response | undefined;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        response = await send();
+        if (method !== "GET" || response.status < 500 || attempt >= 2) break;
+        log("engine read failed, retrying", { path, status: response.status });
+        await response.body?.cancel().catch(() => undefined);
+      } catch (error) {
+        if (method !== "GET" || attempt >= 2 || init.signal?.aborted) throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 150 * (attempt + 1)));
+    }
     const text = await response.text();
     let payload: unknown = undefined;
     if (text) {
@@ -289,17 +302,33 @@ export async function startEngineFacade(options: EngineFacadeOptions): Promise<E
     return all;
   };
 
-  // One read of a session's history serves the page reads that follow it for a moment (the
-  // turn observer and the renderer page a long history newest-first, one request per page).
-  const messageCache = new Map<string, { at: number; value: Promise<V1Message[]> }>();
+  // The turn observer and the renderer page a long history newest-first, one request per page.
+  // A history read is reused while the session's newest message is the same completed record
+  // (and the session's busy state is unchanged): one small read instead of the whole history.
+  const messageCache = new Map<string, { key: string; value: V1Message[] }>();
+  const inflight = new Map<string, Promise<V1Message[]>>();
   const sessionMessages = async (sessionID: string): Promise<V1Message[]> => {
-    const cached = messageCache.get(sessionID);
-    if (cached && Date.now() - cached.at < 1_500) return cached.value;
-    const value = readSessionMessages(sessionID);
-    messageCache.set(sessionID, { at: Date.now(), value });
-    if (messageCache.size > 64) messageCache.delete(messageCache.keys().next().value as string);
-    value.catch(() => messageCache.delete(sessionID));
-    return value;
+    const pending = inflight.get(sessionID);
+    if (pending) return pending;
+    const run = (async () => {
+      const newest = await call("GET", `/api/session/${encodeURIComponent(sessionID)}/message`, { query: { order: "desc", limit: "1" } }).catch(() => undefined);
+      const head = arr(newest, "data")[0];
+      const completed = isRecord(head) && (str(head, "type") !== "assistant" || num(record(head, "time"), "completed") !== undefined);
+      const key = isRecord(head) && completed ? `${str(head, "id")}|${translator.statusOf(sessionID)?.type ?? "idle"}` : "";
+      const cached = messageCache.get(sessionID);
+      if (key && cached?.key === key) return cached.value;
+      const value = await readSessionMessages(sessionID);
+      if (key) messageCache.set(sessionID, { key, value });
+      else messageCache.delete(sessionID);
+      if (messageCache.size > 64) messageCache.delete(messageCache.keys().next().value as string);
+      return value;
+    })();
+    inflight.set(sessionID, run);
+    try {
+      return await run;
+    } finally {
+      inflight.delete(sessionID);
+    }
   };
   const readSessionMessages = async (sessionID: string): Promise<V1Message[]> => {
     const info = await sessionInfo(sessionID).catch(() => null);
@@ -1225,6 +1254,7 @@ export async function startEngineFacade(options: EngineFacadeOptions): Promise<E
         return;
       }
       if (error instanceof UpstreamError) {
+        if (error.status >= 500) log("engine request failed", { url: req.url, status: error.status });
         const body = error.body;
         const message = isRecord(body) ? str(body, "message") ?? str(record(body, "data"), "message") ?? JSON.stringify(body) : String(body ?? error.message);
         const name = isRecord(body) ? str(body, "name") ?? str(body, "_tag") ?? str(body, "code") ?? "EngineError" : "EngineError";

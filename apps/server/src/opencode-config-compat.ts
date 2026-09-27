@@ -1,7 +1,9 @@
 /**
- * Pre-flight compatibility check for user-owned OpenCode config files.
+ * Pre-flight compatibility check for user-owned OpenCode config files, for a
+ * 1.x engine (OMNIRUSH_OPENCODE_BIN). The bundled 2.x engine reads both
+ * `permission` and `permissions`, so the server skips this check for it.
  *
- * The bundled engine (OpenCode V1, pinned in constants.json) lowers V2-style
+ * A 1.x engine (OpenCode V1) lowers V2-style
  * config on load (packages/opencode/src/config/v2-compat.ts). Most V2 keys
  * degrade to a "configuration compatibility diagnostic" warning, but a
  * `permissions` key — top-level, or under `agent`/`agents`/`mode.<name>` — is

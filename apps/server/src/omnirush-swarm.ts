@@ -8,9 +8,10 @@
  * coordinating through one `.omnirush/swarm.md` board. Only a swarm gets a
  * board: the procedure is the on-demand omnirush-swarm skill, and the
  * always-on prompt only says when to load it. The bundled engine (opencode
- * 1.18.32) counts sub-agent layers from the main session through `parentID`
- * and refuses the task tool at `subagent_depth`; it has no fan-out limit of
- * its own, so the plugin adds one.
+ * 2.x) counts sub-agent layers from the main session through `parentID` and
+ * refuses the subagent tool (the 1.x task tool) at
+ * `experimental.subagent_depth`; it has no fan-out limit of its own, so the
+ * plugin adds one.
  *
  * Kept dependency-free: the engine plugin bundle imports it.
  */

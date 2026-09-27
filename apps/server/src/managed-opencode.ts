@@ -248,6 +248,7 @@ async function startManagedEngine2Server(
       v1ConfigPath: launch.v1ConfigPath,
       writeEngineConfig: launch.writeEngineConfig,
       plugins: launch.plugins,
+      log: (message, attributes) => console.warn(`[engine-adapter] ${message}`, attributes ? JSON.stringify(attributes) : ""),
     });
   } catch (error) {
     await processLifecycle.close();
