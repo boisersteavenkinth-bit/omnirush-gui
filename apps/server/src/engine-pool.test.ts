@@ -1219,3 +1219,73 @@ describe("engine event stream bounds", () => {
     }, 10_000)).toBe(true);
   });
 });
+
+/** A pool whose primary re-reads its config while running, as the 2.x engine does. */
+async function createLivePool(fixture: Fixture): Promise<{ pool: EnginePool; refreshes: () => number }> {
+  const primary = await fixture.spawnPrimary();
+  let refreshes = 0;
+  const pool = new EnginePool({ config: fixture.config, template: fixture.template, hooks: fixture.hooks });
+  setEnginePoolForConfig(fixture.config, pool);
+  cleanups.push(async () => {
+    clearEnginePoolForConfig(fixture.config);
+    await pool.disposeAll().catch(() => undefined);
+  });
+  pool.adoptPrimary({
+    handle: { ...primary, refreshConfig: async () => { refreshes += 1; } },
+    fingerprint: await computeEngineConfigFingerprint(fixture.template),
+    registryId: null,
+    trustedIdentity: null,
+  });
+  fixture.config.opencodeBaseUrl = primary.url;
+  fixture.config.workspaces[0]!.baseUrl = primary.url;
+  return { pool, refreshes: () => refreshes };
+}
+
+describe("engine pool: config applied live", () => {
+  test("an engine that re-reads its config gets the change with no restart while a turn runs, and a later reload does not redo it", async () => {
+    const fixture = await createFixture();
+    const { pool, refreshes } = await createLivePool(fixture);
+    const primaryUrl = pool.primaryUrl();
+    await fixture.setBusy(portOf(primaryUrl ?? "http://127.0.0.1:0"), ["ses_live"]);
+
+    const applied = await pool.applyConfigLive(() => fixture.setRuntimeConfig(JSON.stringify({ catalog: 2 })));
+
+    expect(applied).toBe(true);
+    expect(refreshes()).toBe(1);
+    expect(fixture.hookCalls.reloadInPlace).toBe(0);
+    expect(pool.snapshot().generations).toHaveLength(1);
+    expect(pool.primaryUrl()).toBe(primaryUrl);
+    // The engine already runs the new config: even a forced standby request has nothing to do.
+    expect(await pool.requestRollover({ reason: "omnirush_model_catalog", workspace: fixture.workspace, forceStandby: true }))
+      .toEqual({ action: "skipped", reason: "unchanged" });
+    expect(pool.snapshot().generations).toHaveLength(1);
+  });
+
+  test("a change that was already pending is not marked applied by a live apply", async () => {
+    const fixture = await createFixture();
+    const { pool } = await createLivePool(fixture);
+    // Something the engine has not been brought onto yet.
+    await fixture.setRuntimeConfig(JSON.stringify({ plugin: ["other"] }));
+
+    expect(await pool.applyConfigLive(() => fixture.setRuntimeConfig(JSON.stringify({ plugin: ["other"], catalog: 2 })))).toBe(true);
+
+    expect(await pool.requestRollover({ reason: "config_changed", workspace: fixture.workspace }))
+      .toEqual({ action: "reloaded_in_place" });
+  });
+
+  test("an engine that only reads its config at build time (1.x) still gets the write, and the caller reloads", async () => {
+    const fixture = await createFixture();
+    const { pool } = await createPool(fixture);
+    let writes = 0;
+
+    const applied = await pool.applyConfigLive(async () => {
+      writes += 1;
+      await fixture.setRuntimeConfig(JSON.stringify({ catalog: 2 }));
+    });
+
+    expect(applied).toBe(false);
+    expect(writes).toBe(1);
+    expect(await pool.requestRollover({ reason: "omnirush_model_catalog", workspace: fixture.workspace }))
+      .toEqual({ action: "reloaded_in_place" });
+  });
+});

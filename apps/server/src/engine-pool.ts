@@ -736,6 +736,37 @@ export class EnginePool {
   }
 
   /**
+   * Apply a runtime config change without restarting or reloading the engine,
+   * when the serving engine re-reads its config while running (the 2.x engine
+   * watches its config file and applies provider and model changes live; a
+   * run in flight keeps going). `write` rewrites the runtime config file and
+   * always runs exactly once. Returns false, after the write, when the change
+   * cannot be applied live: a 1.x engine, or a rollover in flight (the
+   * standby reads the new file at spawn). The caller then reloads as before.
+   *
+   * When the primary was on the config from just before `write`, it is
+   * recorded as on the new one, so a later reload request with nothing else
+   * changed does not spawn a replacement for a change the engine already has.
+   */
+  async applyConfigLive(write: () => Promise<void>): Promise<boolean> {
+    const primary = this.generations.find((entry) => entry.status === "primary") ?? null;
+    const refresh = primary?.handle.refreshConfig;
+    if (this.disposed || this.inFlight || !primary || !refresh || !primary.handle.isAlive()) {
+      await write();
+      return false;
+    }
+    const before = await this.currentFingerprint();
+    await write();
+    const after = await this.currentFingerprint();
+    await refresh();
+    if (primary.fingerprint === before) primary.fingerprint = after;
+    this.hooks.logger?.log("info", "Engine config applied live (no restart).", {
+      "engine.config.changed": before !== after,
+    });
+    return true;
+  }
+
+  /**
    * Bring the engine onto current config. Idle engines reload in place; busy
    * ones roll over to a standby. Serialized: concurrent requests collapse into
    * one pending rollover so a burst never stacks processes.

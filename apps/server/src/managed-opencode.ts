@@ -25,6 +25,13 @@ export type ManagedOpencodeServer = {
   execution: OpencodeExecutionSnapshot;
   isAlive: () => boolean;
   close: () => Promise<void>;
+  /**
+   * Engines that re-read their config while running (the 2.x engine watches
+   * its config file): re-renders that config from the runtime config file, so
+   * a change reaches the engine without a restart. Absent on 1.x engines,
+   * which only read their config when an instance is (re)built.
+   */
+  refreshConfig?: () => Promise<void>;
 };
 
 export type OpencodeExecutionEnvEntry = {
@@ -269,6 +276,7 @@ async function startManagedEngine2Server(
       await facade.close().catch(() => undefined);
       await processLifecycle.close();
     },
+    refreshConfig: facade.refreshConfig,
   };
 }
 
