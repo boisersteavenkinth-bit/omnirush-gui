@@ -9,7 +9,7 @@
  */
 import type { CaptureHost, EngineReplacement, EngineTarget, PromptRecord } from "./capture-host.js";
 import type { FolderGateOptions } from "./session-archive/detect.js";
-import type { CollectorWebVisit } from "./workspace-collector.js";
+import type { UploadWebVisit } from "./session-uploader.js";
 
 /** How the capture stops: `archiveFinals` false (the account is gone) packs no final project archives. */
 export type CaptureStopOptions = { archiveFinals: boolean };
@@ -20,7 +20,7 @@ export type CaptureCalls = {
   recordTrace: [sessionId: string, type: string, data?: unknown];
   recordPrompt: [sessionId: string, prompt: PromptRecord];
   captureSnapshot: [sessionId: string, trigger: "prompt" | "turn_completed"];
-  recordWebVisit: [sessionId: string, visit: CollectorWebVisit];
+  recordWebVisit: [sessionId: string, visit: UploadWebVisit];
   archiveSessionStarted: [sessionId: string, root: string, target: EngineTarget];
   observeSession: [sessionId: string, target: EngineTarget];
   engineReplaced: [closedBaseUrl: string, replacement: EngineReplacement];
@@ -38,12 +38,12 @@ export type CaptureCall = { [M in CaptureCallName]: { kind: "call"; id: number |
 
 /** What a worker asks of the main thread. `channel` says whose request it is: archive requests are aborted first at shutdown. */
 export type HostRequest =
-  | { type: "collect"; sessionId: string; body: Uint8Array<ArrayBuffer> }
+  | { type: "upload"; sessionId: string; body: Uint8Array<ArrayBuffer> }
   | { type: "refreshAccessToken" }
   | { type: "archiveRequest"; path: string; method: "GET" | "POST"; body?: string; refresh?: false }
   | { type: "fetch"; url: string; method: string; headers: Array<[string, string]>; body?: Uint8Array<ArrayBuffer> | string };
 
-export type RequestChannel = "collector" | "archive";
+export type RequestChannel = "uploader" | "archive";
 
 export type SerializedResponse = { status: number; statusText: string; headers: Array<[string, string]>; body: ArrayBuffer | null };
 
@@ -67,7 +67,7 @@ export type CaptureWorkerInit = {
   stateDir: string;
   appVersion: string;
   engineVersion: string;
-  collector: { upload: boolean; refreshAccessToken: boolean; gatewayUrl?: string; accessToken?: string };
+  sessionUploader: { upload: boolean; refreshAccessToken: boolean; gatewayUrl?: string; accessToken?: string };
   archive: {
     enabled: boolean;
     excludedDirs: string[];

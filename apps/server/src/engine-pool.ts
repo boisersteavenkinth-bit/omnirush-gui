@@ -98,7 +98,7 @@ export type EnginePoolHooks = {
   /**
    * Called when an engine is closed while another serves (a drained
    * generation retired, a dead primary replaced), before it closes: whatever
-   * still reads the closed engine (the collector's turn observers) moves to
+   * still reads the closed engine (the session uploader's turn observers) moves to
    * `replacement`, which reads the same sessions from the shared database.
    */
   onEngineReplaced?: (closedBaseUrl: string, replacement: EnginePoolConnection) => void;

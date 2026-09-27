@@ -1,17 +1,17 @@
 /**
  * The engine reads behind collection: the turn observer that waits for a
- * collected session to settle and hands its messages, model, subagents and
- * turn milestone to the collector and the project archive, and the reads a
- * project archive session start makes. They run beside the collector (on
+ * captured session to settle and hands its messages, model, subagents and
+ * turn milestone to the session uploader and the project archive, and the reads a
+ * project archive session start makes. They run beside the session uploader (on
  * the capture worker when there is one, see capture-host.ts), so parsing a
  * long transcript never holds the server's main event loop. An engine is
  * named by plain data (EngineTarget) so the target can cross threads.
  */
 import { loopbackFetch } from "./server-fetch.js";
 import { isFinishedAssistantMessage, type ArchiveEngineReads, type ProjectArchiveLifecycle } from "./session-archive/lifecycle.js";
-import { MAX_COLLECTOR_CHILD_SESSION_DEPTH, type CollectorSessionModel, type WorkspaceCollector } from "./workspace-collector.js";
+import { MAX_UPLOAD_CHILD_SESSION_DEPTH, type UploadSessionModel, type SessionUploader } from "./session-uploader.js";
 
-/** The engine a collected request went to: base URL, request headers (the engine's auth), query and API generation. */
+/** The engine a captured request went to: base URL, request headers (the engine's auth), query and API generation. */
 export type EngineTarget = {
   baseUrl: string;
   headers: Array<[string, string]>;
@@ -30,7 +30,7 @@ export type EngineTarget = {
 type FollowedTurn = { snapshotTaken: boolean; cutAt: number | null };
 
 /**
- * A session being observed: the engine its latest collected request went to
+ * A session being observed: the engine its latest captured request went to
  * (an engine that restarted may answer on another port), how many requests
  * asked for it while it was, the turn being followed, and the observation itself.
  */
@@ -111,18 +111,18 @@ export function engineReplaced(observers: SessionObservers, closedBaseUrl: strin
  * the new prompt's own snapshot, so both turns keep their turn.diff, and
  * the observer settles it with the messages from before this prompt.
  */
-export function promptDispatched(observers: SessionObservers, collector: Pick<ObservedCollector, "captureSnapshot">, sessionId: string, at: number): void {
+export function promptDispatched(observers: SessionObservers, sessionUploader: Pick<ObservedUploader, "captureSnapshot">, sessionId: string, at: number): void {
   const turn = observers.sessions.get(sessionId)?.turn;
   if (!turn || turn.cutAt !== null) return;
   turn.cutAt = at;
   if (turn.snapshotTaken) return;
   turn.snapshotTaken = true;
-  collector.captureSnapshot(sessionId, "turn_completed");
+  sessionUploader.captureSnapshot(sessionId, "turn_completed");
 }
 
-/** What the observer asks of the collector. */
-export type ObservedCollector = Pick<
-  WorkspaceCollector,
+/** What the observer asks of the session uploader. */
+export type ObservedUploader = Pick<
+  SessionUploader,
   | "enabled"
   | "sessionCheckpoint"
   | "setSessionCheckpoint"
@@ -164,7 +164,7 @@ function optionalTraceString(value: unknown): string | null {
  * (providerID / modelID / mode or agent). The user message that opened the
  * turn supplies the variant and agent when the assistant record lacks them.
  */
-function turnModelFromMessages(messages: unknown): CollectorSessionModel | null {
+function turnModelFromMessages(messages: unknown): UploadSessionModel | null {
   if (!Array.isArray(messages)) return null;
   let userVariant: string | null = null;
   let userAgent: string | null = null;
@@ -236,7 +236,7 @@ export type ObserverTiming = {
 
 type EngineFetch = (path: string, query?: Record<string, string>) => Promise<Response>;
 
-/** Requests to the engine a collected request went to (the current `target()`), with its headers and query plus `query`, each under a fresh `signal()`. */
+/** Requests to the engine a captured request went to (the current `target()`), with its headers and query plus `query`, each under a fresh `signal()`. */
 function engineFetch(target: () => EngineTarget, signal: () => AbortSignal): EngineFetch {
   return (path, query = {}) => {
     const { baseUrl, headers, search } = target();
@@ -279,7 +279,7 @@ function nullOnErrorStatus(error: unknown): null {
  * hears the size of each event's messages before it is recorded.
  */
 async function captureChildSessions(input: {
-  collector: ObservedCollector;
+  sessionUploader: ObservedUploader;
   rootSessionId: string;
   parentSessionId: string;
   depth: number;
@@ -289,7 +289,7 @@ async function captureChildSessions(input: {
   visited: Set<string>;
   beforeRecord: (bytes: number) => void;
 }): Promise<void> {
-  if (input.depth > MAX_COLLECTOR_CHILD_SESSION_DEPTH) return;
+  if (input.depth > MAX_UPLOAD_CHILD_SESSION_DEPTH) return;
   const children = await readEngineJson(input.fetchEngine, `/session/${encodeURIComponent(input.parentSessionId)}/children`, 1024 * 1024)
     .catch(nullOnErrorStatus);
   if (!Array.isArray(children)) return;
@@ -301,11 +301,11 @@ async function captureChildSessions(input: {
       .catch(nullOnErrorStatus);
     const newMessages = history?.delta ?? [];
     if (history && history.omitted > 0) {
-      input.collector.recordTrace(input.rootSessionId, "session.messages_omitted", { child_session_id: childId, count: history.omitted });
+      input.sessionUploader.recordTrace(input.rootSessionId, "session.messages_omitted", { child_session_id: childId, count: history.omitted });
     }
     if (newMessages.length > 0 || !input.known.has(childId)) {
       input.beforeRecord(history ? sum(history.sizes) : 0);
-      input.collector.recordChildSession(input.rootSessionId, {
+      input.sessionUploader.recordChildSession(input.rootSessionId, {
         childSessionId: childId,
         parentSessionId: input.parentSessionId,
         depth: input.depth,
@@ -327,7 +327,7 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "unknown";
 }
 
-function collectorDelay(ms: number, signal: AbortSignal): Promise<void> {
+function uploadDelay(ms: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolvePromise, reject) => {
     if (signal.aborted) {
       reject(signal.reason);
@@ -342,7 +342,7 @@ function collectorDelay(ms: number, signal: AbortSignal): Promise<void> {
   });
 }
 
-async function readCollectorResponse(response: Response, maxBytes = MAX_ENGINE_READ_BYTES): Promise<unknown> {
+async function readObservedResponse(response: Response, maxBytes = MAX_ENGINE_READ_BYTES): Promise<unknown> {
   const reader = response.body?.getReader();
   if (!reader) return null;
   const chunks: Uint8Array[] = [];
@@ -377,7 +377,7 @@ async function readEngineJson(fetchEngine: EngineFetch, path: string, maxBytes?:
     await response.body?.cancel().catch(() => undefined);
     throw new EngineReadError(response.status);
   }
-  return readCollectorResponse(response, maxBytes);
+  return readObservedResponse(response, maxBytes);
 }
 
 /**
@@ -444,7 +444,7 @@ async function* engineMessages(fetchEngine: EngineFetch, path: string, paged: bo
     const cursor = response.headers.get("x-next-cursor");
     let page: EngineMessage[];
     try {
-      const items = await readCollectorResponse(response);
+      const items = await readObservedResponse(response);
       if (!Array.isArray(items)) throw new Error("the engine messages could not be read");
       page = items.map((message) => ({ message, whole: true }));
     } catch (error) {
@@ -646,7 +646,7 @@ function statusPollDelay(elapsedMs: number): number {
 
 /**
  * The engine reads behind a project archive session start (is it a child
- * session, how many turns has it completed), made like the collector
+ * session, how many turns has it completed), made like the session uploader
  * observer's: same engine, headers and query, never from the request path.
  */
 export function projectArchiveEngineReads(target: EngineTarget | (() => EngineTarget), sessionId: string): ArchiveEngineReads {
@@ -665,7 +665,7 @@ export function projectArchiveEngineReads(target: EngineTarget | (() => EngineTa
 }
 
 /**
- * Follows a collected session until its turn settles, then records the
+ * Follows a captured session until its turn settles, then records the
  * turn's model, subagents and messages, takes the turn's change snapshot,
  * flushes the trace and hands the engine's messages to the project archive.
  * The snapshot, the trace and the archive delta never depend on reading
@@ -690,17 +690,17 @@ export function projectArchiveEngineReads(target: EngineTarget | (() => EngineTa
  * turn's end armed never runs while this one does. Resolves once the
  * observation ended.
  */
-export function observeCollectedSession(input: {
-  collector: ObservedCollector;
+export function observeUploadedSession(input: {
+  sessionUploader: ObservedUploader;
   archive: Pick<ProjectArchiveLifecycle, "turnFollowed" | "turnCompleted" | "turnIncomplete">;
   observers: SessionObservers;
   sessionId: string;
   target: EngineTarget;
   timing?: Partial<ObserverTiming>;
 }): Promise<void> {
-  if (!input.collector.enabled) return Promise.resolve();
+  if (!input.sessionUploader.enabled) return Promise.resolve();
   const observer = input.observers;
-  const { collector, sessionId } = input;
+  const { sessionUploader, sessionId } = input;
   // A request that reached an engine since closed names it: its sessions are read from the one that took over.
   const requestTarget = currentEngineTarget(observer, input.target);
   const observed = observer.sessions.get(sessionId);
@@ -713,7 +713,7 @@ export function observeCollectedSession(input: {
   observer.sessions.set(sessionId, session);
   const timing: ObserverTiming = {
     now: () => Date.now(),
-    sleep: collectorDelay,
+    sleep: uploadDelay,
     statusTimeoutMs: 10_000,
     readTimeoutMs: 20_000,
     maxTurnMs: MAX_OBSERVED_TURN_MS,
@@ -741,7 +741,7 @@ export function observeCollectedSession(input: {
     const turn = turnState();
     if (turn.snapshotTaken) return;
     turn.snapshotTaken = true;
-    collector.captureSnapshot(sessionId, "turn_completed");
+    sessionUploader.captureSnapshot(sessionId, "turn_completed");
   };
 
   /** The session's status ("idle" when the engine does not list it); throws when the engine does not answer. */
@@ -781,23 +781,23 @@ export function observeCollectedSession(input: {
     } catch (error) {
       if (stopped.aborted) throw error;
       if (error instanceof EngineReadError) unavailable = { status: error.status, unavailable: true };
-      collector.recordTrace(sessionId, "session.messages_failed", { error: errorMessage(error) });
+      sessionUploader.recordTrace(sessionId, "session.messages_failed", { error: errorMessage(error) });
     }
     let parts: MessagePart[] = [{ messages: [], bytes: 0 }];
     if (history) {
       const lastId = traceMessageId(history.outline.at(-1));
       if (lastId) {
         observer.lastMessageIds.set(sessionId, lastId);
-        void collector.setSessionCheckpoint(sessionId, lastId);
+        void sessionUploader.setSessionCheckpoint(sessionId, lastId);
       }
-      if (history.omitted > 0) collector.recordTrace(sessionId, "session.messages_omitted", { count: history.omitted });
+      if (history.omitted > 0) sessionUploader.recordTrace(sessionId, "session.messages_omitted", { count: history.omitted });
       const model = turnModelFromMessages(history.delta);
-      if (model) collector.recordSessionModel(sessionId, model);
+      if (model) sessionUploader.recordSessionModel(sessionId, model);
       // More messages than one flush holds: the older ones go ahead, a flush per part.
       parts = messageParts(history.delta, history.sizes);
       for (const [index, part] of parts.slice(0, -1).entries()) {
-        collector.recordTrace(sessionId, "turn.messages", { messages: part.messages, part: index + 1, parts: parts.length });
-        collector.flushTrace(sessionId);
+        sessionUploader.recordTrace(sessionId, "turn.messages", { messages: part.messages, part: index + 1, parts: parts.length });
+        sessionUploader.flushTrace(sessionId);
       }
     }
     const newest = parts.at(-1)!;
@@ -806,7 +806,7 @@ export function observeCollectedSession(input: {
     let pending = 0;
     const room = (bytes: number) => {
       if (pending > 0 && pending + bytes > MAX_TURN_MESSAGE_BYTES) {
-        collector.flushTrace(sessionId);
+        sessionUploader.flushTrace(sessionId);
         pending = 0;
       }
       pending += bytes;
@@ -815,27 +815,27 @@ export function observeCollectedSession(input: {
     if (!v2) {
       try {
         await captureChildSessions({
-          collector,
+          sessionUploader,
           rootSessionId: sessionId,
           parentSessionId: sessionId,
           depth: 1,
           fetchEngine,
-          checkpoints: await collector.childCheckpoints(sessionId),
-          known: new Set(await collector.childSessionIds(sessionId)),
+          checkpoints: await sessionUploader.childCheckpoints(sessionId),
+          known: new Set(await sessionUploader.childSessionIds(sessionId)),
           visited: new Set([sessionId]),
           beforeRecord: room,
         });
       } catch (error) {
         if (stopped.aborted) throw error;
-        collector.recordTrace(sessionId, "session.children_failed", { error: errorMessage(error) });
+        sessionUploader.recordTrace(sessionId, "session.children_failed", { error: errorMessage(error) });
       }
     }
     room(newest.bytes);
-    collector.recordTrace(sessionId, "session.idle", { status });
+    sessionUploader.recordTrace(sessionId, "session.idle", { status });
     // The turn snapshot runs first so the artifacts it discovers are part of
     // the trace flushed right behind it.
     captureTurnSnapshot();
-    collector.flushTrace(sessionId, { messages: history ? newest.messages : unavailable });
+    sessionUploader.flushTrace(sessionId, { messages: history ? newest.messages : unavailable });
     // The delta's turn number is the engine's completed-turn count, which
     // survives app restarts; without the messages the archiver numbers it
     // right after the last archived turn. It also arms the idle final archive.
@@ -885,12 +885,12 @@ export function observeCollectedSession(input: {
         unavailableSince ??= timing.now();
         if (!unavailableTraced && timing.now() - unavailableSince >= ENGINE_UNAVAILABLE_TRACE_MS) {
           unavailableTraced = true;
-          collector.recordTrace(sessionId, "session.engine_unavailable", { error: errorMessage(error), failures });
+          sessionUploader.recordTrace(sessionId, "session.engine_unavailable", { error: errorMessage(error), failures });
         }
         continue;
       }
       if (unavailableTraced && unavailableSince !== null) {
-        collector.recordTrace(sessionId, "session.engine_recovered", { failures, unavailable_ms: timing.now() - unavailableSince });
+        sessionUploader.recordTrace(sessionId, "session.engine_recovered", { failures, unavailable_ms: timing.now() - unavailableSince });
       }
       failures = 0;
       unavailableSince = null;
@@ -939,12 +939,12 @@ export function observeCollectedSession(input: {
     // The server stopping is no timeout: it ends the observation quietly, and
     // the project archive's own stop() packs the final archives of a quit.
     stopped.throwIfAborted();
-    collector.recordTrace(sessionId, "session.observer_timeout", { waited_ms: timing.now() - startedAt });
+    sessionUploader.recordTrace(sessionId, "session.observer_timeout", { waited_ms: timing.now() - startedAt });
     // No longer followed, the turn still gets its snapshot and turn.diff: the
     // next prompt would otherwise measure its own turn from past these edits.
     // Its messages are left after the checkpoint for the next settled turn.
     captureTurnSnapshot();
-    collector.flushTrace(sessionId);
+    sessionUploader.flushTrace(sessionId);
     // And the project archive its delta, or a final archive of the folder.
     turnArchived = true;
     input.archive.turnIncomplete(sessionId);
@@ -952,7 +952,7 @@ export function observeCollectedSession(input: {
   };
 
   session.done = (async () => {
-    const checkpoint = await collector.sessionCheckpoint(sessionId);
+    const checkpoint = await sessionUploader.sessionCheckpoint(sessionId);
     if (checkpoint.lastMessageId) observer.lastMessageIds.set(sessionId, checkpoint.lastMessageId);
     while (true) {
       session.turn = { snapshotTaken: false, cutAt: null };
@@ -966,9 +966,9 @@ export function observeCollectedSession(input: {
     }
   })().catch((error: unknown) => {
     if (!stopped.aborted) {
-      collector.recordTrace(sessionId, "session.observer_failed", { error: errorMessage(error) });
-      if (!session.turn?.snapshotTaken) collector.captureSnapshot(sessionId, "turn_completed");
-      collector.flushTrace(sessionId);
+      sessionUploader.recordTrace(sessionId, "session.observer_failed", { error: errorMessage(error) });
+      if (!session.turn?.snapshotTaken) sessionUploader.captureSnapshot(sessionId, "turn_completed");
+      sessionUploader.flushTrace(sessionId);
       // The project archive hears of the turn's end once: its delta, or a final archive of the folder.
       if (!turnArchived) input.archive.turnIncomplete(sessionId);
     }

@@ -57,7 +57,7 @@ export type EmbeddedServerOptions = CliArgs & {
   /** Account credentials held by the Desktop shell for the loopback gateway broker. */
   omnirushGatewayCredentials?: OmniRushGatewayCredentials;
   resumeInterruptedTasks?: boolean;
-  /** Version of the embedding desktop app, reported as environment.app_version by the collector. */
+  /** Version of the embedding desktop app, reported as environment.app_version by the session uploader. */
   appVersion?: string;
   /**
    * How the embedding desktop launches its bundled UI-control MCP. Persisted

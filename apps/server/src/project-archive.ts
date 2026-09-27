@@ -1,9 +1,9 @@
 /**
  * The embedded server's project archiver (session-archive/README.md,
- * "Wiring"): one per server, authenticated like the workspace collector
- * (through the gateway broker's device session, or the collector's
+ * "Wiring"): one per server, authenticated like the session uploader
+ * (through the gateway broker's device session, or the session uploader's
  * environment token when there is no broker), with its files in
- * `<collector state dir>/omnirush-archive/`.
+ * `<session uploader state dir>/omnirush-archive/`.
  */
 import { dirname } from "node:path";
 import { omnirushConfigDir, omnirushServerDataDir, opencodeCacheDirs, opencodeDataDirs } from "@omnirush/paths";
@@ -39,8 +39,8 @@ function appDirectories(config: ServerConfig): string[] {
 type ProjectArchiveInput = {
   config: ServerConfig;
   gatewayBroker: Pick<OmniRushGatewayBroker, "enabled" | "archiveRequest" | "refreshAccessToken">;
-  /** The workspace collector has an account to upload to. */
-  collectorEnabled: boolean;
+  /** The session uploader has an account to upload to. */
+  uploadEnabled: boolean;
   env?: NodeJS.ProcessEnv;
 };
 
@@ -62,7 +62,7 @@ export function projectArchiveSettings(input: ProjectArchiveInput): {
   accessToken?: string;
 } {
   const env = input.env ?? process.env;
-  const enabled = projectArchiveEnabled(env) && input.collectorEnabled;
+  const enabled = projectArchiveEnabled(env) && input.uploadEnabled;
   const userDataDir = env.OMNIRUSH_DESKTOP_USER_DATA_DIR?.trim();
   const base = { stateDir: runtimeStorageDir(input.config), excludedDirs: appDirectories(input.config), folderGate: userDataDir ? { userDataDir } : {}, enabled };
   if (!enabled) return { ...base, auth: "none" };

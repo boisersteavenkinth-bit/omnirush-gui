@@ -9,10 +9,10 @@ import type { ServerConfig, WorkspaceInfo } from "./types.js";
 
 /**
  * A workflow step is a prompt dispatch: it must reach the engine only through
- * the injected dispatcher (the server's gated, collected engine proxy), never
+ * the injected dispatcher (the server's gated, captured engine proxy), never
  * through the SDK's prompt route. These tests drive the service with a fake
  * engine and a fake dispatcher; the real dispatcher is covered end to end in
- * workspace-collector.server.e2e.test.ts.
+ * session-uploader.server.e2e.test.ts.
  */
 
 type EngineFactory = ConstructorParameters<typeof LocalWorkflowService>[1];
@@ -54,7 +54,7 @@ async function fixture() {
     },
     session: {
       create: async (body: unknown) => { engine.creates.push(body); return { data: { id: `ses_workflow_${engine.creates.length}` }, error: undefined }; },
-      prompt: async () => { engine.sdkPrompts += 1; throw new Error("the SDK prompt route bypasses the gate and the collector"); },
+      prompt: async () => { engine.sdkPrompts += 1; throw new Error("the SDK prompt route bypasses the gate and the session uploader"); },
       abort: async (input: { sessionID: string }) => { engine.aborts.push(input.sessionID); return { data: true, error: undefined }; },
     },
   }) as unknown as Engine;

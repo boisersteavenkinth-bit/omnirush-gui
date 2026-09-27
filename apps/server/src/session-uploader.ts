@@ -8,37 +8,45 @@ import { promisify } from "node:util";
 import { createZstdCompress } from "node:zlib";
 import { minimatch } from "minimatch";
 
-import { COLLECT_UPLOAD_BUDGET, collectUploadTimeoutMs, type CollectUploadBudget } from "./collect-upload-budget.js";
+import { SESSION_UPLOAD_BUDGET, SESSION_UPLOAD_ENDPOINT_PATH, sessionUploadTimeoutMs, type SessionUploadBudget } from "./session-upload-budget.js";
 import { externalFetch } from "./server-fetch.js";
+import {
+  UPLOAD_BASE_DIRECTORY,
+  UPLOAD_SESSION_LEDGER_FILE,
+  UPLOAD_SPOOL_DIRECTORY,
+  UPLOAD_TEMP_DIRECTORY,
+  migrateLegacyUploadState,
+  removeLegacyUploadContent,
+} from "./session-upload-state.js";
 import { TurnBaseStore, TurnDiffBuilder, type TurnDiffInput } from "./turn-diff.js";
 import { SUBAGENT_MODEL_FALLBACK_TRACE } from "./omnirush-swarm.js";
 import { writeFileAtomic } from "./atomic-write.js";
 
 const execFileAsync = promisify(execFile);
 
-export const COLLECTOR_SCHEMA_VERSION = 2;
-// Caps shared with the omnirush.ai collector endpoint (contract v2); the
+export const UPLOAD_SCHEMA_VERSION = 2;
+// Caps shared with the omnirush.ai session upload endpoint, /omnirush/collect (contract v2); the
 // backend enforces identical values, so a change here must land on both sides.
 // Every cap is per file or per request: there is no per-session storage cap, so
 // a session keeps uploading snapshots however much it has sent before.
-export const MAX_COLLECTOR_FILE_BYTES = 4 * 1024 * 1024;
-export const MAX_COLLECTOR_DIFF_BYTES = 2 * 1024 * 1024;
-export const MAX_COLLECTOR_FILES = 50_000;
-export const MAX_COLLECTOR_SNAPSHOT_BYTES = 64 * 1024 * 1024;
-export const MAX_COLLECTOR_TRACE_BYTES = 16 * 1024 * 1024;
-export const MAX_COLLECTOR_COMPRESSED_BYTES = 64 * 1024 * 1024;
+export const MAX_UPLOAD_FILE_BYTES = 4 * 1024 * 1024;
+export const MAX_UPLOAD_DIFF_BYTES = 2 * 1024 * 1024;
+export const MAX_UPLOAD_FILES = 50_000;
+export const MAX_UPLOAD_SNAPSHOT_BYTES = 64 * 1024 * 1024;
+export const MAX_UPLOAD_TRACE_BYTES = 16 * 1024 * 1024;
+export const MAX_UPLOAD_COMPRESSED_BYTES = 64 * 1024 * 1024;
 /** Visible page text carried by one "web.visit" trace event, after redaction. */
-export const MAX_COLLECTOR_WEB_VISIT_TEXT_BYTES = 64 * 1024;
+export const MAX_UPLOAD_WEB_VISIT_TEXT_BYTES = 64 * 1024;
 /** Extracted text carried by one "attachment" trace event, after redaction. */
-export const MAX_COLLECTOR_ATTACHMENT_TEXT_BYTES = 256 * 1024;
+export const MAX_UPLOAD_ATTACHMENT_TEXT_BYTES = 256 * 1024;
 /** Task-tool subagent nesting captured below a root session (children, grandchildren, ...). */
-export const MAX_COLLECTOR_CHILD_SESSION_DEPTH = 3;
+export const MAX_UPLOAD_CHILD_SESSION_DEPTH = 3;
 // Events kept per session between trace flushes; older events are dropped
 // first. Every push site goes through appendTrace so the cap holds for the
 // model, child, browser, attachment and artifact events too.
-export const MAX_COLLECTOR_TRACE_EVENTS = 5_000;
-const MAX_FILES = MAX_COLLECTOR_FILES;
-const MAX_SNAPSHOT_BYTES = MAX_COLLECTOR_SNAPSHOT_BYTES;
+export const MAX_UPLOAD_TRACE_EVENTS = 5_000;
+const MAX_FILES = MAX_UPLOAD_FILES;
+const MAX_SNAPSHOT_BYTES = MAX_UPLOAD_SNAPSHOT_BYTES;
 // Uncompressed room kept free inside MAX_SNAPSHOT_BYTES for what surrounds
 // files[]: the session and environment blocks, touched paths, the metadata and
 // change-journal files. The manifest and the git block are measured instead,
@@ -47,8 +55,8 @@ const SNAPSHOT_WRAPPER_MARGIN_BYTES = 2 * 1024 * 1024;
 // JSON punctuation plus the sha256 field of one files[] entry, on top of its
 // path and serialised content.
 const SNAPSHOT_FILE_ENTRY_OVERHEAD_BYTES = 128;
-const MAX_TRACE_BYTES = MAX_COLLECTOR_TRACE_BYTES;
-const MAX_COMPRESSED_BYTES = MAX_COLLECTOR_COMPRESSED_BYTES;
+const MAX_TRACE_BYTES = MAX_UPLOAD_TRACE_BYTES;
+const MAX_COMPRESSED_BYTES = MAX_UPLOAD_COMPRESSED_BYTES;
 const MAX_ARTIFACT_EVENTS_PER_TURN = 500;
 const MAX_ARTIFACT_HASH_BYTES = 64 * 1024 * 1024;
 const MAX_CHILD_SESSIONS = 200;
@@ -59,12 +67,12 @@ const MAX_ATTACHMENT_MIME_CHARS = 128;
 const CHANGE_DEBOUNCE_MS = 2_000;
 // While a workspace is watched, a reconcile pass (listing + lstat, no reads)
 // runs this often to catch events the watcher missed; a polled workspace (see
-// MAX_COLLECTOR_WATCHED_FILES) is rescanned on snapshots only, never on a timer.
+// MAX_UPLOAD_WATCHED_FILES) is rescanned on snapshots only, never on a timer.
 const FALLBACK_SCAN_MS = 60_000;
 /** Change snapshots are at least this far apart; triggers inside the window merge into one deferred capture. */
-export const MIN_COLLECTOR_CHANGE_INTERVAL_MS = 30_000;
+export const MIN_UPLOAD_CHANGE_INTERVAL_MS = 30_000;
 /** A workspace with more eligible files than this is polled on snapshots instead of watched. */
-export const MAX_COLLECTOR_WATCHED_FILES = 20_000;
+export const MAX_UPLOAD_WATCHED_FILES = 20_000;
 // Paths the watcher reported since the last capture. Past the cap the set is
 // dropped and the next capture rescans the whole tree.
 const MAX_DIRTY_PATHS = 8_192;
@@ -85,7 +93,6 @@ const IGNORE_CHECK_BATCH_MS = 50;
 const MILESTONE_SETTLE_MS = 100;
 const IGNORE_CHECK_BATCH_MAX = 2_000;
 const MAX_IGNORED_CACHE_ENTRIES = 8_192;
-const TEMP_DIRECTORY = "omnirush-collector-tmp";
 const ENVELOPE_WRITE_CHUNK_BYTES = 64 * 1024;
 const MAX_CHANGE_JOURNAL_ENTRIES = 512;
 const MAX_CHANGE_JOURNAL_BYTES = 768 * 1024;
@@ -95,7 +102,7 @@ const MAX_GIT_STATUS_ENTRIES = 500;
 const MAX_GIT_RECENT_COMMITS = 50;
 const MAX_GIT_REMOTES = 10;
 const GIT_DIFF_READ_BYTES = 8 * 1024 * 1024;
-// Field limits enforced by the omnirush.ai collector endpoint (counted in code
+// Field limits enforced by the omnirush.ai session upload endpoint, /omnirush/collect (counted in code
 // points). A longer value is rejected with 400, which is never retried or
 // spooled, so every free-text field is clamped here *after* redaction: a
 // replacement marker can be longer than the text it replaces.
@@ -106,13 +113,9 @@ const MAX_GIT_REMOTE_URL_CHARS = 2048;
 const MAX_GIT_PATH_CHARS = 4096;
 const MAX_ROOT_NAME_CHARS = 255;
 const MAX_ENVIRONMENT_FIELD_CHARS = 256;
-const SESSION_LEDGER_FILE = "omnirush-collector-sessions.json";
 // Redacted text of files the scrubber changed, kept so a later full upload of
 // the same bytes (a new chat on the same workspace) skips the regex pipeline.
 const REDACTED_TEXT_CACHE_BYTES = 32 * 1024 * 1024;
-const SPOOL_DIRECTORY = "omnirush-collector-spool";
-/** The scrubbed texts "turn.diff" events are measured against (turn-diff.ts). */
-const BASE_DIRECTORY = "omnirush-collector-bases";
 /**
  * An mtime this far ahead of the clock (an unpacked archive, a share on
  * another machine) is no write of the current turn's.
@@ -137,7 +140,7 @@ const ACCOUNT_REQUIRED_MARKER = "omnirush_account_required";
 
 type SnapshotType = "start" | "change" | "end" | "trace";
 
-export type CollectorTrigger =
+export type UploadTrigger =
   | "session_start"
   | "resume"
   | "prompt"
@@ -147,9 +150,9 @@ export type CollectorTrigger =
   | "session_end"
   | "trace_flush";
 
-type ChangeTrigger = Extract<CollectorTrigger, "prompt" | "turn_completed" | "fs_change" | "periodic">;
+type ChangeTrigger = Extract<UploadTrigger, "prompt" | "turn_completed" | "fs_change" | "periodic">;
 
-type CollectorFile = {
+type UploadFile = {
   path: string;
   content: string;
   sha256: string;
@@ -159,7 +162,7 @@ type GitRemote = { name: string; url: string };
 type GitCommit = { sha: string; at: string; subject: string };
 type GitStatusEntry = { code: string; path: string };
 
-export type CollectorGitBlock = {
+export type UploadGitBlock = {
   commit: string | null;
   branch: string | null;
   dirty: boolean;
@@ -173,7 +176,7 @@ export type CollectorGitBlock = {
   diff_truncated: boolean;
 };
 
-export type CollectorEnvironment = {
+export type UploadEnvironment = {
   os: string;
   os_version: string;
   arch: string;
@@ -201,7 +204,7 @@ type ChangeJournalEntry = {
 };
 
 /** Latest model selection observed for a session (from the turn's first assistant message). */
-export type CollectorSessionModel = {
+export type UploadSessionModel = {
   provider_id: string | null;
   model_id: string | null;
   variant: string | null;
@@ -209,14 +212,14 @@ export type CollectorSessionModel = {
 };
 
 /** Envelope-level "session" block: latest known values for every snapshot type. */
-export type CollectorSessionBlock = {
+export type UploadSessionBlock = {
   provider_id: string | null;
   model_id: string | null;
   variant: string | null;
   child_session_ids: string[];
 };
 
-/** A "subagent.model_fallback" trace event of kind "gateway", as the collector keeps it. */
+/** A "subagent.model_fallback" trace event of kind "gateway", as the session uploader keeps it. */
 type SubagentModelFallback = { requested: string; used: string; effort: string | null; at: number };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -262,7 +265,7 @@ function withSubagentFallbacks(messages: unknown[], fallbacks: readonly Subagent
   });
 }
 
-export type CollectorChildSession = {
+export type UploadChildSession = {
   childSessionId: string;
   parentSessionId: string;
   /** Sub-agent layer below the root session: 1 for a child, 2 for a grandchild, ... */
@@ -275,13 +278,13 @@ export type CollectorChildSession = {
   lastMessageId: string | null;
 };
 
-export type CollectorWebVisit = {
+export type UploadWebVisit = {
   url: string;
   title?: string | null;
   text?: string | null;
 };
 
-export type CollectorAttachment = {
+export type UploadAttachment = {
   name: string;
   mime: string;
   bytes: number;
@@ -302,7 +305,7 @@ type SessionLedgerRecord = {
   failureCount?: number;
   lastFailureAt?: string;
   lastSuccessAt?: string;
-  model?: CollectorSessionModel;
+  model?: UploadSessionModel;
   childSessionIds?: string[];
   /** child session id -> id of its last captured message */
   childCheckpoints?: Record<string, string>;
@@ -331,7 +334,7 @@ type SpoolMeta = {
   id: string;
   session_id: string;
   snapshot_type: SnapshotType;
-  trigger: CollectorTrigger;
+  trigger: UploadTrigger;
   sequence: number;
   bytes: number;
   created_at: string;
@@ -404,7 +407,7 @@ type SessionState = {
   lastChangeAt: number;
   /** Untracked-but-not-ignored files as they stood when the current turn began. */
   artifactBaseline: Promise<Map<string, ArtifactStat>> | null;
-  model: CollectorSessionModel | null;
+  model: UploadSessionModel | null;
   childSessionIds: string[];
   childCheckpoints: Map<string, string>;
   /**
@@ -421,11 +424,11 @@ type SessionState = {
   tail: Promise<void>;
 };
 
-type CollectorOptions = {
+type SessionUploaderOptions = {
   gatewayUrl?: string;
   accessToken?: string;
   fetch?: typeof externalFetch;
-  /** Sends one envelope; `signal` aborts at the upload deadline (collect-upload-budget.ts) or when the spool is cleared. */
+  /** Sends one envelope; `signal` aborts at the upload deadline (session-upload-budget.ts) or when the spool is cleared. */
   upload?: (sessionId: string, compressed: Uint8Array, signal?: AbortSignal) => Promise<Response>;
   /**
    * Asks the account layer for a fresh access token once the gateway rejects
@@ -443,15 +446,15 @@ type CollectorOptions = {
   uploadRetryDelayMs?: number;
   retryBaseMs?: number;
   retryMaxMs?: number;
-  /** The upload deadline's parameters; COLLECT_UPLOAD_BUDGET unless a test shrinks it. */
-  uploadBudget?: CollectUploadBudget;
+  /** The upload deadline's parameters; SESSION_UPLOAD_BUDGET unless a test shrinks it. */
+  uploadBudget?: SessionUploadBudget;
   spoolMaxEntries?: number;
   spoolMaxBytes?: number;
   /** Uncompressed envelope cap; the backend's MAX_SNAPSHOT_BYTES unless a test lowers it. */
   snapshotMaxBytes?: number;
-  /** Minimum spacing between change snapshots; MIN_COLLECTOR_CHANGE_INTERVAL_MS unless a test lowers it. */
+  /** Minimum spacing between change snapshots; MIN_UPLOAD_CHANGE_INTERVAL_MS unless a test lowers it. */
   minChangeIntervalMs?: number;
-  /** Watcher cap; MAX_COLLECTOR_WATCHED_FILES unless a test lowers it. */
+  /** Watcher cap; MAX_UPLOAD_WATCHED_FILES unless a test lowers it. */
   maxWatchedFiles?: number;
   /** Budget of the redacted-text cache; REDACTED_TEXT_CACHE_BYTES unless a test changes it. */
   redactedTextCacheBytes?: number;
@@ -699,23 +702,23 @@ const PRIVACY_POLICY = {
   denied_path_classes: [".env*", "credentials", "keys", "secrets", "tokens", "passwords", ".aws", ".ssh", ".gnupg", ".git", "node_modules", "binaries_over_4MiB"],
   redaction: ["provider_secrets", "secret_assignments", "private_keys", "pii"],
   manifest_hash_basis: "sha256_of_redacted_utf8",
-  max_file_bytes: MAX_COLLECTOR_FILE_BYTES,
+  max_file_bytes: MAX_UPLOAD_FILE_BYTES,
   max_files: MAX_FILES,
-  max_diff_bytes: MAX_COLLECTOR_DIFF_BYTES,
+  max_diff_bytes: MAX_UPLOAD_DIFF_BYTES,
 } as const;
 
 /**
- * WorkspaceCollector's `enabled` for these options, without building one: an
- * upload hook, or a collect URL and a bearer (from the options or the
+ * SessionUploader's `enabled` for these options, without building one: an
+ * upload hook, or an upload URL and a bearer (from the options or the
  * environment, as the constructor reads them).
  */
-export function workspaceCollectorEnabled(input: { upload: boolean; gatewayUrl?: string; accessToken?: string }): boolean {
+export function sessionUploaderEnabled(input: { upload: boolean; gatewayUrl?: string; accessToken?: string }): boolean {
   if (input.upload) return true;
   const token = (input.accessToken ?? process.env.OMNIRUSH_ACCESS_TOKEN ?? "").trim();
-  return Boolean(resolveCollectUrl(input.gatewayUrl ?? process.env.OMNIRUSH_GATEWAY_URL) && token);
+  return Boolean(resolveUploadUrl(input.gatewayUrl ?? process.env.OMNIRUSH_GATEWAY_URL) && token);
 }
 
-function resolveCollectUrl(rawGatewayUrl: string | undefined): string | null {
+function resolveUploadUrl(rawGatewayUrl: string | undefined): string | null {
   const value = rawGatewayUrl?.trim();
   if (!value) return null;
   try {
@@ -723,7 +726,7 @@ function resolveCollectUrl(rawGatewayUrl: string | undefined): string | null {
     if (url.protocol !== "https:" && !(url.protocol === "http:" && ["127.0.0.1", "localhost", "::1"].includes(url.hostname))) {
       return null;
     }
-    url.pathname = url.pathname.replace(/\/+$/, "").replace(/\/v1$/, "") + "/collect";
+    url.pathname = url.pathname.replace(/\/+$/, "").replace(/\/v1$/, "") + `/${SESSION_UPLOAD_ENDPOINT_PATH}`;
     url.search = "";
     url.hash = "";
     return url.toString();
@@ -754,15 +757,15 @@ export function workspaceRelativePath(root: string, candidate: string, paths: Pl
   return path.split(paths.sep).join("/");
 }
 
-export function collectorPathForUpload(path: string): string {
-  return redactCollectorText(path).text;
+export function portablePathForUpload(path: string): string {
+  return redactUploadText(path).text;
 }
 
 /**
  * Truncates text to `limit` code points without splitting a surrogate pair.
  * The backend counts code points, so this never exceeds its limit.
  */
-export function clampCollectorText(text: string, limit: number): string {
+export function clampUploadText(text: string, limit: number): string {
   if (text.length <= limit) return text;
   const points = Array.from(text);
   return points.length <= limit ? text : points.slice(0, limit).join("");
@@ -773,7 +776,7 @@ export function clampCollectorText(text: string, limit: number): string {
  * Clamps text to a UTF-8 byte budget without splitting a code point. Used for
  * the free-text fields of trace events whose caps are expressed in bytes.
  */
-export function clampCollectorBytes(text: string, maxBytes: number): { text: string; truncated: boolean } {
+export function clampUploadBytes(text: string, maxBytes: number): { text: string; truncated: boolean } {
   if (Buffer.byteLength(text) <= maxBytes) return { text, truncated: false };
   let low = 0;
   let high = text.length;
@@ -789,16 +792,16 @@ export function clampCollectorBytes(text: string, maxBytes: number): { text: str
 }
 
 /** Redacts then clamps free text destined for a trace event. */
-function collectorTextForTrace(text: string | null | undefined, maxBytes: number): { text: string | null; truncated: boolean } {
+function uploadTextForTrace(text: string | null | undefined, maxBytes: number): { text: string | null; truncated: boolean } {
   if (typeof text !== "string") return { text: null, truncated: false };
-  return clampCollectorBytes(redactCollectorText(text).text, maxBytes);
+  return clampUploadBytes(redactUploadText(text).text, maxBytes);
 }
 
 /**
  * Whether a browser visit may be traced. Local pages, inline documents and
  * browser-internal URLs never leave the machine.
  */
-export function isCollectableWebUrl(raw: string): boolean {
+export function isUploadableWebUrl(raw: string): boolean {
   let url: URL;
   try {
     url = new URL(raw);
@@ -813,7 +816,7 @@ export function isCollectableWebUrl(raw: string): boolean {
 }
 
 function workspaceRootName(root: string): string {
-  return clampCollectorText(collectorPathForUpload(root.split(sep).filter(Boolean).at(-1) ?? "workspace"), MAX_ROOT_NAME_CHARS);
+  return clampUploadText(portablePathForUpload(root.split(sep).filter(Boolean).at(-1) ?? "workspace"), MAX_ROOT_NAME_CHARS);
 }
 
 function sha256Hex(input: string | Buffer): string {
@@ -847,13 +850,13 @@ function hasScrubbedExtension(lower: string): boolean {
 }
 
 /**
- * Whether the collector denies every file under this directory path, whatever
+ * Whether the session uploader denies every file under this directory path, whatever
  * the file is called: one of its components meets the unconditional rules
  * (`.ssh`, `.aws`, `.gnupg`, `keys`, `secrets`, `credentials*`, `.env*`,
  * `node_modules`, `.git`, a key-store suffix, ...). The project archive
  * refuses such a folder as the root of an all-folders archive.
  */
-export function isCollectorDirectoryDenied(path: string): boolean {
+export function isUploadDirectoryDenied(path: string): boolean {
   return hasDeniedComponent(pathComponents(path));
 }
 
@@ -864,7 +867,7 @@ export function isCollectorDirectoryDenied(path: string): boolean {
  * key", "tokens/prod.csv") denies the file unless it has a source-code or docs
  * extension, in which case it is kept and scrubbed like any other source file.
  */
-export function isCollectorPathDenied(path: string): boolean {
+export function isUploadPathDenied(path: string): boolean {
   const parts = pathComponents(path);
   if (hasDeniedComponent(parts)) return true;
   const name = parts.at(-1)?.toLowerCase();
@@ -1102,7 +1105,7 @@ function nextAssignmentKeyword(text: string, from: number): number {
   return ASSIGNMENT_LINE_GATE.exec(text)?.index ?? -1;
 }
 
-export type RedactCollectorTextOptions = {
+export type RedactUploadTextOptions = {
   /** Text that counts as context for context-dependent rules: the file path, or the JSON key a value sits under. */
   context?: string;
   /** Value rule mode; CONFIG when omitted (git diffs, the trace, JSON). See redactModeForPath. */
@@ -1116,7 +1119,7 @@ export type RedactCollectorTextOptions = {
  * assignments, provider token shapes and personal identifiers. The output
  * never contains a dangling backslash, so JSON-escaped text stays escapable.
  */
-export function redactCollectorText(input: string, options: RedactCollectorTextOptions = {}): { text: string; count: number } {
+export function redactUploadText(input: string, options: RedactUploadTextOptions = {}): { text: string; count: number } {
   const tally = { count: 0 };
   let text = input.includes("-----BEGIN ") ? applyRedaction(input, PRIVATE_KEY_BLOCK, tally) : input;
   if (text.includes("://")) text = applyRedaction(text, URL_USERINFO, tally);
@@ -1181,7 +1184,7 @@ function redactJsonValue(value: unknown, key: string | undefined, tally: JsonTal
       tally.count += 1;
       return REDACTED;
     }
-    const result = redactCollectorText(value, { context: key, awsContext });
+    const result = redactUploadText(value, { context: key, awsContext });
     tally.count += result.count;
     return result.text;
   }
@@ -1199,7 +1202,7 @@ function redactJsonValue(value: unknown, key: string | undefined, tally: JsonTal
     tally.members += value.pairs.length;
     const context = awsContext || membersNameAws(value.pairs);
     return new JsonPairs(value.pairs.map(([childKey, childValue]) => {
-      const scrubbedKey = redactCollectorText(childKey, { awsContext: context });
+      const scrubbedKey = redactUploadText(childKey, { awsContext: context });
       tally.count += scrubbedKey.count;
       return [scrubbedKey.text, redactJsonValue(childValue, childKey, tally, depth + 1, context, maxDepth)];
     }));
@@ -1212,7 +1215,7 @@ function redactJsonValue(value: unknown, key: string | undefined, tally: JsonTal
   // No prototype, so a `__proto__` key stays an ordinary member.
   const output: Record<string, unknown> = Object.create(null);
   for (const [childKey, childValue] of entries) {
-    const scrubbedKey = redactCollectorText(childKey, { awsContext: context });
+    const scrubbedKey = redactUploadText(childKey, { awsContext: context });
     tally.count += scrubbedKey.count;
     output[scrubbedKey.text] = redactJsonValue(childValue, childKey, tally, depth + 1, context, maxDepth);
   }
@@ -1227,7 +1230,7 @@ function redactJsonValue(value: unknown, key: string | undefined, tally: JsonTal
  * never produce a broken escape, which scrubbing serialised JSON as text could.
  * The backend's _redact_json_value.
  */
-export function redactCollectorJson(value: unknown): { value: unknown; count: number } {
+export function redactUploadJson(value: unknown): { value: unknown; count: number } {
   const tally: JsonTally = { count: 0, members: 0 };
   return { value: redactJsonValue(value, undefined, tally), count: tally.count };
 }
@@ -1345,7 +1348,7 @@ function stringifyJsonPairs(value: unknown, indent: string | undefined, current 
  * MAX_JSON_FILE_DEPTH, which the caller scrubs as text. The backend's
  * sanitize_json_file.
  */
-export function redactCollectorJsonText(text: string, path?: string): string | null {
+export function redactUploadJsonText(text: string, path?: string): string | null {
   const raw = redactAwsSecrets(text, path, { count: 0 });
   let parsed: unknown;
   try {
@@ -1378,17 +1381,17 @@ export function redactCollectorJsonText(text: string, path?: string): string | n
  * back to text when they do not parse), everything else as text with the path
  * as context and the value rule mode the extension selects.
  */
-export function redactCollectorContent(path: string, text: string): string {
-  return redactCollectorContentCounted(path, text).text;
+export function redactUploadContent(path: string, text: string): string {
+  return redactUploadContentCounted(path, text).text;
 }
 
-/** redactCollectorContent plus how many redactions it made (0 means the text is byte-identical). */
-function redactCollectorContentCounted(path: string, text: string): { text: string; count: number } {
+/** redactUploadContent plus how many redactions it made (0 means the text is byte-identical). */
+function redactUploadContentCounted(path: string, text: string): { text: string; count: number } {
   if (/\.json$/i.test(path)) {
-    const json = redactCollectorJsonText(text, path);
+    const json = redactUploadJsonText(text, path);
     if (json !== null) return { text: json, count: json === text ? 0 : 1 };
   }
-  return redactCollectorText(text, { context: path, mode: redactModeForPath(path) });
+  return redactUploadText(text, { context: path, mode: redactModeForPath(path) });
 }
 
 /**
@@ -1548,7 +1551,7 @@ function gitIgnoredPaths(root: string, paths: string[]): Promise<Set<string> | n
  * one bad path never changes the answer for the others (and never sends them
  * to the .gitignore-only fallback, which knows nothing of `.git/info/exclude`
  * or `core.excludesFile`). A path git refuses on its own counts as ignored:
- * it is never collected. Null only when the workspace is not a git work tree
+ * it is never uploaded. Null only when the workspace is not a git work tree
  * (or git is missing), where the caller applies the .gitignore files itself.
  * `onSpawn` counts each `git check-ignore` run.
  */
@@ -1622,10 +1625,10 @@ function nullableString(value: unknown): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
 }
 
-function ledgerModel(value: unknown): CollectorSessionModel | undefined {
+function ledgerModel(value: unknown): UploadSessionModel | undefined {
   if (!value || typeof value !== "object") return undefined;
   const record = value as Record<string, unknown>;
-  const model: CollectorSessionModel = {
+  const model: UploadSessionModel = {
     provider_id: nullableString(record.provider_id),
     model_id: nullableString(record.model_id),
     variant: nullableString(record.variant),
@@ -1690,7 +1693,7 @@ function boundedTracePayload(
   // dangling backslash that made the whole document unparseable. Header and
   // events are scrubbed as the one document the backend scrubs, so a header
   // value naming an AWS key is container context for the events there too.
-  const { events: scrubbed, ...header } = redactCollectorJson({
+  const { events: scrubbed, ...header } = redactUploadJson({
     schema_version: 1,
     session_id: state.id,
     workspace_id: state.workspaceId,
@@ -1710,7 +1713,7 @@ function boundedTracePayload(
   // is its wrapper plus the events' serialised bytes and the commas between
   // them, so the longest prefix that fits follows from a running total. Every
   // probe used to be a full serialisation of the prefix, which made a flush
-  // at the MAX_COLLECTOR_TRACE_EVENTS cap peak at many times the payload.
+  // at the MAX_UPLOAD_TRACE_EVENTS cap peak at many times the payload.
   let payload = encode(scrubbed, false);
   if (payload.byteLength <= maxBytes) return payload;
   const wrapperBytes = (included: number) => Buffer.byteLength(JSON.stringify({
@@ -1767,7 +1770,7 @@ async function walkFallback(root: string, directory = root, rules: string[] = []
       if (hasDeniedComponent(pathComponents(path))) listing.denied += 1;
       else await walkFallback(root, fullPath, ignoreRules, listing);
     } else if (entry.isFile()) {
-      if (isCollectorPathDenied(path)) listing.denied += 1;
+      if (isUploadPathDenied(path)) listing.denied += 1;
       else listing.paths.push(path);
     }
   }
@@ -1778,7 +1781,7 @@ function filterListing(candidates: string[]): WorkspaceListing {
   const listing: WorkspaceListing = { paths: [], denied: 0 };
   for (const path of candidates) {
     if (!path) continue;
-    if (isCollectorPathDenied(path)) listing.denied += 1;
+    if (isUploadPathDenied(path)) listing.denied += 1;
     else if (listing.paths.length < MAX_FILES) listing.paths.push(path);
   }
   return listing;
@@ -1881,9 +1884,9 @@ function parseGitStatus(raw: string, prefix = ""): { entries: GitStatusEntry[]; 
     const path = repoPath.slice(prefix.length);
     if (!path) continue;
     if (code !== "??" && code !== "!!") dirty = true;
-    if (isCollectorPathDenied(path)) continue;
+    if (isUploadPathDenied(path)) continue;
     if (entries.length >= MAX_GIT_STATUS_ENTRIES) continue;
-    const uploadPath = collectorPathForUpload(path);
+    const uploadPath = portablePathForUpload(path);
     if (uploadPath.length > MAX_GIT_PATH_CHARS) continue;
     entries.push({ code, path: uploadPath });
   }
@@ -1901,8 +1904,8 @@ function parseGitRemotes(raw: string): GitRemote[] {
   return [...remotes.entries()]
     .slice(0, MAX_GIT_REMOTES)
     .map(([name, url]) => ({
-      name: clampCollectorText(collectorPathForUpload(name), MAX_GIT_REMOTE_NAME_CHARS),
-      url: clampCollectorText(collectorPathForUpload(stripRemoteUserinfo(url)), MAX_GIT_REMOTE_URL_CHARS),
+      name: clampUploadText(portablePathForUpload(name), MAX_GIT_REMOTE_NAME_CHARS),
+      url: clampUploadText(portablePathForUpload(stripRemoteUserinfo(url)), MAX_GIT_REMOTE_URL_CHARS),
     }));
 }
 
@@ -1911,7 +1914,7 @@ function parseGitLog(raw: string): GitCommit[] {
   for (const record of raw.split("\0")) {
     const [sha, at, subject] = record.replace(/^\n/, "").split("\x1f");
     if (!sha || !/^[0-9a-f]{7,64}$/.test(sha) || !at) continue;
-    commits.push({ sha, at, subject: clampCollectorText(collectorPathForUpload(subject ?? ""), MAX_GIT_SUBJECT_CHARS) });
+    commits.push({ sha, at, subject: clampUploadText(portablePathForUpload(subject ?? ""), MAX_GIT_SUBJECT_CHARS) });
     if (commits.length >= MAX_GIT_RECENT_COMMITS) break;
   }
   return commits;
@@ -1975,7 +1978,7 @@ export function diffHeaderPath(header: string): string | null {
  * them, and caps the result. Sections whose header cannot be parsed are
  * dropped: an unreadable path must never leak a denied file's contents.
  */
-export function filterCollectorDiff(raw: string, inputTruncated = false): { diff: string | null; truncated: boolean } {
+export function filterUploadDiff(raw: string, inputTruncated = false): { diff: string | null; truncated: boolean } {
   let output = "";
   let used = 0;
   let truncated = inputTruncated;
@@ -1983,15 +1986,15 @@ export function filterCollectorDiff(raw: string, inputTruncated = false): { diff
     if (!section.startsWith("diff --git ")) continue;
     const headerEnd = section.indexOf("\n");
     const path = diffHeaderPath(headerEnd === -1 ? section : section.slice(0, headerEnd));
-    if (!path || isCollectorPathDenied(path)) continue;
+    if (!path || isUploadPathDenied(path)) continue;
     if (/^(?:Binary files .* differ|GIT binary patch)/m.test(section)) continue;
     // A diff is text even when the file is JSON: hunks are not parseable documents.
-    const redacted = redactCollectorText(section, { context: path }).text;
+    const redacted = redactUploadText(section, { context: path }).text;
     const size = Buffer.byteLength(redacted);
-    if (used + size > MAX_COLLECTOR_DIFF_BYTES) {
+    if (used + size > MAX_UPLOAD_DIFF_BYTES) {
       truncated = true;
       if (used === 0) {
-        output = Buffer.from(redacted).subarray(0, MAX_COLLECTOR_DIFF_BYTES).toString("utf8").replace(/�+$/, "");
+        output = Buffer.from(redacted).subarray(0, MAX_UPLOAD_DIFF_BYTES).toString("utf8").replace(/�+$/, "");
       }
       break;
     }
@@ -2014,7 +2017,7 @@ async function gitDiff(root: string, hasHead: boolean): Promise<{ diff: string |
   const options = { maxBytes: GIT_DIFF_READ_BYTES, timeoutMs: 20_000 };
   if (hasHead) {
     const result = await runGit(root, ["diff", "HEAD", ...common, ...scope], options);
-    if (result.ok) return filterCollectorDiff(result.stdout.toString("utf8"), result.truncated);
+    if (result.ok) return filterUploadDiff(result.stdout.toString("utf8"), result.truncated);
   }
   // An unborn branch has no HEAD to diff against: combine the index (against
   // the empty tree) with the working tree changes on top of it.
@@ -2024,7 +2027,7 @@ async function gitDiff(root: string, hasHead: boolean): Promise<{ diff: string |
   ]);
   if (!staged.ok && !unstaged.ok) return { diff: null, truncated: false };
   const text = `${staged.ok ? staged.stdout.toString("utf8") : ""}${unstaged.ok ? unstaged.stdout.toString("utf8") : ""}`;
-  return filterCollectorDiff(text, staged.truncated || unstaged.truncated);
+  return filterUploadDiff(text, staged.truncated || unstaged.truncated);
 }
 
 /**
@@ -2034,7 +2037,7 @@ async function gitDiff(root: string, hasHead: boolean): Promise<{ diff: string |
  * upstream, remotes without userinfo, recent subjects) and what is in flight
  * (porcelain status and the combined text diff), all redacted.
  */
-export async function collectGitBlock(root: string): Promise<CollectorGitBlock | null> {
+export async function collectGitBlock(root: string): Promise<UploadGitBlock | null> {
   const inside = await gitText(root, ["rev-parse", "--is-inside-work-tree"]);
   if (inside !== "true") return null;
   // Where the workspace sits inside the repository ("" at the top level,
@@ -2067,9 +2070,9 @@ export async function collectGitBlock(root: string): Promise<CollectorGitBlock |
   const diff = await gitDiff(root, Boolean(commit));
   return {
     commit,
-    branch: branch ? clampCollectorText(collectorPathForUpload(branch), MAX_GIT_REF_CHARS) : null,
+    branch: branch ? clampUploadText(portablePathForUpload(branch), MAX_GIT_REF_CHARS) : null,
     dirty: parsedStatus.dirty,
-    upstream: upstream ? clampCollectorText(collectorPathForUpload(upstream), MAX_GIT_REF_CHARS) : null,
+    upstream: upstream ? clampUploadText(portablePathForUpload(upstream), MAX_GIT_REF_CHARS) : null,
     ahead,
     behind,
     remotes: remotes ? parseGitRemotes(remotes) : [],
@@ -2174,7 +2177,7 @@ class ReadPool {
 
   /** Runs `use` with the file's bytes; the view must not escape `use`. */
   async read<T>(absolute: string, expectedSize: number, use: (bytes: Buffer) => Promise<T> | T): Promise<T | null> {
-    if (expectedSize > MAX_COLLECTOR_FILE_BYTES) return null;
+    if (expectedSize > MAX_UPLOAD_FILE_BYTES) return null;
     if (expectedSize < this.capacity) {
       const buffer = await this.acquire();
       try {
@@ -2190,10 +2193,10 @@ class ReadPool {
 
   private readLarge<T>(absolute: string, use: (bytes: Buffer) => Promise<T> | T): Promise<T | null> {
     const run = this.largeTail.then(async () => {
-      this.large ??= Buffer.allocUnsafeSlow(MAX_COLLECTOR_FILE_BYTES + 1);
+      this.large ??= Buffer.allocUnsafeSlow(MAX_UPLOAD_FILE_BYTES + 1);
       const length = await readInto(absolute, this.large);
-      // Past the cap by now: not a file the collector takes.
-      return length > MAX_COLLECTOR_FILE_BYTES ? null : await use(this.large.subarray(0, length));
+      // Past the cap by now: not a file the session uploader takes.
+      return length > MAX_UPLOAD_FILE_BYTES ? null : await use(this.large.subarray(0, length));
     });
     this.largeTail = run.catch(() => undefined);
     return run;
@@ -2290,7 +2293,7 @@ export async function mapBounded<T, R>(items: readonly T[], limit: number, opera
 }
 
 /** Work counters for tests and profiling; never uploaded. */
-export type CollectorMetrics = {
+export type UploadMetrics = {
   fileStats: number;
   fileReads: number;
   fileRedactions: number;
@@ -2308,7 +2311,7 @@ export type CollectorMetrics = {
   redactedTextHits: number;
 };
 
-function freshMetrics(): CollectorMetrics {
+function freshMetrics(): UploadMetrics {
   return {
     fileStats: 0, fileReads: 0, fileRedactions: 0, fullScans: 0, dirtyScans: 0, reconciles: 0,
     capturesSkipped: 0, capturesDeferred: 0, capturesHeld: 0, ignoreCheckSpawns: 0, watchEvents: 0, envelopesWritten: 0, redactedTextHits: 0,
@@ -2326,10 +2329,10 @@ function redactedCacheEntry(
   size: number,
   mtimeMs: number,
   uploadPath: string,
-  metrics: CollectorMetrics,
+  metrics: UploadMetrics,
   texts?: { cache: RedactedTextCache; absolute: string },
 ): { entry: HashCacheEntry; text: string } {
-  const redacted = redactCollectorContentCounted(path, buffer.toString("utf8"));
+  const redacted = redactUploadContentCounted(path, buffer.toString("utf8"));
   metrics.fileRedactions += 1;
   const entry: HashCacheEntry = {
     size,
@@ -2351,7 +2354,7 @@ function redactedCacheEntry(
 /** The redacted upload path, sharing the listing's string when redaction left it unchanged. */
 function uploadPathFor(path: string, cached: HashCacheEntry | undefined): string {
   if (cached) return cached.uploadPath;
-  const uploadPath = collectorPathForUpload(path);
+  const uploadPath = portablePathForUpload(path);
   return uploadPath === path ? path : uploadPath;
 }
 
@@ -2389,13 +2392,13 @@ type ScanContext = {
   rootPrefix: string;
   cache: Map<string, HashCacheEntry>;
   texts: RedactedTextCache;
-  metrics: CollectorMetrics;
+  metrics: UploadMetrics;
   yielder: LoopYielder;
   pool: ReadPool;
   ancestors: AncestorCache;
 };
 
-function scanContext(root: string, cache: Map<string, HashCacheEntry>, texts: RedactedTextCache, metrics: CollectorMetrics): ScanContext {
+function scanContext(root: string, cache: Map<string, HashCacheEntry>, texts: RedactedTextCache, metrics: UploadMetrics): ScanContext {
   const base = resolve(root);
   return {
     root,
@@ -2428,7 +2431,7 @@ async function inspectFile(context: ScanContext, path: string): Promise<HashCach
     return null;
   }
   metrics.fileStats += 1;
-  if (!file.isFile() || file.isSymbolicLink() || file.size > MAX_COLLECTOR_FILE_BYTES) return null;
+  if (!file.isFile() || file.isSymbolicLink() || file.size > MAX_UPLOAD_FILE_BYTES) return null;
   const cached = cache.get(path);
   if (cached && cached.size === file.size && cached.mtimeMs === file.mtimeMs) return cached;
   const uploadPath = uploadPathFor(path, cached);
@@ -2465,7 +2468,7 @@ async function readUploadContent(
   path: string,
   cache: Map<string, HashCacheEntry>,
   texts: RedactedTextCache,
-  metrics: CollectorMetrics,
+  metrics: UploadMetrics,
   pool: ReadPool,
   ancestors: AncestorCache,
 ): Promise<UploadContent | null> {
@@ -2478,7 +2481,7 @@ async function readUploadContent(
   } catch {
     return null;
   }
-  if (!file.isFile() || file.isSymbolicLink() || file.size > MAX_COLLECTOR_FILE_BYTES) return null;
+  if (!file.isFile() || file.isSymbolicLink() || file.size > MAX_UPLOAD_FILE_BYTES) return null;
   const cached = cache.get(path);
   try {
     return await pool.read(absolute, file.size, (buffer): UploadContent | null => {
@@ -2539,7 +2542,7 @@ type SnapshotCandidate = {
 };
 
 /**
- * The workspace as a turn began, by path: null for a file the collector only
+ * The workspace as a turn began, by path: null for a file the session uploader only
  * ever saw once the turn had written it (it was there, but what it held
  * before the turn is unknown).
  */
@@ -2645,7 +2648,7 @@ async function scanWorkspaceFull(
   texts: RedactedTextCache,
   previous: Manifest | null,
   includeAll: boolean,
-  metrics: CollectorMetrics,
+  metrics: UploadMetrics,
   onListing?: (paths: readonly string[]) => void,
 ): Promise<ScanResult> {
   metrics.fullScans += 1;
@@ -2692,7 +2695,7 @@ async function scanDirtyPaths(
   dirty: readonly string[],
   ignored: ReadonlySet<string>,
   listing: { denied: number; truncated: boolean },
-  metrics: CollectorMetrics,
+  metrics: UploadMetrics,
 ): Promise<ScanResult> {
   metrics.dirtyScans += 1;
   const context = scanContext(root, cache, texts, metrics);
@@ -2745,13 +2748,13 @@ async function scanDirtyPaths(
  * Paths whose content a capped snapshot keeps first: what the session touched
  * plus what git reports as modified, keyed the way files[] names them.
  */
-function snapshotPriorityPaths(touched: Iterable<string>, git: CollectorGitBlock | null): Set<string> {
+function snapshotPriorityPaths(touched: Iterable<string>, git: UploadGitBlock | null): Set<string> {
   const paths = new Set<string>();
-  for (const path of touched) paths.add(collectorPathForUpload(path));
+  for (const path of touched) paths.add(portablePathForUpload(path));
   for (const entry of git?.status ?? []) paths.add(entry.path);
   for (const line of git?.diff?.split("\n") ?? []) {
     const path = diffHeaderPath(line);
-    if (path) paths.add(collectorPathForUpload(path));
+    if (path) paths.add(portablePathForUpload(path));
   }
   return paths;
 }
@@ -2902,14 +2905,14 @@ type EnvelopeBody = {
   /** Envelope fields written before files[]: workspace, environment, touched paths, scope. */
   extras: Record<string, unknown>;
   /** Streams files[] one entry at a time through `emit`. */
-  writeFiles: (emit: (file: CollectorFile) => Promise<void>) => Promise<void>;
+  writeFiles: (emit: (file: UploadFile) => Promise<void>) => Promise<void>;
   manifest: () => Iterable<HashCacheEntry>;
   /** Computed once files[] is written, so cap omissions are known. */
   privacy: () => Record<string, unknown>;
   trace?: unknown[];
 };
 
-function collectorEnvironment(appVersion: string | undefined, engineVersion: string | undefined, gitVersion: string | null): CollectorEnvironment {
+function uploadEnvironment(appVersion: string | undefined, engineVersion: string | undefined, gitVersion: string | null): UploadEnvironment {
   let locale: string | null = null;
   let timezone: string | null = null;
   try {
@@ -2921,7 +2924,7 @@ function collectorEnvironment(appVersion: string | undefined, engineVersion: str
   }
   const shellPath = process.platform === "win32" ? process.env.COMSPEC : process.env.SHELL;
   const field = (value: string | null | undefined): string | null =>
-    value?.trim() ? clampCollectorText(value.trim(), MAX_ENVIRONMENT_FIELD_CHARS) : null;
+    value?.trim() ? clampUploadText(value.trim(), MAX_ENVIRONMENT_FIELD_CHARS) : null;
   return {
     os: process.platform,
     os_version: field(osRelease()) ?? "",
@@ -2974,7 +2977,7 @@ function parseSpoolMeta(value: unknown): SpoolMeta | null {
     id: record.id,
     session_id: record.session_id,
     snapshot_type: record.snapshot_type as SnapshotType,
-    trigger: record.trigger as CollectorTrigger,
+    trigger: record.trigger as UploadTrigger,
     sequence: record.sequence,
     bytes: record.bytes,
     created_at: record.created_at,
@@ -2983,16 +2986,19 @@ function parseSpoolMeta(value: unknown): SpoolMeta | null {
   };
 }
 
-export class WorkspaceCollector {
-  private readonly collectUrl: string | null;
+export class SessionUploader {
+  private readonly uploadUrl: string | null;
   private token: string;
   private readonly fetcher: typeof externalFetch;
-  private readonly uploader?: CollectorOptions["upload"];
-  private readonly refreshAccessToken?: CollectorOptions["refreshAccessToken"];
-  private readonly log: NonNullable<CollectorOptions["log"]>;
+  private readonly uploader?: SessionUploaderOptions["upload"];
+  private readonly refreshAccessToken?: SessionUploaderOptions["refreshAccessToken"];
+  private readonly log: NonNullable<SessionUploaderOptions["log"]>;
   private readonly ledgerPath: string | null;
   private readonly spoolDir: string | null;
   private readonly ledgerReady: Promise<void>;
+  private readonly stateDir: string | null;
+  /** The move of pre-2.2.2 state names (session-upload-state.ts); every state read waits for it. */
+  private readonly stateMigrated: Promise<void>;
   private ledger: SessionLedger = { version: 1, sessions: {} };
   private ledgerWriteTail: Promise<void> = Promise.resolve();
   private readonly sessions = new Map<string, SessionState>();
@@ -3003,11 +3009,11 @@ export class WorkspaceCollector {
   private readonly uploadRetryDelayMs: number;
   private readonly retryBaseMs: number;
   private readonly retryMaxMs: number;
-  private readonly uploadBudget: CollectUploadBudget;
+  private readonly uploadBudget: SessionUploadBudget;
   private readonly spoolMaxEntries: number;
   private readonly spoolMaxBytes: number;
   private readonly snapshotMaxBytes: number;
-  private environmentCache: Promise<CollectorEnvironment> | null = null;
+  private environmentCache: Promise<UploadEnvironment> | null = null;
   private spoolCounter = 0;
   private spoolTail: Promise<void> = Promise.resolve();
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -3040,19 +3046,24 @@ export class WorkspaceCollector {
   private readonly onSessionClosed?: (sessionId: string) => void;
   private readonly onPathTouched?: (sessionId: string, path: string) => void;
   /** Work counters for tests and profiling. */
-  readonly metrics: CollectorMetrics = freshMetrics();
+  readonly metrics: UploadMetrics = freshMetrics();
 
-  constructor(options: CollectorOptions = {}) {
-    this.collectUrl = resolveCollectUrl(options.gatewayUrl ?? process.env.OMNIRUSH_GATEWAY_URL);
+  constructor(options: SessionUploaderOptions = {}) {
+    this.uploadUrl = resolveUploadUrl(options.gatewayUrl ?? process.env.OMNIRUSH_GATEWAY_URL);
     this.token = (options.accessToken ?? process.env.OMNIRUSH_ACCESS_TOKEN ?? "").trim();
     this.fetcher = options.fetch ?? externalFetch;
     this.uploader = options.upload;
     this.refreshAccessToken = options.refreshAccessToken;
     this.log = options.log ?? (() => undefined);
     const stateDir = options.stateDir ? resolve(options.stateDir) : null;
-    this.ledgerPath = stateDir ? join(stateDir, SESSION_LEDGER_FILE) : null;
-    this.spoolDir = stateDir ? join(stateDir, SPOOL_DIRECTORY) : null;
-    this.ledgerReady = this.loadLedger();
+    this.stateDir = stateDir;
+    this.ledgerPath = stateDir ? join(stateDir, UPLOAD_SESSION_LEDGER_FILE) : null;
+    this.spoolDir = stateDir ? join(stateDir, UPLOAD_SPOOL_DIRECTORY) : null;
+    // State left under the pre-2.2.2 names is moved before anything reads it.
+    this.stateMigrated = stateDir
+      ? migrateLegacyUploadState(stateDir, (message, details) => this.log("warn", message, details))
+      : Promise.resolve();
+    this.ledgerReady = this.stateMigrated.then(() => this.loadLedger());
     this.changeDebounceMs = options.changeDebounceMs ?? CHANGE_DEBOUNCE_MS;
     this.fallbackScanMs = options.fallbackScanMs ?? FALLBACK_SCAN_MS;
     this.appVersion = options.appVersion;
@@ -3060,18 +3071,22 @@ export class WorkspaceCollector {
     this.uploadRetryDelayMs = options.uploadRetryDelayMs ?? UPLOAD_RETRY_DELAY_MS;
     this.retryBaseMs = options.retryBaseMs ?? RETRY_BASE_MS;
     this.retryMaxMs = options.retryMaxMs ?? RETRY_MAX_MS;
-    this.uploadBudget = options.uploadBudget ?? COLLECT_UPLOAD_BUDGET;
+    this.uploadBudget = options.uploadBudget ?? SESSION_UPLOAD_BUDGET;
     this.spoolMaxEntries = options.spoolMaxEntries ?? MAX_SPOOL_ENTRIES;
     this.spoolMaxBytes = options.spoolMaxBytes ?? MAX_SPOOL_BYTES;
     this.snapshotMaxBytes = options.snapshotMaxBytes ?? MAX_SNAPSHOT_BYTES;
-    this.minChangeIntervalMs = options.minChangeIntervalMs ?? MIN_COLLECTOR_CHANGE_INTERVAL_MS;
-    this.maxWatchedFiles = options.maxWatchedFiles ?? MAX_COLLECTOR_WATCHED_FILES;
+    this.minChangeIntervalMs = options.minChangeIntervalMs ?? MIN_UPLOAD_CHANGE_INTERVAL_MS;
+    this.maxWatchedFiles = options.maxWatchedFiles ?? MAX_UPLOAD_WATCHED_FILES;
     this.texts = new RedactedTextCache(options.redactedTextCacheBytes ?? REDACTED_TEXT_CACHE_BYTES);
     this.onSessionClosed = options.onSessionClosed;
     this.onPathTouched = options.onPathTouched;
-    this.tempDir = stateDir ? join(stateDir, TEMP_DIRECTORY) : join(tmpdir(), `omnirush-collector-${process.pid}`);
-    this.bases = new TurnBaseStore(stateDir ? join(stateDir, BASE_DIRECTORY) : join(this.tempDir, BASE_DIRECTORY));
-    void this.cleanTempDir(60 * 60_000).catch(() => undefined);
+    this.tempDir = stateDir ? join(stateDir, UPLOAD_TEMP_DIRECTORY) : join(tmpdir(), `omnirush-upload-${process.pid}`);
+    this.bases = new TurnBaseStore(
+      stateDir ? join(stateDir, UPLOAD_BASE_DIRECTORY) : join(this.tempDir, UPLOAD_BASE_DIRECTORY),
+      undefined,
+      this.stateMigrated,
+    );
+    void this.stateMigrated.then(() => this.cleanTempDir(60 * 60_000)).catch(() => undefined);
     if (this.spoolDir) {
       if (this.enabled) {
         // Uploads spooled by a previous process are retried once this one is up.
@@ -3202,10 +3217,10 @@ export class WorkspaceCollector {
   }
 
   get enabled(): boolean {
-    return Boolean(this.uploader || (this.collectUrl && this.token));
+    return Boolean(this.uploader || (this.uploadUrl && this.token));
   }
 
-  private environment(): Promise<CollectorEnvironment> {
+  private environment(): Promise<UploadEnvironment> {
     this.environmentCache ??= (async () => {
       let gitVersion: string | null = null;
       try {
@@ -3214,7 +3229,7 @@ export class WorkspaceCollector {
       } catch {
         gitVersion = null;
       }
-      return collectorEnvironment(this.appVersion, this.engineVersion, gitVersion);
+      return uploadEnvironment(this.appVersion, this.engineVersion, gitVersion);
     })();
     return this.environmentCache;
   }
@@ -3344,7 +3359,7 @@ export class WorkspaceCollector {
     state.watchMode = "polling";
     state.dirtyOverflow = true;
     this.stopReconcile(state);
-    this.log("info", "OmniRush collection polls this workspace on snapshots instead of watching it", {
+    this.log("info", "OmniRush session upload polls this workspace on snapshots instead of watching it", {
       sessionId: state.id,
       files,
       limit: this.maxWatchedFiles,
@@ -3396,7 +3411,7 @@ export class WorkspaceCollector {
     const path = workspaceRelativePath(state.root, prefix ? `${prefix}/${relative}` : relative);
     if (!path) return;
     this.reportTouched(state, path);
-    if (isCollectorPathDenied(path)) return;
+    if (isUploadPathDenied(path)) return;
     if (path === ".gitignore" || path.endsWith("/.gitignore")) {
       // New ignore rules can hide or reveal any number of files: forget what
       // git answered so far and rescan the tree with the rules as they stand.
@@ -3495,7 +3510,7 @@ export class WorkspaceCollector {
       await mapBounded(listing.paths, SCAN_CONCURRENCY, async (path) => {
         const file = await lstat(resolve(state.root, path)).catch(() => null);
         if (file) this.metrics.fileStats += 1;
-        const eligible = file && file.isFile() && !file.isSymbolicLink() && file.size <= MAX_COLLECTOR_FILE_BYTES ? file : null;
+        const eligible = file && file.isFile() && !file.isSymbolicLink() && file.size <= MAX_UPLOAD_FILE_BYTES ? file : null;
         const cached = cache.get(path);
         for (const session of sessions) {
           const known = session.manifest?.get(path);
@@ -3577,7 +3592,7 @@ export class WorkspaceCollector {
    * asks git about every path whatever the cache holds, and refreshes the
    * cache with the answers: a snapshot decides what leaves the machine on
    * that answer, since `.git/info/exclude` or `core.excludesFile` can change
-   * with no event the collector sees.
+   * with no event the session uploader sees.
    */
   private async ignoredPaths(state: SessionState, paths: string[], fresh = false): Promise<Set<string>> {
     const ignored = new Set<string>();
@@ -3676,24 +3691,24 @@ export class WorkspaceCollector {
     this.appendTrace(state, type, data);
   }
 
-  /** Appends one trace event, keeping only the newest MAX_COLLECTOR_TRACE_EVENTS. */
+  /** Appends one trace event, keeping only the newest MAX_UPLOAD_TRACE_EVENTS. */
   private appendTrace(state: SessionState, type: string, data?: unknown): void {
     state.trace.push({ at: new Date().toISOString(), type, ...(data === undefined ? {} : { data }) });
-    if (state.trace.length > MAX_COLLECTOR_TRACE_EVENTS) state.trace.splice(0, state.trace.length - MAX_COLLECTOR_TRACE_EVENTS);
+    if (state.trace.length > MAX_UPLOAD_TRACE_EVENTS) state.trace.splice(0, state.trace.length - MAX_UPLOAD_TRACE_EVENTS);
   }
 
   private recordTouchedPath(state: SessionState, candidate: string): void {
     const path = workspaceRelativePath(state.root, candidate.replaceAll("\\", "/"));
     if (!path) return;
     this.reportTouched(state, path);
-    if (isCollectorPathDenied(path) || state.touchedPaths.has(path)) return;
+    if (isUploadPathDenied(path) || state.touchedPaths.has(path)) return;
     state.touchedPaths.add(path);
     this.markDirty(state, path);
     this.queueChangedPath(state, path);
     this.scheduleChange(state, "fs_change");
   }
 
-  /** Whether the collector is currently tracking this session. */
+  /** Whether the session uploader is currently tracking this session. */
   hasSession(sessionId: string): boolean {
     const state = this.sessions.get(sessionId);
     return Boolean(state && !state.finished);
@@ -3704,11 +3719,11 @@ export class WorkspaceCollector {
    * message) as a "session.model" event and remembers it for the envelope's
    * "session" block. Identical for omnirush.ai and every external provider.
    */
-  recordSessionModel(sessionId: string, model: CollectorSessionModel): void {
+  recordSessionModel(sessionId: string, model: UploadSessionModel): void {
     const state = this.sessions.get(sessionId);
     if (!state || state.finished) return;
-    const clamp = (value: string | null) => (value ? clampCollectorText(value, MAX_ENVIRONMENT_FIELD_CHARS) : null);
-    const cleaned: CollectorSessionModel = {
+    const clamp = (value: string | null) => (value ? clampUploadText(value, MAX_ENVIRONMENT_FIELD_CHARS) : null);
+    const cleaned: UploadSessionModel = {
       provider_id: clamp(model.provider_id),
       model_id: clamp(model.model_id),
       variant: clamp(model.variant),
@@ -3740,7 +3755,7 @@ export class WorkspaceCollector {
    * once the root turn settled: one "session.child" event carrying the child's
    * new messages, plus the child's checkpoint for the next capture.
    */
-  recordChildSession(sessionId: string, child: CollectorChildSession): void {
+  recordChildSession(sessionId: string, child: UploadChildSession): void {
     const state = this.sessions.get(sessionId);
     if (!state || state.finished) return;
     if (!/^[A-Za-z0-9._:-]{1,256}$/.test(child.childSessionId)) return;
@@ -3753,9 +3768,9 @@ export class WorkspaceCollector {
     this.appendTrace(state, "session.child", {
       child_session_id: child.childSessionId,
       parent_session_id: child.parentSessionId,
-      ...(Number.isSafeInteger(child.depth) && child.depth! >= 1 && child.depth! <= MAX_COLLECTOR_CHILD_SESSION_DEPTH ? { depth: child.depth } : {}),
-      title: child.title ? clampCollectorText(child.title, MAX_GIT_SUBJECT_CHARS) : null,
-      agent: child.agent ? clampCollectorText(child.agent, MAX_ENVIRONMENT_FIELD_CHARS) : null,
+      ...(Number.isSafeInteger(child.depth) && child.depth! >= 1 && child.depth! <= MAX_UPLOAD_CHILD_SESSION_DEPTH ? { depth: child.depth } : {}),
+      title: child.title ? clampUploadText(child.title, MAX_GIT_SUBJECT_CHARS) : null,
+      agent: child.agent ? clampUploadText(child.agent, MAX_ENVIRONMENT_FIELD_CHARS) : null,
       messages: withSubagentFallbacks(child.messages, state.subagentFallbacks.get(child.childSessionId)),
     });
     void this.persistOnceReady(state);
@@ -3766,18 +3781,18 @@ export class WorkspaceCollector {
    * browser-internal URLs are never traced; page text is redacted and capped.
    * Returns whether the visit was recorded.
    */
-  recordWebVisit(sessionId: string, visit: CollectorWebVisit): boolean {
+  recordWebVisit(sessionId: string, visit: UploadWebVisit): boolean {
     const state = this.sessions.get(sessionId);
     if (!state || state.finished) return false;
-    if (typeof visit.url !== "string" || !isCollectableWebUrl(visit.url)) return false;
+    if (typeof visit.url !== "string" || !isUploadableWebUrl(visit.url)) return false;
     const url = new URL(visit.url);
     url.username = "";
     url.password = "";
-    const title = collectorTextForTrace(visit.title ?? null, MAX_WEB_VISIT_TITLE_CHARS * 4);
-    const text = collectorTextForTrace(visit.text ?? null, MAX_COLLECTOR_WEB_VISIT_TEXT_BYTES);
+    const title = uploadTextForTrace(visit.title ?? null, MAX_WEB_VISIT_TITLE_CHARS * 4);
+    const text = uploadTextForTrace(visit.text ?? null, MAX_UPLOAD_WEB_VISIT_TEXT_BYTES);
     this.appendTrace(state, "web.visit", {
-      url: clampCollectorText(redactCollectorText(url.toString()).text, MAX_WEB_VISIT_URL_CHARS),
-      title: title.text === null ? null : clampCollectorText(title.text, MAX_WEB_VISIT_TITLE_CHARS),
+      url: clampUploadText(redactUploadText(url.toString()).text, MAX_WEB_VISIT_URL_CHARS),
+      title: title.text === null ? null : clampUploadText(title.text, MAX_WEB_VISIT_TITLE_CHARS),
       text: text.text,
       text_truncated: text.truncated,
     });
@@ -3785,13 +3800,13 @@ export class WorkspaceCollector {
   }
 
   /** Records a file attached to a prompt: identity, size, and redacted, capped text when extractable. */
-  recordAttachment(sessionId: string, attachment: CollectorAttachment): void {
+  recordAttachment(sessionId: string, attachment: UploadAttachment): void {
     const state = this.sessions.get(sessionId);
     if (!state || state.finished) return;
-    const text = collectorTextForTrace(attachment.text, MAX_COLLECTOR_ATTACHMENT_TEXT_BYTES);
+    const text = uploadTextForTrace(attachment.text, MAX_UPLOAD_ATTACHMENT_TEXT_BYTES);
     this.appendTrace(state, "attachment", {
-      name: clampCollectorText(redactCollectorText(basename(attachment.name || "attachment")).text, MAX_ATTACHMENT_NAME_CHARS),
-      mime: clampCollectorText(attachment.mime || "application/octet-stream", MAX_ATTACHMENT_MIME_CHARS),
+      name: clampUploadText(redactUploadText(basename(attachment.name || "attachment")).text, MAX_ATTACHMENT_NAME_CHARS),
+      mime: clampUploadText(attachment.mime || "application/octet-stream", MAX_ATTACHMENT_MIME_CHARS),
       bytes: Math.max(0, Math.floor(attachment.bytes)),
       sha256: attachment.sha256,
       text: text.text,
@@ -3811,7 +3826,7 @@ export class WorkspaceCollector {
     }
   }
 
-  private sessionBlock(state: SessionState): CollectorSessionBlock {
+  private sessionBlock(state: SessionState): UploadSessionBlock {
     return {
       provider_id: state.model?.provider_id ?? null,
       model_id: state.model?.model_id ?? null,
@@ -3843,7 +3858,7 @@ export class WorkspaceCollector {
       if (emitted >= MAX_ARTIFACT_EVENTS_PER_TURN || stat.size > MAX_ARTIFACT_HASH_BYTES) continue;
       try {
         const sha256 = await sha256File(resolve(state.root, path));
-        this.appendTrace(state, "artifact", { path: collectorPathForUpload(path), sha256, bytes: stat.size });
+        this.appendTrace(state, "artifact", { path: portablePathForUpload(path), sha256, bytes: stat.size });
         state.touchedPaths.add(path);
         emitted += 1;
       } catch {
@@ -3943,14 +3958,14 @@ export class WorkspaceCollector {
   private async turnDiffInput(state: SessionState, change: TurnChange, pool: ReadPool, ancestors: AncestorCache, texts: boolean): Promise<TurnDiffInput | null> {
     const { path, before, after, unseen } = change;
     const input = {
-      path: (after ?? before)?.uploadPath ?? collectorPathForUpload(path),
+      path: (after ?? before)?.uploadPath ?? portablePathForUpload(path),
       before_sha256: before?.sha256 ?? null,
       after_sha256: after?.sha256 ?? null,
       before: null,
       after: null,
     };
     if (after) {
-      // Changed by the turn from a form the collector never saw: nothing to diff against.
+      // Changed by the turn from a form the session uploader never saw: nothing to diff against.
       if (unseen) return { ...input, status: "no_base" };
       if (before && !(await this.bases.has(before.sha256))) return { ...input, status: "no_base" };
       if (!texts) return { ...input, status: before ? "modified" : "added" };
@@ -3971,7 +3986,7 @@ export class WorkspaceCollector {
       return base === null ? { ...input, status: "no_base" } : { ...input, status: "deleted", before: base };
     }
     if (!file.isFile() || file.isSymbolicLink()) return null;
-    if (file.size <= MAX_COLLECTOR_FILE_BYTES && !state.cache.get(path)?.binary && !(await startsBinary(absolute))) return null;
+    if (file.size <= MAX_UPLOAD_FILE_BYTES && !state.cache.get(path)?.binary && !(await startsBinary(absolute))) return null;
     return { ...input, after_sha256: null, status: "skipped" };
   }
 
@@ -4208,7 +4223,7 @@ export class WorkspaceCollector {
   private queueChangedPath(state: SessionState, filename: string): void {
     if (state.finished) return;
     const path = workspaceRelativePath(state.root, filename);
-    if (!path || isCollectorPathDenied(path)) return;
+    if (!path || isUploadPathDenied(path)) return;
     // Several events for one path before its capture starts collapse into one read.
     if (state.pendingJournal.has(path)) return;
     state.pendingJournal.add(path);
@@ -4247,7 +4262,7 @@ export class WorkspaceCollector {
       const file = await lstat(absolute);
       const written = writtenThisTurn(state.turnStartedAt, state.cache.get(path), file);
       if (file.isFile() && !file.isSymbolicLink() && file.size > MAX_CHANGE_JOURNAL_BYTES && written) state.turnSkipped.set(path, file.mtimeMs);
-      if (!file.isFile() || file.isSymbolicLink() || file.size > MAX_COLLECTOR_FILE_BYTES) {
+      if (!file.isFile() || file.isSymbolicLink() || file.size > MAX_UPLOAD_FILE_BYTES) {
         entry = { path, at: new Date().toISOString(), status: "skipped" };
       } else if (file.size > MAX_CHANGE_JOURNAL_BYTES) {
         // Larger than the whole journal: it could only evict every other entry
@@ -4257,7 +4272,7 @@ export class WorkspaceCollector {
       } else {
         const buffer = await readFile(absolute);
         this.metrics.fileReads += 1;
-        if (buffer.length > MAX_COLLECTOR_FILE_BYTES || isBinary(buffer)) {
+        if (buffer.length > MAX_UPLOAD_FILE_BYTES || isBinary(buffer)) {
           if (written) state.turnSkipped.set(path, file.mtimeMs);
           entry = { path, at: new Date().toISOString(), status: "skipped" };
         } else {
@@ -4295,7 +4310,7 @@ export class WorkspaceCollector {
 
   private enqueue(state: SessionState, operation: () => Promise<void>): void {
     state.tail = state.tail.then(operation).catch((error: unknown) => {
-      this.log("warn", "OmniRush collection operation failed", {
+      this.log("warn", "OmniRush session upload operation failed", {
         sessionId: state.id,
         error: error instanceof Error ? error.message : "unknown",
       });
@@ -4303,7 +4318,7 @@ export class WorkspaceCollector {
   }
 
   private touchedPathsForUpload(state: SessionState): string[] {
-    return [...state.touchedPaths].slice(0, MAX_TOUCHED_PATHS).map(collectorPathForUpload);
+    return [...state.touchedPaths].slice(0, MAX_TOUCHED_PATHS).map(portablePathForUpload);
   }
 
   /**
@@ -4317,7 +4332,7 @@ export class WorkspaceCollector {
    * and covers the whole tree otherwise. Resolves with whether a snapshot went
    * out.
    */
-  private async uploadWorkspace(state: SessionState, type: Exclude<SnapshotType, "trace">, trigger: CollectorTrigger): Promise<boolean> {
+  private async uploadWorkspace(state: SessionState, type: Exclude<SnapshotType, "trace">, trigger: UploadTrigger): Promise<boolean> {
     const cache = state.cache;
     // Paths reported from here on belong to the next capture.
     const dirty = state.dirty;
@@ -4331,7 +4346,7 @@ export class WorkspaceCollector {
       // listing vouches for (the paths a targeted scan inspects, and every
       // journal entry), in one batch: nothing git ignores now leaves the
       // machine, whatever it answered when the event arrived.
-      const reported = targeted && previous !== null ? [...dirty].filter((path) => !isCollectorPathDenied(path)) : [];
+      const reported = targeted && previous !== null ? [...dirty].filter((path) => !isUploadPathDenied(path)) : [];
       const journaled = type === "change" || type === "end" ? [...state.changeJournal.values()] : [];
       const checked = [...new Set([...reported, ...journaled.map((entry) => entry.path)])];
       const ignored = checked.length > 0 ? await this.ignoredPaths(state, checked, true) : new Set<string>();
@@ -4351,7 +4366,7 @@ export class WorkspaceCollector {
       if (previous !== null) for (const path of scan.changed ?? []) this.reportTouched(state, path);
       // A change capture that found nothing moved stops at one `git rev-parse`
       // (a commit changes history without touching a file); the full git block
-      // with its status, log and diff is collected only for a snapshot that goes out.
+      // with its status, log and diff is read only for a snapshot that goes out.
       if (type === "change" && scan.changed !== null && scan.changed.size === 0 && scan.removed === 0 && !this.journalHasChanges(state)
         && (await gitHead(state.root)) === state.lastHead) {
         accepted = true;
@@ -4364,7 +4379,7 @@ export class WorkspaceCollector {
       const rootName = workspaceRootName(state.root);
       const touchedPaths = this.touchedPathsForUpload(state);
       const metadata = JSON.stringify({
-        schema_version: COLLECTOR_SCHEMA_VERSION,
+        schema_version: UPLOAD_SCHEMA_VERSION,
         workspace_id: state.workspaceId,
         session_id: state.id,
         session_segment: state.segment,
@@ -4376,12 +4391,12 @@ export class WorkspaceCollector {
         root_name: rootName,
         git: { commit: git?.commit ?? null, branch: git?.branch ?? null, dirty: git ? String(git.dirty) : "false" },
       });
-      const leading: CollectorFile[] = [{ path: "__omnirush__/workspace.json", content: metadata, sha256: sha256Hex(metadata) }];
+      const leading: UploadFile[] = [{ path: "__omnirush__/workspace.json", content: metadata, sha256: sha256Hex(metadata) }];
       if (journal.length > 0) {
         const changes = JSON.stringify({
           schema_version: 1,
           session_id: state.id,
-          entries: journal.map((entry) => ({ ...entry, path: collectorPathForUpload(entry.path) })),
+          entries: journal.map((entry) => ({ ...entry, path: portablePathForUpload(entry.path) })),
         });
         leading.push({ path: "__omnirush__/changes.json", content: changes, sha256: sha256Hex(changes) });
       }
@@ -4456,7 +4471,7 @@ export class WorkspaceCollector {
           omitted_bytes: omittedBytes,
           budget_bytes: budget,
         });
-        this.log("warn", "OmniRush collection snapshot trimmed to the snapshot cap", {
+        this.log("warn", "OmniRush session upload snapshot trimmed to the snapshot cap", {
           sessionId: state.id,
           snapshotType: type,
           trigger,
@@ -4511,7 +4526,7 @@ export class WorkspaceCollector {
 
   /**
    * One POST of an envelope, ended by `deadline` (the attempt's size-scaled
-   * deadline, collect-upload-budget.ts: fetch reports no upload progress, so
+   * deadline, session-upload-budget.ts: fetch reports no upload progress, so
    * sending the body and the gateway's answer share one deadline) or sooner
    * by `cancel`.
    */
@@ -4519,7 +4534,7 @@ export class WorkspaceCollector {
     const signal = cancel ? AbortSignal.any([deadline, cancel]) : deadline;
     if (signal.aborted) return Promise.reject(signal.reason);
     if (this.uploader) return untilAborted(this.uploader(sessionId, compressed, signal), signal);
-    return this.fetcher(this.collectUrl!, {
+    return this.fetcher(this.uploadUrl!, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${this.token}`,
@@ -4552,8 +4567,8 @@ export class WorkspaceCollector {
    * the spool at once and the spool drain retries it on its own backoff.
    */
   private async transmit(sessionId: string, compressed: Uint8Array, attempts = UPLOAD_ATTEMPTS, cancel?: AbortSignal): Promise<TransmitOutcome> {
-    const timeoutMs = collectUploadTimeoutMs(compressed.byteLength, this.uploadBudget);
-    let lastReason = "collector upload unavailable";
+    const timeoutMs = sessionUploadTimeoutMs(compressed.byteLength, this.uploadBudget);
+    let lastReason = "session upload unavailable";
     let refreshAttempted = false;
     let attempt = 0;
     while (attempt < attempts) {
@@ -4562,7 +4577,7 @@ export class WorkspaceCollector {
       try {
         const response = await this.send(sessionId, compressed, deadline, cancel);
         if (response.ok) return { ok: true };
-        lastReason = `collector upload failed with status ${response.status}`;
+        lastReason = `sessionUploader upload failed with status ${response.status}`;
         if (UNAUTHORIZED_STATUSES.has(response.status)) {
           // The sign-in gate is final: nothing is queued for an account that
           // is gone. Any other rejection is a device token the gateway broker
@@ -4574,7 +4589,7 @@ export class WorkspaceCollector {
           if (refreshAttempted) return { ok: false, retryable: true, reason: lastReason };
           refreshAttempted = true;
           const refresh = await this.refreshToken();
-          this.log("warn", "OmniRush collection upload rejected as unauthorized", {
+          this.log("warn", "OmniRush session upload rejected as unauthorized", {
             sessionId,
             status: response.status,
             refreshed: refresh.refreshed,
@@ -4587,7 +4602,7 @@ export class WorkspaceCollector {
         await response.body?.cancel().catch(() => undefined);
         if (!RETRYABLE_STATUSES.has(response.status)) return { ok: false, retryable: false, reason: lastReason };
       } catch (error) {
-        lastReason = error instanceof Error ? error.message : "collector upload unavailable";
+        lastReason = error instanceof Error ? error.message : "session upload unavailable";
         if (cancel?.aborted) return { ok: false, retryable: true, reason: lastReason };
         // Out of time: this attempt's deadline, or the gateway broker's own
         // (the same size-scaled budget, reported across the worker boundary by name).
@@ -4604,6 +4619,7 @@ export class WorkspaceCollector {
   }
 
   private async envelopeTempPath(): Promise<string> {
+    await this.stateMigrated;
     await mkdir(this.tempDir, { recursive: true, mode: 0o700 });
     return join(this.tempDir, `${spoolId(++this.spoolCounter)}.zst.tmp`);
   }
@@ -4634,8 +4650,8 @@ export class WorkspaceCollector {
    * retryable failure moves the file into the spool instead. Resolves with
    * whether the envelope was accepted (delivered or spooled).
    */
-  private async uploadEnvelope(state: SessionState, snapshotType: SnapshotType, trigger: CollectorTrigger, body: EnvelopeBody): Promise<boolean> {
-    if (!this.collectUrl && !this.uploader) return false;
+  private async uploadEnvelope(state: SessionState, snapshotType: SnapshotType, trigger: UploadTrigger, body: EnvelopeBody): Promise<boolean> {
+    if (!this.uploadUrl && !this.uploader) return false;
     const sequence = state.sequence + 1;
     const path = await this.envelopeTempPath();
     const writer = new EnvelopeWriter(path);
@@ -4643,7 +4659,7 @@ export class WorkspaceCollector {
     let compressedBytes: number;
     try {
       const head = JSON.stringify({
-        schema_version: COLLECTOR_SCHEMA_VERSION,
+        schema_version: UPLOAD_SCHEMA_VERSION,
         session_id: state.id,
         session_segment: state.segment,
         session_resumed: state.resumed,
@@ -4681,7 +4697,7 @@ export class WorkspaceCollector {
         // retried. The scan budget keeps this from happening; reaching it means
         // the wrapper outgrew its margin, which deserves a loud line here rather
         // than a lost upload and a rejection upstream.
-        this.log("warn", "OmniRush collection payload exceeded the snapshot cap", {
+        this.log("warn", "OmniRush session upload payload exceeded the snapshot cap", {
           sessionId: state.id,
           snapshotType,
           trigger,
@@ -4691,7 +4707,7 @@ export class WorkspaceCollector {
         return false;
       }
       if (compressedBytes > MAX_COMPRESSED_BYTES) {
-        this.log("warn", "OmniRush collection payload exceeded compressed limit", { sessionId: state.id, snapshotType, trigger });
+        this.log("warn", "OmniRush session upload payload exceeded compressed limit", { sessionId: state.id, snapshotType, trigger });
         return false;
       }
       const compressed = await readFile(path);
@@ -4705,7 +4721,7 @@ export class WorkspaceCollector {
         const spooled = await this.spoolEnvelopeFile({ id: "", session_id: state.id, snapshot_type: snapshotType, trigger, sequence, bytes: compressedBytes, created_at: new Date().toISOString(), attempts: 1 }, path, account);
         if (!spooled) {
           // Signed out during the upload: the envelope is deleted, never queued for the next account.
-          this.log("info", "OmniRush collection artifact discarded at sign-out", { sessionId: state.id, snapshotType, trigger, sequence });
+          this.log("info", "OmniRush session upload artifact discarded at sign-out", { sessionId: state.id, snapshotType, trigger, sequence });
           return false;
         }
         state.sentBytes += bytes;
@@ -4713,7 +4729,7 @@ export class WorkspaceCollector {
         state.failureCount += 1;
         state.lastFailureAt = new Date().toISOString();
         await this.persistSession(state).catch(() => undefined);
-        this.log("warn", "OmniRush collection artifact spooled for retry", {
+        this.log("warn", "OmniRush session upload artifact spooled for retry", {
           sessionId: state.id,
           snapshotType,
           trigger,
@@ -4734,7 +4750,7 @@ export class WorkspaceCollector {
           error: error instanceof Error ? error.message : "unknown",
         });
       });
-      this.log("info", "OmniRush collection artifact uploaded", {
+      this.log("info", "OmniRush session upload artifact uploaded", {
         sessionId: state.id,
         snapshotType,
         trigger,
@@ -4751,13 +4767,14 @@ export class WorkspaceCollector {
   // --- durable retry spool -------------------------------------------------
 
   private spoolLocked<T>(operation: () => Promise<T>): Promise<T> {
-    const run = this.spoolTail.catch(() => undefined).then(operation);
+    const run = this.spoolTail.catch(() => undefined).then(() => this.stateMigrated).then(operation);
     this.spoolTail = run.then(() => undefined, () => undefined);
     return run;
   }
 
   private async listSpool(): Promise<SpoolMeta[]> {
     if (!this.spoolDir) return [];
+    await this.stateMigrated;
     let names: string[];
     try {
       names = await readdir(this.spoolDir);
@@ -4827,7 +4844,7 @@ export class WorkspaceCollector {
       await this.removeSpoolEntry(entry.id);
       total -= entry.bytes;
       count -= 1;
-      this.log("warn", "OmniRush collection spool dropped its oldest entry", {
+      this.log("warn", "OmniRush session upload spool dropped its oldest entry", {
         sessionId: entry.session_id,
         snapshotType: entry.snapshot_type,
         sequence: entry.sequence,
@@ -4927,7 +4944,7 @@ export class WorkspaceCollector {
         this.retryFailures = 0;
         delivered += 1;
         pending -= 1;
-        this.log("info", "OmniRush collection artifact delivered from spool", {
+        this.log("info", "OmniRush session upload artifact delivered from spool", {
           sessionId: entry.session_id,
           snapshotType: entry.snapshot_type,
           trigger: entry.trigger,
@@ -4941,7 +4958,7 @@ export class WorkspaceCollector {
       if (!outcome.retryable || entry.attempts + 1 >= MAX_SPOOL_ATTEMPTS) {
         await this.spoolLocked(() => this.removeSpoolEntry(entry.id));
         pending -= 1;
-        this.log("warn", "OmniRush collection artifact dropped from spool", {
+        this.log("warn", "OmniRush session upload artifact dropped from spool", {
           sessionId: entry.session_id,
           snapshotType: entry.snapshot_type,
           sequence: entry.sequence,
@@ -4994,6 +5011,7 @@ export class WorkspaceCollector {
       await this.bases.clear();
       if (!this.spoolDir) return;
       await rm(this.spoolDir, { recursive: true, force: true });
+      if (this.stateDir) await removeLegacyUploadContent(this.stateDir);
     });
   }
 }

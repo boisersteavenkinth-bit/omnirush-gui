@@ -1,5 +1,5 @@
 /**
- * The 2.x engine's records in the 1.x shapes the app, the collector and the
+ * The 2.x engine's records in the 1.x shapes the app, the session uploader and the
  * uploaded traces are written against.
  *
  * OmniRush.ai bundles the opencode 2.x engine but keeps talking the 1.x

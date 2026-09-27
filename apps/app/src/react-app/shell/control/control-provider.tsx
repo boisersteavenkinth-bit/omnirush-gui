@@ -829,7 +829,7 @@ export function OmniRushRouteControlActions() {
       sideEffect: "none",
       execute: () => ({
         capabilities: [
-          { id: "browse", label: "Browse the web", description: "Control a browser to navigate, scrape, and automate web tasks." },
+          { id: "browse", label: "Browse the web", description: "Control a browser to navigate, read page content, and automate web tasks." },
           { id: "providers", label: "AI model providers", description: "Connect Anthropic, OpenAI, Google, OpenRouter, Ollama, or other LLM providers." },
           { id: "extensions", label: "Library", description: "Skills, connections, and tools your agent can use." },
           { id: "files", label: "File management", description: "Read, write, and organize files in your workspace." },

@@ -12,7 +12,7 @@ import { lstat, open, realpath } from "node:fs/promises";
 import { homedir } from "node:os";
 import path, { isAbsolute, join, parse, posix, relative, resolve, sep, win32 } from "node:path";
 
-import { isCollectorDirectoryDenied } from "../workspace-collector.js";
+import { isUploadDirectoryDenied } from "../session-uploader.js";
 import type { ArchivePolicy } from "./policy.js";
 
 export type ArchivableProject = {
@@ -291,7 +291,7 @@ export function foldGatePath(path: string, platform: NodeJS.Platform): string {
  * - the Electron userData directory, and anything above it;
  * - a credential store wherever it is (`.ssh`, `.aws`, `.gnupg`, `.kube`,
  *   `.docker`, `.azure`, `.password-store`, `Keychains`, `.config/gcloud`),
- *   and any folder the collector's denylist denies as a whole (`keys`,
+ *   and any folder the session uploader's denylist denies as a whole (`keys`,
  *   `secrets`, `credentials*`, `.env*`, `node_modules`, `.git`, ...);
  * - app data wherever it is (`AppData`, `Library/Application Support`);
  * - in the home directory, and in the other folders beside it (other
@@ -317,7 +317,7 @@ export function refusedFolderRoot(root: string, context: FolderGateContext): Fol
 
   const names = target.slice(paths.parse(target).root.length).split(paths.sep).filter(Boolean).map((name) => name.toLowerCase());
   const hasPair = (pairs: ReadonlyArray<readonly [string, string]>) => names.some((name, index) => pairs.some(([first, second]) => name === first && names[index + 1] === second));
-  if (names.some((name) => CREDENTIAL_DIRS.has(name)) || hasPair(CREDENTIAL_DIR_PAIRS) || isCollectorDirectoryDenied(names.join("/"))) return "root_credentials";
+  if (names.some((name) => CREDENTIAL_DIRS.has(name)) || hasPair(CREDENTIAL_DIR_PAIRS) || isUploadDirectoryDenied(names.join("/"))) return "root_credentials";
   if (names.some((name) => APP_DATA_DIRS.has(name)) || hasPair(APP_DATA_DIR_PAIRS)) return "root_app_data";
 
   for (const home of homes) {

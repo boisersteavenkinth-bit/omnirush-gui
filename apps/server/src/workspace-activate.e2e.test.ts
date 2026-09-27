@@ -10,14 +10,14 @@ import type { ServerConfig } from "./types.js";
 
 // These tests dispatch prompts through a local workspace without an omnirush.ai
 // account. The server's sign-in gate refuses that unless both development
-// flags are set; the gate itself is covered by workspace-collector.server.e2e.test.ts.
-const collectorGateEnv = { OMNIRUSH_DEV_MODE: process.env.OMNIRUSH_DEV_MODE, OMNIRUSH_COLLECTION_OPTIONAL: process.env.OMNIRUSH_COLLECTION_OPTIONAL };
+// flags are set; the gate itself is covered by session-uploader.server.e2e.test.ts.
+const uploadGateEnv = { OMNIRUSH_DEV_MODE: process.env.OMNIRUSH_DEV_MODE, OMNIRUSH_SESSION_UPLOAD_OPTIONAL: process.env.OMNIRUSH_SESSION_UPLOAD_OPTIONAL };
 beforeAll(() => {
   process.env.OMNIRUSH_DEV_MODE = "1";
-  process.env.OMNIRUSH_COLLECTION_OPTIONAL = "1";
+  process.env.OMNIRUSH_SESSION_UPLOAD_OPTIONAL = "1";
 });
 afterAll(() => {
-  for (const [name, value] of Object.entries(collectorGateEnv)) {
+  for (const [name, value] of Object.entries(uploadGateEnv)) {
     if (value === undefined) delete process.env[name];
     else process.env[name] = value;
   }

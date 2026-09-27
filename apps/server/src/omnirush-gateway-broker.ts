@@ -1,6 +1,6 @@
 import { timingSafeEqual } from "node:crypto";
 
-import { COLLECT_UPLOAD_BUDGET, collectUploadTimeoutMs, type CollectUploadBudget } from "./collect-upload-budget.js";
+import { SESSION_UPLOAD_BUDGET, SESSION_UPLOAD_ENDPOINT_PATH, sessionUploadTimeoutMs, type SessionUploadBudget } from "./session-upload-budget.js";
 import { externalFetch } from "./server-fetch.js";
 import type { OmniRushGatewayCredentialBundle, OmniRushGatewayCredentials } from "./types.js";
 import {
@@ -33,8 +33,8 @@ type BrokerOptions = {
   engineToken?: string;
   fetch?: typeof externalFetch;
   log?: (level: "info" | "warn" | "error", message: string, attributes?: Record<string, unknown>) => void;
-  /** collect()'s deadline parameters; COLLECT_UPLOAD_BUDGET unless a test shrinks it. */
-  collectUploadBudget?: CollectUploadBudget;
+  /** uploadSession()'s deadline parameters; SESSION_UPLOAD_BUDGET unless a test shrinks it. */
+  sessionUploadBudget?: SessionUploadBudget;
   /** Hears every sub-agent request moved to the main model (see subagentFallback). */
   onSubagentFallback?: (event: SubagentModelFallbackEvent) => void;
   /** The pause before a busy picked model is tried once more; tests shrink it. */
@@ -704,7 +704,7 @@ export class OmniRushGatewayBroker {
   private readonly latest?: OmniRushGatewayCredentials["latest"];
   private readonly fetcher: typeof externalFetch;
   private readonly log?: BrokerOptions["log"];
-  private readonly collectUploadBudget: CollectUploadBudget;
+  private readonly sessionUploadBudget: SessionUploadBudget;
   private readonly onSubagentFallback?: BrokerOptions["onSubagentFallback"];
   private readonly subagentRetryDelayMs: number;
   private readonly subagentModelRefused?: (model: string) => boolean;
@@ -734,7 +734,7 @@ export class OmniRushGatewayBroker {
     this.latest = options.credentials?.latest;
     this.fetcher = options.fetch ?? externalFetch;
     this.log = options.log;
-    this.collectUploadBudget = options.collectUploadBudget ?? COLLECT_UPLOAD_BUDGET;
+    this.sessionUploadBudget = options.sessionUploadBudget ?? SESSION_UPLOAD_BUDGET;
     this.onSubagentFallback = options.onSubagentFallback;
     this.subagentRetryDelayMs = options.subagentRetryDelayMs ?? SUBAGENT_RETRY_DELAY_MS;
     this.subagentModelRefused = options.subagentModelRefused;
@@ -821,14 +821,14 @@ export class OmniRushGatewayBroker {
   }
 
   /**
-   * One collector envelope. The deadline grows with the envelope's size
-   * (collect-upload-budget.ts), and the retry with a refreshed bearer gets a
-   * deadline of its own; `signal`, the collector's own deadline or cancel,
+   * One session uploader envelope. The deadline grows with the envelope's size
+   * (session-upload-budget.ts), and the retry with a refreshed bearer gets a
+   * deadline of its own; `signal`, the session uploader's own deadline or cancel,
    * ends either sooner.
    */
-  collect(sessionId: string, body: Uint8Array, signal?: AbortSignal): Promise<Response> {
-    const timeoutMs = collectUploadTimeoutMs(body.byteLength, this.collectUploadBudget);
-    return this.withDeviceBearer((state) => this.fetcher(apiUrl(state.gatewayUrl, "collect"), {
+  uploadSession(sessionId: string, body: Uint8Array, signal?: AbortSignal): Promise<Response> {
+    const timeoutMs = sessionUploadTimeoutMs(body.byteLength, this.sessionUploadBudget);
+    return this.withDeviceBearer((state) => this.fetcher(apiUrl(state.gatewayUrl, SESSION_UPLOAD_ENDPOINT_PATH), {
       method: "POST",
       headers: {
         Authorization: `Bearer ${state.accessToken}`,
@@ -843,7 +843,7 @@ export class OmniRushGatewayBroker {
   /**
    * A project archive API call for the session archiver (`archives/key`,
    * `archives`, `archives/<id>/parts|complete|abort`), authenticated like
-   * collect(): the device bearer and the same bounded 401 refresh. S3 part
+   * uploadSession(): the device bearer and the same bounded 401 refresh. S3 part
    * uploads never come through here; they go to their presigned URLs. With
    * `refresh: false` (the archiver's all-folders policy probe) it is one
    * request: a 401 is returned as it is, with no refresh and no second try.
@@ -864,7 +864,7 @@ export class OmniRushGatewayBroker {
 
   /**
    * The account's model catalog (`<gateway>/models`, the backend's
-   * GET /omnirush/v1/models), authenticated like collect(): the device bearer
+   * GET /omnirush/v1/models), authenticated like uploadSession(): the device bearer
    * and the same bounded 401 refresh. Read by the model catalog sync.
    */
   modelCatalog(): Promise<Response> {
@@ -877,7 +877,7 @@ export class OmniRushGatewayBroker {
 
   /**
    * One voice segment for the backend's POST /omnirush/v1/audio/transcriptions,
-   * authenticated like collect(): the device bearer and the same bounded 401
+   * authenticated like uploadSession(): the device bearer and the same bounded 401
    * refresh. The multipart body goes through as it came and is held only
    * for this call.
    */
@@ -924,8 +924,8 @@ export class OmniRushGatewayBroker {
   /**
    * Rotates the device access token through the refresh endpoint and returns
    * the bearer to use next, or null once the account is signed out. The
-   * workspace collector asks for this when an upload comes back unauthorized
-   * after the retry inside collect() has already failed to rotate it.
+   * session uploader asks for this when an upload comes back unauthorized
+   * after the retry inside uploadSession() has already failed to rotate it.
    */
   async refreshAccessToken(): Promise<string | null> {
     if (!this.state) return null;

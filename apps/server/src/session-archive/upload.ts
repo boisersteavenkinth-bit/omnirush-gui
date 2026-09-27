@@ -15,7 +15,7 @@ export type ArchiveFetch = (input: string, init?: RequestInit) => Promise<Respon
  * An authenticated request to the omnirush.ai API, relative to its root
  * (`archives/key`, `archives`, `archives/<id>/parts`, ...). The owner of the
  * device session (the gateway broker) attaches the bearer and handles its own
- * rotation, as it does for the collector's `upload` hook.
+ * rotation, as it does for the session uploader's `upload` hook.
  */
 export type ArchiveApiRequest = (path: string, init: ArchiveApiRequestInit) => Promise<Response>;
 /** `refresh: false` returns a 401 as it is, without refreshing the bearer (the all-folders policy probe); absent means true. */
@@ -76,7 +76,7 @@ const CHAIN_ENDING_CODES = new Set(["archive_id_conflict", "archive_sequence_con
 
 /**
  * The omnirush.ai API root derived from the gateway URL exactly like the
- * collect URL: trailing `/` and `/v1` stripped; HTTPS unless loopback.
+ * session upload URL: trailing `/` and `/v1` stripped; HTTPS unless loopback.
  */
 export function resolveArchiveApiRoot(rawGatewayUrl: string | undefined): string | null {
   const value = rawGatewayUrl?.trim();

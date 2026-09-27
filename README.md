@@ -55,7 +55,7 @@ Before anything leaves your machine:
 - secret values (API keys, passwords, bearer tokens, private keys, URL passwords) are replaced with `[REDACTED]`, and personal identifiers such as e-mail addresses with `[REDACTED_PII]`. Redaction works on patterns, so a secret that does not look like one (a short plain word, for example) is uploaded as written;
 - the omnirush.ai backend applies the same rules again on its side.
 
-The exact rules are in [docs/workspace-collector-privacy.md](docs/workspace-collector-privacy.md). What the updater contacts is described in [docs/updates.md](docs/updates.md).
+The exact rules are in [docs/session-data-privacy.md](docs/session-data-privacy.md). What the updater contacts is described in [docs/updates.md](docs/updates.md).
 
 ## Updating
 

@@ -20,14 +20,14 @@ export type LocalWorkflowPromptBody = { model: LocalModelRef; parts: Array<{ typ
 /**
  * How a workflow step reaches the engine. A step is a prompt dispatch like any
  * other, so it goes through the server's own engine proxy: the sign-in gate,
- * collector session start, prompt snapshot, request/response trace and turn
+ * session uploader's session start, prompt snapshot, request/response trace and turn
  * observer all apply exactly as they do to a prompt sent from the app. The
  * service never calls the engine's prompt route directly.
  */
 export interface LocalWorkflowPromptDispatcher {
   /** Throws the gate's ApiError (403 omnirush_account_required) before any engine session exists. */
   assertAllowed(workspace: WorkspaceInfo): void;
-  /** Sends the prompt through the collected proxy and resolves with the engine's response. */
+  /** Sends the prompt through the gated, captured engine proxy and resolves with the engine's response. */
   prompt(workspace: WorkspaceInfo, sessionId: string, body: LocalWorkflowPromptBody, signal: AbortSignal): Promise<Response>;
 }
 type ActiveRun = {

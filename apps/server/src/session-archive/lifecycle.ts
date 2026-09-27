@@ -272,7 +272,7 @@ export class ProjectArchiveLifecycle {
   }
 
   /**
-   * The collector saw the session touch a path (workspace-relative): a
+   * The session uploader saw the session touch a path (workspace-relative): a
    * tool's path in the trace, or a change on disk. Kept for a touched-files
    * session (the archiver drops it for any other); nothing for a session
    * this app run has not started or knows is not archived.

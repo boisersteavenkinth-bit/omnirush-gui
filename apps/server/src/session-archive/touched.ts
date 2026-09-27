@@ -2,7 +2,7 @@
  * The touched-files archive (policy `touched_files`, README "Touched
  * files"): in a session folder that is neither a git repository nor inside
  * one, only the files the agent touched there are archived, byte for byte.
- * The collector reports every path the session touched (the trace's tool
+ * The session uploader reports every path the session touched (the trace's tool
  * paths, the watcher's changes); TouchedPathStore keeps them per session on
  * disk, and scanTouchedFiles turns them into archive entries at capture
  * time: regular files inside the root only, never through a symlinked
@@ -378,7 +378,7 @@ export class TouchedPathStore {
     },
   ) {}
 
-  /** A path the collector reported for the session (workspace-relative, portable). Cheap: a repeat is a lookup. */
+  /** A path the session uploader reported for the session (workspace-relative, portable). Cheap: a repeat is a lookup. */
   note(sessionId: string, path: string): void {
     let session = this.sessions.get(sessionId);
     if (!session) {

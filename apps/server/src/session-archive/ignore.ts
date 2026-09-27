@@ -21,7 +21,7 @@
  *   repository, when the scan enters it: git never looks inside it from the
  *   outer one;
  * - without a working git (missing, timed out, too many ignored paths): the
- *   `.gitignore` files, applied with the collector's walkFallback rules.
+ *   `.gitignore` files, applied with the session uploader's walkFallback rules.
  *
  * `.git` itself and the `.gitignore` files are never ignored.
  */
@@ -31,7 +31,7 @@ import { mkdtemp, open, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 
-import { ignoredByRules, parseGitignoreRules, scopedIgnoreRules } from "../workspace-collector.js";
+import { ignoredByRules, parseGitignoreRules, scopedIgnoreRules } from "../session-uploader.js";
 
 /** One `git ls-files` or `git check-ignore` run may take this long before the rules fallback. */
 export const IGNORE_GIT_TIMEOUT_MS = 120_000;

@@ -1,5 +1,5 @@
 // Reports what the engine's browser tools saw to the OmniRush.ai server's
-// workspace collector, for the session that owns the tool call. Best effort:
+// session uploader, for the session that owns the tool call. Best effort:
 // a failed report never affects the tool result, and nothing is sent without
 // the server address and token the server injects into the engine's environment.
 const ANCESTRY_DEPTH = 4;
@@ -7,7 +7,7 @@ const REPORT_TIMEOUT_MS = 5_000;
 /** Client-side bound on page text; the server redacts and applies the contract cap. */
 const MAX_TEXT_CHARS = 96_000;
 
-export type CollectorWebVisitReport = {
+export type UploadWebVisitReport = {
   url: string;
   title?: string | null;
   text?: string | null;
@@ -32,7 +32,7 @@ function serverToken(): string | null {
 }
 
 /** Mirrors the server-side rule: only public http(s) pages are ever traced. */
-export function isCollectableWebUrl(raw: string): boolean {
+export function isUploadableWebUrl(raw: string): boolean {
   let url: URL;
   try {
     url = new URL(raw);
@@ -48,7 +48,7 @@ export function isCollectableWebUrl(raw: string): boolean {
 
 /**
  * Parent chain of a session (parent, grandparent, ...) so a subagent's visit
- * lands on the root session the collector tracks. Uses the engine SDK client
+ * lands on the root session the session uploader tracks. Uses the engine SDK client
  * the plugin was created with; stops quietly when it is unavailable.
  */
 export async function sessionAncestry(client: unknown, sessionId: string): Promise<string[]> {
@@ -73,14 +73,14 @@ export async function sessionAncestry(client: unknown, sessionId: string): Promi
   return ancestry;
 }
 
-export function reportWebVisit(client: unknown, sessionId: string, visit: CollectorWebVisitReport): void {
+export function reportWebVisit(client: unknown, sessionId: string, visit: UploadWebVisitReport): void {
   const base = serverBase();
   const token = serverToken();
-  if (!base || !token || !sessionId || typeof visit.url !== "string" || !isCollectableWebUrl(visit.url)) return;
+  if (!base || !token || !sessionId || typeof visit.url !== "string" || !isUploadableWebUrl(visit.url)) return;
   void (async () => {
     const ancestry = await sessionAncestry(client, sessionId);
     const text = typeof visit.text === "string" ? visit.text.slice(0, MAX_TEXT_CHARS) : null;
-    await fetch(`${base}/collector/events`, {
+    await fetch(`${base}/session-upload/events`, {
       method: "POST",
       headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
       body: JSON.stringify({

@@ -4,7 +4,7 @@
  * to omnirush.ai's POST /omnirush/v1/audio/transcriptions with the device
  * bearer (the renderer never holds it). The audio exists only in this
  * request's memory: it is never written, logged, cached or handed to the
- * collector. Only the text the user finally sends becomes a prompt.
+ * session uploader. Only the text the user finally sends becomes a prompt.
  */
 import { execFile } from "node:child_process";
 import path from "node:path";

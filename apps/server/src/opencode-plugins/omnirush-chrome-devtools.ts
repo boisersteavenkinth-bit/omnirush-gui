@@ -2,7 +2,7 @@
 // through the desktop's conversation-scoped host. No unrestricted CDP tools.
 import { z } from "zod";
 import { uiBridgeRequest } from "./omnirush-ui-bridge.js";
-import { reportWebVisit } from "./omnirush-collector-client.js";
+import { reportWebVisit } from "./omnirush-session-upload-client.js";
 
 const tabId = z.string().min(1).optional().describe("A tab returned by browser_tabs or browser_open in this conversation. Defaults to this conversation's active tab.");
 const action = z.discriminatedUnion("type", [

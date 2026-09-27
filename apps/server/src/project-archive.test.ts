@@ -64,12 +64,12 @@ async function gitProject(): Promise<string> {
 const rootSession = { session: async () => ({ id: "ses_project_0001" }), messages: async () => [] };
 
 describe("createProjectArchive", () => {
-  test("with an account, archives go through the gateway broker's device session into the collector state dir", async () => {
+  test("with an account, archives go through the gateway broker's device session into the session uploader state dir", async () => {
     const server = new FakeArchiveServer();
     const gateway = broker(server);
     const stateDir = await tempDir("state");
     const root = await gitProject();
-    const archive = createProjectArchive({ config: serverConfig(stateDir), gatewayBroker: gateway, collectorEnabled: true, log: () => undefined, env: {}, fetch: server.respond });
+    const archive = createProjectArchive({ config: serverConfig(stateDir), gatewayBroker: gateway, uploadEnabled: true, log: () => undefined, env: {}, fetch: server.respond });
     archive.start();
     archive.sessionStarted({ sessionId: "ses_project_0001", root, engine: rootSession });
     await archive.settled();
@@ -87,7 +87,7 @@ describe("createProjectArchive", () => {
     const stateDir = await tempDir("state");
     const root = await gitProject();
     const slow = slowPartTwo(server);
-    const archive = createProjectArchive({ config: serverConfig(stateDir), gatewayBroker: gateway, collectorEnabled: true, log: () => undefined, env: {}, fetch: slow.fetch });
+    const archive = createProjectArchive({ config: serverConfig(stateDir), gatewayBroker: gateway, uploadEnabled: true, log: () => undefined, env: {}, fetch: slow.fetch });
     archive.start();
     archive.sessionStarted({ sessionId: "ses_project_0001", root, engine: rootSession });
     await slow.started;
@@ -117,7 +117,7 @@ describe("createProjectArchive", () => {
     const archive = createProjectArchive({
       config: serverConfig(stateDir),
       gatewayBroker: gateway,
-      collectorEnabled: true,
+      uploadEnabled: true,
       log: () => undefined,
       env: { OMNIRUSH_ARCHIVE_ENABLED: "0", OMNIRUSH_GATEWAY_URL: server.gatewayUrl, OMNIRUSH_ACCESS_TOKEN: server.token },
       fetch: async (input, init) => {
@@ -136,19 +136,19 @@ describe("createProjectArchive", () => {
   });
 
   test("the desktop's userData dir (OMNIRUSH_DESKTOP_USER_DATA_DIR) is where the all-folders policy may not archive a folder", async () => {
-    const input = { config: serverConfig(await tempDir("state")), gatewayBroker: broker(new FakeArchiveServer()), collectorEnabled: true };
+    const input = { config: serverConfig(await tempDir("state")), gatewayBroker: broker(new FakeArchiveServer()), uploadEnabled: true };
     expect(projectArchiveSettings({ ...input, env: { OMNIRUSH_DESKTOP_USER_DATA_DIR: " /Users/sam/Library/Application Support/ai.omnirush.desktop " } }).folderGate).toEqual({
       userDataDir: "/Users/sam/Library/Application Support/ai.omnirush.desktop",
     });
     expect(projectArchiveSettings({ ...input, env: {} }).folderGate).toEqual({});
   });
 
-  test("signed out (no collector account): the same clearing, nothing archived", async () => {
+  test("signed out (no session uploader account): the same clearing, nothing archived", async () => {
     const server = new FakeArchiveServer();
     const gateway = { ...broker(server), enabled: false };
     const stateDir = await tempDir("state");
     await mkdir(join(stateDir, ARCHIVE_STATE_DIRECTORY, "queue"), { recursive: true });
-    const archive = createProjectArchive({ config: serverConfig(stateDir), gatewayBroker: gateway, collectorEnabled: false, log: () => undefined, env: {} });
+    const archive = createProjectArchive({ config: serverConfig(stateDir), gatewayBroker: gateway, uploadEnabled: false, log: () => undefined, env: {} });
     archive.start();
     archive.sessionStarted({ sessionId: "ses_project_0001", root: await gitProject(), engine: rootSession });
     await archive.settled();

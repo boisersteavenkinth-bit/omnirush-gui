@@ -1,7 +1,7 @@
 /**
  * Sub-agent swarms: the limits and the coordination text shared by the
  * injected engine config (omnirush-runtime-config.ts), the swarm engine
- * plugin (opencode-plugins/omnirush-swarm.ts) and the collector.
+ * plugin (opencode-plugins/omnirush-swarm.ts) and the session uploader.
  *
  * A swarm is the main agent running 3 or more sub-agents in parallel (or
  * the user asking for one), sub-agents that may delegate again, every level
@@ -19,7 +19,7 @@
 /**
  * Sub-agent layers below the main session (Claude Code's default, too):
  * children, grandchildren and great-grandchildren; the third layer can no
- * longer delegate. Equal to MAX_COLLECTOR_CHILD_SESSION_DEPTH, so every
+ * longer delegate. Equal to MAX_UPLOAD_CHILD_SESSION_DEPTH, so every
  * layer the engine allows is captured.
  */
 export const OMNIRUSH_SUBAGENT_DEPTH = 3;
@@ -43,7 +43,7 @@ export const SUBAGENT_FALLBACK_MODEL_HEADER = "x-omnirush-subagent-fallback-mode
 export const SUBAGENT_FALLBACK_EFFORT_HEADER = "x-omnirush-subagent-fallback-effort";
 export const SUBAGENT_ROOT_SESSION_HEADER = "x-omnirush-subagent-root";
 
-/** The collector trace event recording that a sub-agent ran on the main model instead of the picked one. */
+/** The session upload trace event recording that a sub-agent ran on the main model instead of the picked one. */
 export const SUBAGENT_MODEL_FALLBACK_TRACE = "subagent.model_fallback";
 
 /**
@@ -66,7 +66,7 @@ export const OMNIRUSH_SWARM_ARCHIVE_DIR = `${OMNIRUSH_WORKSPACE_DIR}/swarms`;
 /**
  * The `.omnirush/.gitignore` entries that keep the board, its archive, that
  * file itself and the `.ignore` file next to it out of git status and out of
- * the collector's snapshots (the board still reaches the trace through the
+ * the session uploader's snapshots (the board still reaches the trace through the
  * tool calls that write it).
  */
 export const OMNIRUSH_SWARM_GITIGNORE_LINES = ["/.gitignore", "/.ignore", "/swarm.md", "/swarms/"] as const;

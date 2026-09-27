@@ -1,5 +1,5 @@
 /**
- * The server's handle on session capture (the workspace collector, the
+ * The server's handle on session capture (the session uploader, the
  * project archive and the turn observers, see capture-host.ts). By default
  * the capture runs on a worker thread (capture-worker.ts): the main event
  * loop, which serves the app (in the desktop app, the Electron main process),
@@ -26,7 +26,7 @@ import {
   type ToWorker,
 } from "./capture-protocol.js";
 import { externalFetch } from "./server-fetch.js";
-import { isCollectableWebUrl, workspaceCollectorEnabled, type CollectorWebVisit } from "./workspace-collector.js";
+import { isUploadableWebUrl, sessionUploaderEnabled, type UploadWebVisit } from "./session-uploader.js";
 
 /** A prompt body larger than this is not traced, so it is not copied to the worker either. */
 const MAX_TRACED_REQUEST_BYTES = 4 * 1024 * 1024;
@@ -46,19 +46,19 @@ export type CaptureServiceOptions = Omit<CaptureHostOptions, "onSessionClosed"> 
 };
 
 export type CaptureService = {
-  /** The collector has an account to upload to (the sign-in gate's question). */
-  readonly collectorEnabled: boolean;
+  /** The session uploader has an account to upload to (the sign-in gate's question). */
+  readonly uploadEnabled: boolean;
   /** Where capture runs right now. */
   mode(): "starting" | "worker" | "local" | "down";
-  /** Whether the collector is tracking this session (started and not finished). */
+  /** Whether the session uploader is tracking this session (started and not finished). */
   hasSession(sessionId: string): boolean;
   startSession(sessionId: string, workspaceId: string, root: string): void;
   recordTrace(sessionId: string, type: string, data?: unknown): void;
-  /** The "engine.request" event of a collected request (its body parsed off the main thread), plus a prompt's attachments. */
+  /** The "engine.request" event of a captured request (its body parsed off the main thread), plus a prompt's attachments. */
   recordPrompt(sessionId: string, prompt: Omit<PromptRecord, "body"> & { body: ArrayBuffer | undefined }): void;
   captureSnapshot(sessionId: string, trigger: "prompt" | "turn_completed"): void;
-  /** Whether the visit is recorded (a tracked session and a collectable URL). */
-  recordWebVisit(sessionId: string, visit: CollectorWebVisit): boolean;
+  /** Whether the visit is recorded (a tracked session and an uploadable URL). */
+  recordWebVisit(sessionId: string, visit: UploadWebVisit): boolean;
   archiveSessionStarted(sessionId: string, root: string, target: EngineTarget): void;
   observeSession(sessionId: string, target: EngineTarget): void;
   /** An engine was closed and another took over its sessions: turn observers reading it move there. */
@@ -92,7 +92,7 @@ function errorSummary(error: unknown): string {
 type QueuedCall = { call: CaptureCall; transfer: ArrayBuffer[] };
 
 class CaptureClient implements CaptureService {
-  readonly collectorEnabled: boolean;
+  readonly uploadEnabled: boolean;
   private current: "starting" | "worker" | "local" | "down" = "starting";
   private worker: Worker | null = null;
   private local: CaptureHost | null = null;
@@ -102,16 +102,16 @@ class CaptureClient implements CaptureService {
   private readonly replies = new Map<number, (value: unknown) => void>();
   /** The worker's requests being served on this thread. */
   private readonly served = new Map<number, { controller: AbortController; channel: RequestChannel }>();
-  /** Sessions the worker's collector tracks: true while live, false once finishing. */
+  /** Sessions the worker's session uploader tracks: true while live, false once finishing. */
   private readonly sessions = new Map<string, boolean>();
   private restarts = 0;
   private stopping: Promise<void> | null = null;
 
   constructor(private readonly options: CaptureServiceOptions) {
-    this.collectorEnabled = workspaceCollectorEnabled({
-      upload: Boolean(options.collector.upload),
-      gatewayUrl: options.collector.gatewayUrl,
-      accessToken: options.collector.accessToken,
+    this.uploadEnabled = sessionUploaderEnabled({
+      upload: Boolean(options.sessionUploader.upload),
+      gatewayUrl: options.sessionUploader.gatewayUrl,
+      accessToken: options.sessionUploader.accessToken,
     });
     if (options.worker ?? captureWorkerEnabled()) this.spawn();
     else this.runLocally(null);
@@ -122,12 +122,12 @@ class CaptureClient implements CaptureService {
   }
 
   hasSession(sessionId: string): boolean {
-    if (this.local) return this.local.collector.hasSession(sessionId);
+    if (this.local) return this.local.sessionUploader.hasSession(sessionId);
     return this.sessions.get(sessionId) === true;
   }
 
   startSession(sessionId: string, workspaceId: string, root: string): void {
-    if (this.collectorEnabled && SESSION_ID_PATTERN.test(sessionId) && !this.sessions.has(sessionId)) this.sessions.set(sessionId, true);
+    if (this.uploadEnabled && SESSION_ID_PATTERN.test(sessionId) && !this.sessions.has(sessionId)) this.sessions.set(sessionId, true);
     this.send({ kind: "call", id: null, method: "startSession", args: [sessionId, workspaceId, root] });
   }
 
@@ -145,9 +145,9 @@ class CaptureClient implements CaptureService {
     this.send({ kind: "call", id: null, method: "captureSnapshot", args: [sessionId, trigger] });
   }
 
-  recordWebVisit(sessionId: string, visit: CollectorWebVisit): boolean {
+  recordWebVisit(sessionId: string, visit: UploadWebVisit): boolean {
     if (this.local) return this.local.recordWebVisit(sessionId, visit);
-    if (!this.hasSession(sessionId) || typeof visit.url !== "string" || !isCollectableWebUrl(visit.url)) return false;
+    if (!this.hasSession(sessionId) || typeof visit.url !== "string" || !isUploadableWebUrl(visit.url)) return false;
     this.send({ kind: "call", id: null, method: "recordWebVisit", args: [sessionId, visit] });
     return true;
   }
@@ -206,7 +206,7 @@ class CaptureClient implements CaptureService {
     const late = await Promise.race([done.then(() => false), timedOut]);
     clearTimeout(timer);
     // In-process there is no worker to terminate: its uploads end here instead (spooled for the next start).
-    if (late) this.local?.collector.abortUploads();
+    if (late) this.local?.sessionUploader.abortUploads();
     const worker = this.worker;
     this.worker = null;
     this.current = "down";
@@ -265,16 +265,16 @@ class CaptureClient implements CaptureService {
   // --- the worker -----------------------------------------------------------------
 
   private workerInit(): CaptureWorkerInit {
-    const { collector, archive } = this.options;
+    const { sessionUploader, archive } = this.options;
     return {
       stateDir: this.options.stateDir,
       appVersion: this.options.appVersion,
       engineVersion: this.options.engineVersion,
-      collector: {
-        upload: Boolean(collector.upload),
-        refreshAccessToken: Boolean(collector.refreshAccessToken),
-        ...(collector.gatewayUrl !== undefined ? { gatewayUrl: collector.gatewayUrl } : {}),
-        ...(collector.accessToken !== undefined ? { accessToken: collector.accessToken } : {}),
+      sessionUploader: {
+        upload: Boolean(sessionUploader.upload),
+        refreshAccessToken: Boolean(sessionUploader.refreshAccessToken),
+        ...(sessionUploader.gatewayUrl !== undefined ? { gatewayUrl: sessionUploader.gatewayUrl } : {}),
+        ...(sessionUploader.accessToken !== undefined ? { accessToken: sessionUploader.accessToken } : {}),
       },
       archive: {
         enabled: archive.enabled,
@@ -363,7 +363,7 @@ class CaptureClient implements CaptureService {
 
   /**
    * The worker is gone: every caller waiting on it gets an empty result, and
-   * every request this thread still serves for it (a collector upload that
+   * every request this thread still serves for it (a session upload that
    * outlasted the stop, an archive or egress fetch) is aborted, so none runs
    * on for up to its own deadline with no one left to take the answer.
    */
@@ -430,14 +430,14 @@ class CaptureClient implements CaptureService {
   }
 
   private async perform(channel: RequestChannel, request: HostRequest, signal: AbortSignal, id: number): Promise<RequestResult> {
-    const { collector, archive } = this.options;
+    const { sessionUploader, archive } = this.options;
     switch (request.type) {
-      case "collect": {
-        if (!collector.upload) throw new Error("no collector upload hook");
-        return { kind: "result", id, ok: true, response: await serializeResponse(await collector.upload(request.sessionId, request.body, signal)) };
+      case "upload": {
+        if (!sessionUploader.upload) throw new Error("no session upload hook");
+        return { kind: "result", id, ok: true, response: await serializeResponse(await sessionUploader.upload(request.sessionId, request.body, signal)) };
       }
       case "refreshAccessToken": {
-        const refresh = channel === "archive" ? archive.refreshAccessToken : collector.refreshAccessToken;
+        const refresh = channel === "archive" ? archive.refreshAccessToken : sessionUploader.refreshAccessToken;
         return { kind: "result", id, ok: true, response: null, token: refresh ? await refresh() : null };
       }
       case "archiveRequest": {
@@ -451,7 +451,7 @@ class CaptureClient implements CaptureService {
         return { kind: "result", id, ok: true, response: await serializeResponse(response) };
       }
       case "fetch": {
-        const egress = (channel === "archive" ? archive.fetch : collector.fetch) ?? externalFetch;
+        const egress = (channel === "archive" ? archive.fetch : sessionUploader.fetch) ?? externalFetch;
         const response = await egress(request.url, {
           method: request.method,
           headers: request.headers,
