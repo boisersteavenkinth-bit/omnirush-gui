@@ -59,7 +59,7 @@ describe("unwrapOpencodeResult", () => {
     expect(failure).toMatchObject({
       status: 422,
       code: "opencode_config_invalid",
-      message: `OpenCode configuration is invalid at /ws/.opencode/opencode.json: ${message} (permissions)`,
+      message: `OmniRush configuration is invalid at /ws/.opencode/opencode.json: ${message} (permissions)`,
       details: {
         status: 400,
         name: "ConfigInvalidError",

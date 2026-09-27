@@ -6,6 +6,11 @@ const test = spec.world(unfinishedTools);
 test("unfinished current-turn tools expose active, waiting, and unknown outcomes", async ({ world, user, seed, step }) => {
   await step("active unfinished tools remain visibly in progress", async () => {
     await user.see("Running command, reading 1 file");
+    await user.click({ role: "button", label: /Running command/ });
+    await user.see({ text: /Check OmniRush repository state/ });
+    await user.see({ text: /git status --short --branch # OmniRush/ });
+    await user.notSee({ text: /OpenCode repository state/ });
+    await user.notSee({ text: /git status --short --branch # OpenCode/ });
   });
 
   await arrangeControl(seed, world.app, "eval.session_lifecycle.seed_unfinished_tools", { lifecycle: "waiting" });

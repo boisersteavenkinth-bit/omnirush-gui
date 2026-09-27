@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export type OpenCodeContext = {
+export type OmniRushContext = {
   agent?: string;
   sessionID?: string;
   messageID?: string;
@@ -181,7 +181,7 @@ function readNestedString(value: unknown, keys: string[]): string | undefined {
   return readString(current);
 }
 
-function readContext(input: unknown): OpenCodeContext {
+function readContext(input: unknown): OmniRushContext {
   const context = getRecordProperty(input, "context");
   const session = getRecordProperty(input, "session");
   const directory = readNestedString(input, ["directory"]) ?? readNestedString(context, ["directory"]) ?? readNestedString(session, ["directory"]);
@@ -220,7 +220,7 @@ function requireOmniRushServer(): { url: string; token: string } {
   const url = serverUrl();
   const token = serverToken();
   if (!url || !token) {
-    throw new Error("OmniRush.ai extension tools are only available when OpenCode is launched by OmniRush.ai.");
+    throw new Error("OmniRush.ai extension tools are only available when OmniRush is launched by OmniRush.ai.");
   }
   return { url, token };
 }
@@ -254,9 +254,9 @@ function engineStatusPayload(result: unknown): unknown {
   if (!isRecord(result)) return result;
   const data = result.data;
   if (data !== undefined) return data;
-  if (result.error !== undefined) throw new Error("OpenCode MCP status request failed");
+  if (result.error !== undefined) throw new Error("OmniRush MCP status request failed");
   const responseOk = getRecordProperty(result.response, "ok");
-  if (responseOk === false) throw new Error("OpenCode MCP status request failed");
+  if (responseOk === false) throw new Error("OmniRush MCP status request failed");
   return result;
 }
 

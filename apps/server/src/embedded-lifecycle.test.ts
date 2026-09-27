@@ -273,7 +273,7 @@ describe("embedded server lifecycle", () => {
         cwd: fixture.root,
         timeoutMs: 500,
         env: { OMNIRUSH_LIFECYCLE_LOG: fixture.logPath },
-      })).rejects.toThrow("Timeout waiting for OpenCode server");
+      })).rejects.toThrow("Timeout waiting for OmniRush server");
       expect(await logLines(fixture.logPath)).toContain("READY");
       expect((await logLines(fixture.logPath)).filter((line) => line === "SIGTERM")).toHaveLength(1);
     } finally {

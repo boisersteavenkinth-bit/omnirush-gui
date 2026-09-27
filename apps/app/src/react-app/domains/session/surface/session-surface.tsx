@@ -419,7 +419,7 @@ function createSessionLifecycleEvalMessages(sessionId: string): UIMessage[] {
           toolName: "bash",
           toolCallId: "eval-lifecycle-bash",
           state: "input-streaming",
-          input: { command: "git status --short --branch", description: "Check repository state" },
+          input: { command: "git status --short --branch # OpenCode", description: "Check OpenCode repository state" },
         },
         {
           type: "dynamic-tool",
