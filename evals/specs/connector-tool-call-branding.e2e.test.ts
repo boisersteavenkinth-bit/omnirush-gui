@@ -17,7 +17,7 @@ test("connector-backed tool calls show first-class branding and human-readable l
   });
 
   await step("the completed connector action exposes its arguments and survives reload", async () => {
-    await user.see({ text: world.proof }, { timeoutMs: 60_000 });
+    await user.see({ text: "Listed the channels." }, { timeoutMs: 60_000 });
     await user.see("Run task");
     expect(await world.den.mocks.connector.toolCalls({ name: "list_channels", sinceIso, atLeast: 1 }))
       .toMatchObject([{ name: "list_channels", args: { limit: 3 } }]);
@@ -36,6 +36,8 @@ test("connector-backed tool calls show first-class branding and human-readable l
     await user.click({ role: "button", label: "Listed channels. Show technical details" });
     await user.see({ text: /mcp:.*:list_channels/ });
     await user.see({ text: /"limit":\s*3/ });
+    await user.see({ text: `OmniRush diagnostic: ${world.proof}` });
+    await user.notSee({ text: /OpenCode diagnostic/ });
     await user.screenshot();
     await user.reload();
     await user.see({ text: /^Listed channels$/ }, { timeoutMs: 30_000 });
@@ -43,6 +45,7 @@ test("connector-backed tool calls show first-class branding and human-readable l
     await user.notSee({ text: /omnirush-cloud_execute_capability/ });
     await user.click({ role: "button", label: "Listed channels. Show technical details" });
     await user.see({ text: /"limit":\s*3/ });
+    await user.see({ text: `OmniRush diagnostic: ${world.proof}` });
     await user.click({ role: "button", label: "Listed channels. Hide technical details" });
   });
 

@@ -336,7 +336,7 @@ export async function connectorBranding(seed: Seed) {
       allowUnauthenticatedMcp: true,
       tools: [
         { name: "list_channels", description: "List Slack channels", inputSchema,
-          delayMs: 4_000, result: { content: [{ type: "text", text: proof }] } },
+          delayMs: 4_000, result: { content: [{ type: "text", text: `OpenCode diagnostic: ${proof}` }] } },
         { name: "read_history", description: "Read Slack history", inputSchema,
           delayMs: 4_000, result: { isError: true, content: [{ type: "text", text: "History lookup failed." }] } },
       ],
@@ -348,7 +348,7 @@ export async function connectorBranding(seed: Seed) {
   const workloads = await fetch(`${den.mocks.connector.url}/admin/agent-workloads`, {
     method: "POST", headers: { "content-type": "application/json" },
     body: JSON.stringify({ workloads: [
-      { promptMarker: prompt, latestUserTurn: true, finalReply: "Listed the channels.", finalReplyFrom: "last-tool-text", steps: steps("list_channels") },
+      { promptMarker: prompt, latestUserTurn: true, finalReply: "Listed the channels.", steps: steps("list_channels") },
       { promptMarker: failurePrompt, latestUserTurn: true, finalReply: "The history lookup failed.", steps: steps("read_history") },
     ] }),
   });
@@ -357,6 +357,24 @@ export async function connectorBranding(seed: Seed) {
   const modelId = "connector-display-model";
   const app = await seed.desktop({ den, as: "admin", model: `${providerId}/${modelId}` });
   const workspace = await seed.workspace(app, seed.tmpPath("connector-tool-call-branding"));
+  await seed.evalIn(app, browserScript(async () => {
+    const info = await window.__OMNIRUSH_ELECTRON__?.invokeDesktop?.("omnirushServerInfo");
+    if (!info?.running || !info.baseUrl) throw new Error("Local server is unavailable");
+    const baseUrl = String(info.baseUrl).replace(/\/+$/, "");
+    const authorization = "Bearer " + String(info.ownerToken ?? info.clientToken ?? "");
+    const deadline = Date.now() + 60_000;
+    let status = 0;
+    while (Date.now() < deadline) {
+      const response = await fetch(baseUrl + "/managed-policy", {
+        headers: { Authorization: authorization },
+        signal: AbortSignal.timeout(10_000),
+      });
+      status = response.status;
+      if (response.ok) return true;
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+    throw new Error(`Desktop policy did not become ready (HTTP ${status})`);
+  }), { awaitPromise: true, timeoutMs: 75_000 });
   await configureProvider(seed, app, workspace.workspaceId, providerId, modelId, {
     provider: { [providerId]: {
       npm: "@ai-sdk/openai-compatible", name: "Connector display model",

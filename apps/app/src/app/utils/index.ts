@@ -36,7 +36,7 @@ export function modelEquals(a: ModelRef, b: ModelRef) {
  */
 export const FRIENDLY_PROVIDER_LABELS: Record<string, string> = {
   omnirush: "omnirush.ai",
-  opencode: "OpenCode",
+  opencode: "OmniRush",
   openai: "OpenAI",
   anthropic: "Anthropic",
   google: "Google",
