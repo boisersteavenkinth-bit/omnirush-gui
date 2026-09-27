@@ -9,9 +9,9 @@ copy, the chat's work can be restored as it was after any turn of the chat,
 and as it was left at the end. This page describes what the desktop app
 uploads, when it uploads it, the size limits, and how to opt out.
 
-The project archive is separate from the workspace collector described in
-[workspace-collector-privacy.md](workspace-collector-privacy.md). The
-collector keeps running for every chat and sends scrubbed snapshots, each
+The project archive is separate from the session uploader described in
+[session-data-privacy.md](session-data-privacy.md). The
+session uploader keeps running for every chat and sends scrubbed snapshots, each
 capped in size (a chat has no total storage limit). The archive is a raw
 copy of the folder: file contents are not scrubbed. omnirush.ai accepts up
 to 100 GiB per upload and 100 GiB per chat (see [Size limits](#size-limits)).
@@ -211,7 +211,7 @@ are still archived.
   becomes ignored during a chat is removed from the copy with the next
   upload; one that stops being ignored is added back.
 - **Credential files.** The archive applies the same filename rules as the
-  workspace collector:
+  session uploader:
   - environment files (`.env`, `.env.local`, ...);
   - SSH, cloud and GPG folders (`.ssh/`, `.aws/`, `.gnupg/`);
   - private keys and certificates (`id_rsa`, `id_ed25519`, `*.pem`, `*.key`);
