@@ -91,6 +91,22 @@ export function resolveCheckedUpdateState(input: {
   return input.allowed ? "available" : "blocked";
 }
 
+/**
+ * A staged update stays "ready" while the feed still offers that version. A
+ * newer release (or a failed check) must not be hidden behind it: the newer
+ * version replaces the staged one, a failed check keeps it.
+ */
+export function keepsReadyUpdate(input: {
+  readyVersion: string | undefined;
+  checkFailed: boolean;
+  available: boolean;
+  latestVersion: string | null | undefined;
+}): boolean {
+  if (!input.readyVersion) return false;
+  if (input.checkFailed) return true;
+  return input.available && input.latestVersion === input.readyVersion;
+}
+
 type ElectronUpdaterEnvAction =
   | { type: "app-version"; appVersion: string | null }
   | { type: "capabilities"; installMode?: UpdaterInstallMode | null; alphaChannelSupported?: boolean | null }
@@ -435,7 +451,18 @@ export function useElectronUpdaterState(options: UseElectronUpdaterStateOptions)
       return;
     }
 
-    setUpdateStatus({ state: "checking" });
+    // Keep a staged update on screen while the feed is re-checked; the check
+    // replaces it only when a newer release is published.
+    const current = updateStatusRef.current;
+    const readyVersion = current?.state === "ready" ? current.version : undefined;
+    const keepReady = (checkFailed: boolean, result?: { available: boolean; latestVersion?: string | null }) =>
+      keepsReadyUpdate({
+        readyVersion,
+        checkFailed,
+        available: result?.available ?? false,
+        latestVersion: result?.latestVersion,
+      });
+    if (!readyVersion) setUpdateStatus({ state: "checking" });
     try {
       let targetVersion: string | undefined;
       const releaseChannelResolution = await resolvePolicyReleaseChannel(
@@ -529,6 +556,7 @@ export function useElectronUpdaterState(options: UseElectronUpdaterStateOptions)
         });
         return;
       }
+      if (keepReady(Boolean(result.reason), result)) return;
       if (result.reason) {
         setUpdateStatus({
           state: "error",
@@ -552,6 +580,12 @@ export function useElectronUpdaterState(options: UseElectronUpdaterStateOptions)
             : await isUpdateAllowed(result.latestVersion, latestDesktopConfig)
         : result.available;
       if (!isCurrentRequest()) return;
+      if (readyVersion && result.available && !availableAllowed && checkedReleaseChannel === "stable") {
+        // Policy blocks the newer release: pin the shell to the staged version
+        // so installing it does not jump past what the organization allows.
+        await bridge.check(checkedReleaseChannel, readyVersion);
+        return;
+      }
       const checkedUpdateState = resolveCheckedUpdateState({
         available: result.available,
         allowed: Boolean(availableAllowed),
@@ -580,6 +614,7 @@ export function useElectronUpdaterState(options: UseElectronUpdaterStateOptions)
       }
     } catch (error) {
       if (!isCurrentRequest()) return;
+      if (keepReady(true)) return;
       setUpdateStatus({
         state: "error",
         message: describeError(error),
@@ -591,7 +626,7 @@ export function useElectronUpdaterState(options: UseElectronUpdaterStateOptions)
   const checkForUpdates = useCallback(
     (channelOverride?: ReleaseChannel) => {
       const state = updateStatusRef.current?.state;
-      if (!channelOverride && (state === "downloading" || state === "ready")) return Promise.resolve();
+      if (!channelOverride && state === "downloading") return Promise.resolve();
       return runCheckForUpdates(channelOverride, true);
     },
     [runCheckForUpdates],
@@ -603,7 +638,8 @@ export function useElectronUpdaterState(options: UseElectronUpdaterStateOptions)
     const interval = 15 * 60 * 1000;
     const check = () => {
       const state = updateStatusRef.current?.state;
-      if (autoCheckInFlightRef.current || state === "checking" || state === "downloading" || state === "ready") return;
+      // A "ready" update keeps being re-checked so a newer release replaces it.
+      if (autoCheckInFlightRef.current || state === "checking" || state === "downloading") return;
       if (autoCheckKeyRef.current === key && Date.now() - lastAutoCheckAtRef.current < interval) return;
       autoCheckKeyRef.current = key;
       lastAutoCheckAtRef.current = Date.now();

@@ -9,6 +9,7 @@ declare const expect: (value: unknown) => {
 import {
   ELECTRON_UPDATER_UNSUPPORTED_REASON,
   describeError,
+  keepsReadyUpdate,
   resolveCheckedUpdateState,
   shouldScheduleElectronUpdateAutoCheck,
   stripRemoteMethodErrorPrefix,
@@ -68,5 +69,24 @@ describe("electron updater availability state", () => {
 
   test("reports current only when the feed has no available update", () => {
     expect(resolveCheckedUpdateState({ available: false, allowed: false })).toBe("idle");
+  });
+});
+
+describe("electron updater staged update", () => {
+  test("a newer published release replaces the staged one", () => {
+    expect(keepsReadyUpdate({ readyVersion: "2.2.1", checkFailed: false, available: true, latestVersion: "2.2.3" })).toBe(false);
+  });
+
+  test("the same release keeps the staged update ready", () => {
+    expect(keepsReadyUpdate({ readyVersion: "2.2.3", checkFailed: false, available: true, latestVersion: "2.2.3" })).toBe(true);
+  });
+
+  test("a failed re-check keeps the staged update ready", () => {
+    expect(keepsReadyUpdate({ readyVersion: "2.2.1", checkFailed: true, available: false, latestVersion: null })).toBe(true);
+  });
+
+  test("a pulled release clears the staged update", () => {
+    expect(keepsReadyUpdate({ readyVersion: "2.2.1", checkFailed: false, available: false, latestVersion: "2.2.0" })).toBe(false);
+    expect(keepsReadyUpdate({ readyVersion: undefined, checkFailed: true, available: false, latestVersion: null })).toBe(false);
   });
 });
