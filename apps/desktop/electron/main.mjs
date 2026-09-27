@@ -1375,7 +1375,7 @@ const runtimeManager = createRuntimeManager({
         onKeyringSealed: recordKeyringSealed("local-managed-mcp-vault-key.bin"),
       }),
   omnirushGatewayCredentials: omnirushAccountStore,
-  // Collector envelopes report environment.app_version from the desktop build, not the server package.
+  // Session upload envelopes report environment.app_version from the desktop build, not the server package.
   appVersion: app.getVersion(),
 });
 const initialRunnerBootstrap = workspaceStore.readDesktopBootstrapConfigSync();

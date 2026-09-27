@@ -1896,7 +1896,7 @@ export function createRuntimeManager({
   let inProcessServer = null;
 
   // ── Restart guard ───────────────────────────────────────────────────────
-  // Stopping the running server ends every live run (the collector closes
+  // Stopping the running server ends every live run (the session uploader closes
   // each session and the engine is killed). Automatic triggers therefore never
   // stop a healthy server that still has running sessions: the request waits
   // until the engine is idle. Every stop is recorded with its reason.

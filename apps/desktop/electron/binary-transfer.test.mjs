@@ -261,7 +261,7 @@ test("rejects transfer URLs outside connected remote workspace endpoints", async
     });
 
     await assert.rejects(
-      upload("https://attacker.example.test/exfil", allowedUrlPrefixes),
+      upload("https://attacker.example.test/receive", allowedUrlPrefixes),
       (error) => matchesError(error, "unauthorized-url", /remote workspace/i),
     );
     await assert.rejects(

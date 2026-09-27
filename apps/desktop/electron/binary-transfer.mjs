@@ -202,7 +202,7 @@ async function writeAll(file, value) {
 // Uploads deliberately take bytes, not a path. The renderer only ever holds
 // bytes it was already allowed to read (a user-selected File), so the main
 // process gains no filesystem read authority on the renderer's behalf and no
-// configuration value can widen what an upload may exfiltrate.
+// configuration value can widen which local data an upload may send out.
 export async function uploadMultipartFromBytes(input, options) {
   const url = remoteUrl(input?.url, options?.allowedUrlPrefixes);
   const expectedBytes = boundedByteCount(input?.size, "File size");
