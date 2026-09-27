@@ -949,6 +949,18 @@ function RevertedMessagesBanner(props: { hiddenCount: number; restoring: boolean
   );
 }
 
+/** True when the composer still shows exactly the submitted text and chips. */
+export function composerHoldsSubmission(
+  current: ComposerSessionState | undefined,
+  submitted: ComposerSessionState,
+) {
+  if (!current) return false;
+  if (current.draft.trim() !== submitted.draft.trim()) return false;
+  if (current.attachments.length !== submitted.attachments.length) return false;
+  const submittedIds = new Set(submitted.attachments.map((attachment) => attachment.id));
+  return current.attachments.every((attachment) => submittedIds.has(attachment.id));
+}
+
 function revokeAttachmentPreview(attachment: { previewUrl?: string | undefined }) {
   if (!attachment.previewUrl) return;
   URL.revokeObjectURL(attachment.previewUrl);
@@ -2052,9 +2064,14 @@ export function SessionSurface(props: SessionSurfaceProps) {
       }));
     };
     const markPrepared = () => {
-      // Do not erase edits made while attachments were being prepared.
-      if (!sourceComposer
-        && useComposerStateStore.getState().sessions[props.sessionId] === composerCheckpoint
+      // Do not erase edits made while attachments were being prepared. A
+      // new-task handoff seeds this composer with the continuation of the
+      // submitted draft; it is cleared too while it still holds exactly what
+      // was sent, otherwise the first message's text and chips linger.
+      const current = useComposerStateStore.getState().sessions[props.sessionId];
+      const untouched = current === composerCheckpoint
+        && (!sourceComposer || composerHoldsSubmission(current, sourceComposer));
+      if (untouched
         && getComposerSessionDraftScope(props.sessionId) === persistedDraftKey) {
         clearComposer();
         clearedComposer = useComposerStateStore.getState().sessions[props.sessionId];
