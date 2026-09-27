@@ -21,6 +21,7 @@
  *   chat.headers                          session "model.request" (headers)
  *   chat.message                          session "prompt" (a changed model → session.switchModel)
  *   tool.execute.before / .after          tool "execute.before" / "execute.after"
+ *   tool.definition                       session "context" (tools: description)
  *   shell.env                             shell "create.before"
  *   event                                 1.x events from the engine adapter's `/event` stream
  *   tool: {name: {args, execute}}         tool.transform add (zod args as JSON Schema)
@@ -397,6 +398,20 @@ export default {
     if (httpResponseHooks.length) {
       await ctx.session.hook("http.response", async (event: any) => {
         for (const hook of httpResponseHooks) await hook(event, event);
+      });
+    }
+    // 1.x `tool.definition` (a tool's description and parameters, per model request): the 2.x
+    // engine offers each request's tools in the session "context" hook, under 2.x names.
+    const definitionHooks = hooks("tool.definition");
+    if (definitionHooks.length) {
+      await ctx.session.hook("context", async (event: any) => {
+        if (!isRec(event.tools)) return;
+        for (const [name, tool] of Object.entries(event.tools as Record<string, unknown>)) {
+          if (!isRec(tool) || typeof tool.description !== "string") continue;
+          const output = { description: tool.description, parameters: tool.input };
+          for (const hook of definitionHooks) await hook({ toolID: v1ToolName(name) }, output);
+          if (output.description !== tool.description) tool.description = output.description;
+        }
       });
     }
     const toolSchemaHooks = hooks("omnirush.tools.transform");

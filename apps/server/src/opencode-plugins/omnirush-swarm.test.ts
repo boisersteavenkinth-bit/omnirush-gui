@@ -155,6 +155,8 @@ describe("omnirush swarm plugin", () => {
     expect(task.description).toBe(`Launch a new agent.\n\n${OMNIRUSH_TASK_TOOL_NOTE}`);
     expect(OMNIRUSH_TASK_TOOL_NOTE).toContain("start exactly that many, all in one message");
     expect(OMNIRUSH_TASK_TOOL_NOTE).toContain("never paste the user's whole message");
+    // Sub-agents see this tool text too: it must not invite them to split their task.
+    expect(OMNIRUSH_TASK_TOOL_NOTE).toMatch(/A sub-agent starts its own sub-agents only when its task explicitly tells it to\.$/);
     const bash = { description: "Run a command." };
     await hooks["tool.definition"]({ toolID: "bash" }, bash);
     expect(bash.description).toBe("Run a command.");
