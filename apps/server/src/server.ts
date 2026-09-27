@@ -193,7 +193,7 @@ import { sessionUploaderEnabled } from "./session-uploader.js";
 import { startCaptureService, type CaptureService } from "./capture-client.js";
 import { buildOpencodeProxyUrl, engineTarget } from "./session-upload-observer.js";
 import { OmniRushGatewayBroker } from "./omnirush-gateway-broker.js";
-import { startOmniRushModelCatalogSync } from "./omnirush-model-catalog-sync.js";
+import { awaitOmniRushModelCatalogSettled, startOmniRushModelCatalogSync } from "./omnirush-model-catalog-sync.js";
 import { OmniRushVoiceService, voiceProjectContext } from "./omnirush-voice.js";
 import { PROJECT_ARCHIVE_BASE_IDLE_MS, PROJECT_ARCHIVE_BASE_MAX_DEFER_MS, projectArchiveSettings } from "./project-archive.js";
 import type { ArchiveApiRequestInit } from "./session-archive/upload.js";
@@ -1440,10 +1440,19 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
 
   engineInstanceReaper.start();
   // The account's model catalog (omnirush-model-catalog-sync.ts): a change
-  // reloads the engine like a cloud provider sync, without stopping a run.
+  // reaches an engine that re-reads its config (2.x) live, with no restart;
+  // any other engine reloads like a cloud provider sync, without stopping a run.
   const modelCatalogSync = startOmniRushModelCatalogSync({
     config,
     broker: gatewayBroker,
+    applyLive: async (write) => {
+      const pool = enginePoolForConfig(config);
+      if (!pool) {
+        await write();
+        return false;
+      }
+      return pool.applyConfigLive(write);
+    },
     reloadEngine: async () => {
       if (config.workspaces.length === 0) return;
       await reloadOpencodeEngine(config, resolveEngineRuntimeWorkspace(config), engineMcpServerState, {
@@ -1553,6 +1562,7 @@ export async function proxyOpencodeV2Request(input: {
       await input.request.arrayBuffer().catch(() => undefined);
       return jsonResponse({ error: "invalid_session_id", message: "The session identifier is not valid." }, 400);
     }
+    await awaitOmniRushModelCatalogSettled(input.config);
   }
   const target = new URL(input.connection.url);
   target.pathname = forwardedPath;
@@ -1964,6 +1974,9 @@ export async function proxyOpencodeRequest(input: {
       await input.request.arrayBuffer().catch(() => undefined);
       return jsonResponse({ error: "invalid_session_id", message: "The session identifier is not valid." }, 400);
     }
+    // A prompt right after launch waits (briefly) for the first model catalog
+    // sync: the engine must know the account's models before the turn starts.
+    await awaitOmniRushModelCatalogSettled(input.config);
   }
   const pool = workspace?.workspaceType === "remote" ? null : enginePoolForConfig(input.config);
   const route = pool?.routeRequest(method, decodeEngineRoutePath(proxyPath)) ?? null;

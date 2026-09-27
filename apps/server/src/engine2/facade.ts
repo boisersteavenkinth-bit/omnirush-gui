@@ -62,6 +62,8 @@ export type EngineFacadeOptions = {
   paths?: { state?: string; config?: string };
   log?: (message: string, attributes?: Record<string, unknown>) => void;
   fetch?: typeof globalThis.fetch;
+  /** How long a prompt waits for the engine to serve its model (see ensureModelServed). */
+  modelWaitMs?: number;
 };
 
 export type EngineFacade = {
@@ -180,6 +182,7 @@ export async function startEngineFacade(options: EngineFacadeOptions): Promise<E
   const upstreamAuth = `Basic ${Buffer.from(`opencode:${options.upstreamPassword}`).toString("base64")}`;
   const expectedAuth = `Basic ${Buffer.from(`${options.username}:${options.password}`).toString("base64")}`;
   const log = options.log ?? (() => undefined);
+  const modelWaitMs = options.modelWaitMs ?? 20_000;
   const apiKeys: Record<string, string> = {};
   /** Session model/agent last sent to the engine, to skip redundant switch records. */
   const selected = new Map<string, { model?: string; agent?: string; system?: string }>();
@@ -422,13 +425,60 @@ export async function startEngineFacade(options: EngineFacadeOptions): Promise<E
     return variant ? { providerID, modelID, variant } : { providerID, modelID };
   };
 
+  /** The `provider/model` ids the engine serves for a folder; null when it cannot tell. */
+  const engineModelIds = async (directory: string): Promise<Set<string> | null> => {
+    try {
+      const models = unwrap(await call("GET", "/api/model", { directory }));
+      if (!Array.isArray(models)) return null;
+      const ids = new Set<string>();
+      for (const provider of v1ProviderList([], models, {}).all as JsonRecord[]) {
+        for (const id of Object.keys(record(provider, "models") ?? {})) ids.add(`${String(provider.id)}/${id}`);
+      }
+      return ids;
+    } catch {
+      return null;
+    }
+  };
+
+  /**
+   * A prompt for a model of a provider the runtime config defines (the
+   * omnirush.ai catalog) waits while the engine does not list it yet: a
+   * config change it is applying live (a catalog that just arrived). The 2.x
+   * engine accepts a session model it does not know and then never starts the
+   * run, so a model still missing after the wait is refused with a clear
+   * error instead of a turn that silently never answers. A failed lookup never
+   * blocks the prompt.
+   */
+  const ensureModelServed = async (directory: string, model: ModelRef): Promise<void> => {
+    if (!isRecord(record(v1ConfigCache, "provider")?.[model.providerID])) return;
+    const key = `${model.providerID}/${model.modelID}`;
+    const deadline = Date.now() + modelWaitMs;
+    for (;;) {
+      const served = await engineModelIds(directory);
+      if (!served || served.has(key)) return;
+      if (Date.now() >= deadline) {
+        log("prompt refused: model not served", { model: key });
+        throw new UpstreamError(400, {
+          name: "ProviderModelNotFoundError",
+          data: {
+            providerID: model.providerID,
+            modelID: model.modelID,
+            message: `The model ${key} is not available yet. Pick another model or try again in a moment.`,
+          },
+        });
+      }
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+  };
+
   /** Applies a 1.x prompt's model, agent and system prompt to the session before it is sent. */
-  const prepareSession = async (sessionID: string, body: JsonRecord): Promise<void> => {
+  const prepareSession = async (sessionID: string, body: JsonRecord, directory: string): Promise<void> => {
     const current = selected.get(sessionID) ?? {};
     const model = modelRefFromBody(body);
     if (model) {
       const key = `${model.providerID}/${model.modelID}#${model.variant ?? ""}`;
       if (current.model !== key) {
+        await ensureModelServed(directory, model);
         await call("POST", `/api/session/${encodeURIComponent(sessionID)}/model`, {
           body: { model: omitUndefined({ providerID: model.providerID, id: model.modelID, variant: model.variant && model.variant !== "default" ? model.variant : undefined }) },
         });
@@ -805,7 +855,7 @@ export async function startEngineFacade(options: EngineFacadeOptions): Promise<E
           if (method === "POST" && segments.length === 3) {
             // Synchronous prompt: send, wait for the run to settle, answer with the last reply.
             const body = ((await readBody(req)) ?? {}) as JsonRecord;
-            await prepareSession(sessionID, body);
+            await prepareSession(sessionID, body, dir);
             await call("POST", `/api/session/${encoded}/prompt`, { body: v2Prompt(body) });
             await waitIdle(sessionID);
             const messages = await sessionMessages(sessionID);
@@ -818,7 +868,7 @@ export async function startEngineFacade(options: EngineFacadeOptions): Promise<E
         case "prompt_async": {
           if (method !== "POST") break;
           const body = ((await readBody(req)) ?? {}) as JsonRecord;
-          await prepareSession(sessionID, body);
+          await prepareSession(sessionID, body, dir);
           await call("POST", `/api/session/${encoded}/prompt`, { body: v2Prompt(body) });
           noContent(res);
           return;
@@ -826,7 +876,7 @@ export async function startEngineFacade(options: EngineFacadeOptions): Promise<E
         case "prompt": {
           if (method !== "POST") break;
           const body = ((await readBody(req)) ?? {}) as JsonRecord;
-          await prepareSession(sessionID, body);
+          await prepareSession(sessionID, body, dir);
           await call("POST", `/api/session/${encoded}/prompt`, { body: v2Prompt(body) });
           await waitIdle(sessionID);
           const messages = await sessionMessages(sessionID);
@@ -837,7 +887,7 @@ export async function startEngineFacade(options: EngineFacadeOptions): Promise<E
         case "command": {
           if (method !== "POST") break;
           const body = ((await readBody(req)) ?? {}) as JsonRecord;
-          await prepareSession(sessionID, body);
+          await prepareSession(sessionID, body, dir);
           const name = String(body.command ?? "").replace(/^\//, "");
           if (name === "compact" || name === "summarize") {
             await call("POST", `/api/session/${encoded}/compact`, { body: {} });
@@ -864,7 +914,7 @@ export async function startEngineFacade(options: EngineFacadeOptions): Promise<E
         }
         case "summarize": {
           const body = ((await readBody(req)) ?? {}) as JsonRecord;
-          await prepareSession(sessionID, body);
+          await prepareSession(sessionID, body, dir);
           await call("POST", `/api/session/${encoded}/compact`, { body: {} });
           json(res, 200, true);
           return;

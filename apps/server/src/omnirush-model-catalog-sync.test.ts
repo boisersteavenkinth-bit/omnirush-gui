@@ -11,7 +11,7 @@ import {
   sanitizeOmniRushModelCatalog,
   writeOmniRushModelCatalog,
 } from "./omnirush-model-catalog.js";
-import { OmniRushModelCatalogSync, startOmniRushModelCatalogSync } from "./omnirush-model-catalog-sync.js";
+import { awaitOmniRushModelCatalogSettled, OmniRushModelCatalogSync, startOmniRushModelCatalogSync } from "./omnirush-model-catalog-sync.js";
 import {
   keepOmniRushRuntimeConfigFileFresh,
   omnirushRuntimeConfigFilePath,
@@ -261,6 +261,167 @@ describe("omnirush model catalog sync", () => {
     await new Promise((resolve) => setTimeout(resolve, 80));
     expect(fetches).toBe(stoppedAt);
     expect(reloads).toEqual([1]);
+  });
+});
+
+describe("omnirush model catalog sync on an engine that re-reads its config (2.x)", () => {
+  test("the catalog is applied live: no reload, no wait for idle, even while a turn runs", async () => {
+    const config = await setup();
+    await writeOmniRushRuntimeConfigFile(config);
+    const live: string[][] = [];
+    let busyChecks = 0;
+    let reloads = 0;
+    const sync = new OmniRushModelCatalogSync({
+      config,
+      fetchCatalog: async () => Response.json(backendCatalogBody()),
+      applyLive: async (write) => {
+        await write();
+        // The engine re-reads the file it was handed: it sees the new models.
+        live.push(await engineModelIds(config));
+        return true;
+      },
+      reloadEngine: async () => { reloads += 1; },
+      engineBusy: async () => {
+        busyChecks += 1;
+        return true;
+      },
+      reloadRetryMs: 10,
+    });
+    cleanups.push(() => sync.stop());
+
+    expect(await sync.run()).toBe("applied");
+    expect(live).toEqual([MUSE_ENGINE_IDS]);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(reloads).toBe(0);
+    expect(busyChecks).toBe(0);
+    expect(await sync.run()).toBe("unchanged");
+    expect(live).toHaveLength(1);
+  });
+
+  test("an engine that cannot take it live (1.x) still waits for idle and reloads once", async () => {
+    const config = await setup();
+    let busy = true;
+    let writes = 0;
+    const reloads: string[][] = [];
+    const sync = new OmniRushModelCatalogSync({
+      config,
+      fetchCatalog: async () => Response.json(backendCatalogBody()),
+      applyLive: async (write) => {
+        writes += 1;
+        await write();
+        return false;
+      },
+      reloadEngine: async () => { reloads.push(await engineModelIds(config)); },
+      engineBusy: async () => busy,
+      reloadRetryMs: 10,
+    });
+    cleanups.push(() => sync.stop());
+
+    expect(await sync.run()).toBe("applied");
+    await waitFor(() => writes >= 3);
+    expect(reloads).toEqual([]);
+    busy = false;
+    await waitFor(() => reloads.length > 0);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(reloads).toEqual([MUSE_ENGINE_IDS]);
+  });
+
+  test("a failed live apply is retried and never falls back to a restart", async () => {
+    const config = await setup();
+    let failures = 2;
+    let applied = 0;
+    let reloads = 0;
+    const sync = new OmniRushModelCatalogSync({
+      config,
+      fetchCatalog: async () => Response.json(backendCatalogBody()),
+      applyLive: async (write) => {
+        await write();
+        if (failures-- > 0) throw new Error("engine config write failed");
+        applied += 1;
+        return true;
+      },
+      reloadEngine: async () => { reloads += 1; },
+      reloadRetryMs: 10,
+    });
+    cleanups.push(() => sync.stop());
+
+    expect(await sync.run()).toBe("applied");
+    await waitFor(() => applied > 0);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(applied).toBe(1);
+    expect(reloads).toBe(0);
+  });
+});
+
+describe("a prompt before the first catalog sync", () => {
+  test("starts the first pass at once instead of after the initial delay, and waits for it to land", async () => {
+    const config = await setup();
+    const live: string[][] = [];
+    const sync = new OmniRushModelCatalogSync({
+      config,
+      fetchCatalog: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        return Response.json(backendCatalogBody());
+      },
+      applyLive: async (write) => {
+        await write();
+        live.push(await engineModelIds(config));
+        return true;
+      },
+      reloadEngine: async () => undefined,
+      initialDelayMs: 60_000,
+      intervalMs: 60_000,
+    });
+    cleanups.push(() => sync.stop());
+    sync.start();
+
+    const started = Date.now();
+    await sync.settled(5_000);
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(live).toEqual([MUSE_ENGINE_IDS]);
+    // Settled once: later prompts do not wait or fetch again.
+    await sync.settled(5_000);
+    expect(live).toHaveLength(1);
+  });
+
+  test("a backend that does not answer holds the prompt only until the timeout", async () => {
+    const config = await setup();
+    const sync = new OmniRushModelCatalogSync({
+      config,
+      fetchCatalog: () => new Promise<Response>(() => undefined),
+      reloadEngine: async () => undefined,
+      initialDelayMs: 60_000,
+    });
+    cleanups.push(() => sync.stop());
+    sync.start();
+
+    const started = Date.now();
+    await sync.settled(100);
+    expect(Date.now() - started).toBeLessThan(1_000);
+  });
+
+  test("the server gate waits for its own server's sync, and never for a signed-out one", async () => {
+    const config = await setup();
+    let fetches = 0;
+    const handle = startOmniRushModelCatalogSync({
+      config,
+      broker: { enabled: true, modelCatalog: async () => { fetches += 1; return Response.json(backendCatalogBody()); } },
+      applyLive: async (write) => { await write(); return true; },
+      reloadEngine: async () => undefined,
+      initialDelayMs: 60_000,
+    });
+    cleanups.push(() => handle.stop());
+
+    await awaitOmniRushModelCatalogSettled(config, 5_000);
+    expect(fetches).toBe(1);
+    expect((await readOmniRushModelCatalog(config)).map((model) => model.id)).toEqual(MUSE_IDS);
+
+    handle.stop();
+    // Another server (its own config object) with no sync: signed out.
+    const other: ServerConfig = { ...config };
+    const started = Date.now();
+    await awaitOmniRushModelCatalogSettled(other, 5_000);
+    expect(Date.now() - started).toBeLessThan(500);
   });
 });
 

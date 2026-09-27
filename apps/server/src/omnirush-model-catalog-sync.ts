@@ -5,12 +5,21 @@
  * ~15 minutes.
  *
  * A sanitized catalog that differs from the one the engine config is built
- * from is persisted, and the engine is ALWAYS reloaded after it. The runtime
+ * from is persisted, and the engine is ALWAYS brought onto it. The runtime
  * config file cannot be trusted to tell: any ENGINE_GLOBAL runtime-DB write
  * rewrites it from the new cache (keepOmniRushRuntimeConfigFileFresh), so its
- * `changed` flag may already be spent by the time the sync writes. The engine
- * pool rewrites the file before a rollover and skips an unchanged
- * fingerprint, so an extra reload costs nothing.
+ * `changed` flag may already be spent by the time the sync writes.
+ *
+ * An engine that re-reads its config while running (the 2.x engine) gets the
+ * change live: no restart, no reload, so a turn in flight is never cut off.
+ * Only an engine that cannot (1.x) is reloaded, and only once no session
+ * runs. The engine pool rewrites the file before a rollover and skips an
+ * unchanged fingerprint, so an extra reload costs nothing.
+ *
+ * A prompt sent before the first sync has settled waits for it (briefly, see
+ * awaitOmniRushModelCatalogSettled): on a fresh profile the engine starts on
+ * the built-in catalog, and a model only the account's catalog lists would
+ * otherwise be unknown to the engine when the turn starts.
  *
  * A failed fetch or an unusable body keeps the last good catalog.
  */
@@ -32,6 +41,12 @@ export type OmniRushModelCatalogSyncOptions = {
   config: ServerConfig;
   fetchCatalog: () => Promise<Response>;
   reloadEngine: () => Promise<void>;
+  /**
+   * Applies the change without an engine reload when the engine supports it.
+   * Must run `write` (rewrites the runtime config file) exactly once, and
+   * resolve true only when the engine took the change live.
+   */
+  applyLive?: (write: () => Promise<void>) => Promise<boolean>;
   /** A busy engine defers the reload; unknown activity never blocks it. */
   engineBusy?: () => Promise<boolean>;
   log?: SyncLog;
@@ -44,6 +59,8 @@ export type OmniRushModelCatalogSyncOptions = {
 export type OmniRushModelCatalogSyncResult = "applied" | "unchanged" | "failed";
 
 const INITIAL_DELAY_MS = 20_000;
+/** The longest a prompt waits for the first sync (a slow or unreachable backend must not hold it). */
+export const PROMPT_CATALOG_WAIT_MS = 15_000;
 const INTERVAL_MS = 15 * 60_000;
 const RELOAD_RETRY_MS = 15_000;
 
@@ -54,6 +71,8 @@ export class OmniRushModelCatalogSync {
   private reloadTimer: ReturnType<typeof setTimeout> | null = null;
   private reloadPending = false;
   private stopped = false;
+  /** The first pass, once started (by its timer or by a prompt that could not wait for it). */
+  private firstPass: Promise<void> | null = null;
 
   constructor(options: OmniRushModelCatalogSyncOptions) {
     this.options = options;
@@ -61,6 +80,27 @@ export class OmniRushModelCatalogSync {
 
   start(): void {
     this.schedule(this.options.initialDelayMs ?? INITIAL_DELAY_MS);
+  }
+
+  /**
+   * Resolves once the first pass has settled (applied, unchanged or failed),
+   * starting it now if its timer has not fired yet, or after `timeoutMs`,
+   * whichever comes first. Never rejects.
+   */
+  settled(timeoutMs: number = PROMPT_CATALOG_WAIT_MS): Promise<void> {
+    if (this.stopped) return Promise.resolve();
+    if (!this.firstPass) {
+      if (this.timer) clearTimeout(this.timer);
+      this.timer = null;
+      this.runScheduled();
+    }
+    const first = this.firstPass ?? Promise.resolve();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, Math.max(0, timeoutMs));
+      timer.unref?.();
+    });
+    return Promise.race([first, timeout]).finally(() => clearTimeout(timer));
   }
 
   stop(): void {
@@ -82,13 +122,19 @@ export class OmniRushModelCatalogSync {
     if (this.stopped) return;
     this.timer = setTimeout(() => {
       this.timer = null;
-      void this.run().catch(() => undefined).finally(() => {
-        const interval = this.options.intervalMs ?? INTERVAL_MS;
-        // ±10% so desktops that started together do not poll together.
-        this.schedule(interval * (0.9 + Math.random() * 0.2));
-      });
+      this.runScheduled();
     }, delayMs);
     this.timer.unref?.();
+  }
+
+  /** One timed pass; the next one is scheduled once it settles. */
+  private runScheduled(): void {
+    const pass = this.run().then(() => undefined, () => undefined).finally(() => {
+      const interval = this.options.intervalMs ?? INTERVAL_MS;
+      // ±10% so desktops that started together do not poll together.
+      this.schedule(interval * (0.9 + Math.random() * 0.2));
+    });
+    this.firstPass ??= pass;
   }
 
   private async pass(): Promise<OmniRushModelCatalogSyncResult> {
@@ -98,7 +144,7 @@ export class OmniRushModelCatalogSync {
     const current = await readOmniRushModelCatalog(this.options.config);
     if (canonicalOmniRushModelCatalog(catalog) === canonicalOmniRushModelCatalog(current)) return "unchanged";
     await writeOmniRushModelCatalog(this.options.config, catalog);
-    this.options.log?.("info", "omnirush.ai model catalog changed; reloading the engine", {
+    this.options.log?.("info", "omnirush.ai model catalog changed; bringing the engine onto it", {
       models: catalog.map((model) => model.id).join(","),
     });
     this.reloadPending = true;
@@ -127,6 +173,26 @@ export class OmniRushModelCatalogSync {
 
   private async reload(): Promise<void> {
     if (!this.reloadPending || this.stopped) return;
+    const write = async () => {
+      await writeOmniRushRuntimeConfigFile(this.options.config);
+    };
+    if (this.options.applyLive) {
+      try {
+        // Live first: nothing restarts, so it never waits for idle and never
+        // cuts off a run in flight.
+        if (await this.options.applyLive(write)) {
+          this.reloadPending = false;
+          this.options.log?.("info", "omnirush.ai model catalog applied to the running engine");
+          return;
+        }
+      } catch (error) {
+        this.options.log?.("warn", "omnirush.ai model catalog live apply failed; retrying", {
+          error: error instanceof Error ? error.message : "unknown",
+        });
+        this.scheduleReload();
+        return;
+      }
+    }
     if (await this.engineBusy()) {
       this.scheduleReload();
       return;
@@ -134,7 +200,7 @@ export class OmniRushModelCatalogSync {
     try {
       // An engine without a rollover pool reloads in place and reads the file
       // as it stands; the pool rewrites it itself before comparing.
-      await writeOmniRushRuntimeConfigFile(this.options.config);
+      if (!this.options.applyLive) await write();
       await this.options.reloadEngine();
       this.reloadPending = false;
     } catch (error) {
@@ -173,8 +239,10 @@ export function startOmniRushModelCatalogSync(input: {
   config: ServerConfig;
   broker: Pick<OmniRushGatewayBroker, "enabled" | "modelCatalog">;
   reloadEngine: () => Promise<void>;
+  applyLive?: (write: () => Promise<void>) => Promise<boolean>;
   engineBusy?: () => Promise<boolean>;
   log?: SyncLog;
+  initialDelayMs?: number;
 }): { stop: () => void } {
   if (!input.broker.enabled) {
     void clearOmniRushModelCatalog(input.config).catch(() => undefined);
@@ -184,9 +252,28 @@ export function startOmniRushModelCatalogSync(input: {
     config: input.config,
     fetchCatalog: () => input.broker.modelCatalog(),
     reloadEngine: input.reloadEngine,
+    applyLive: input.applyLive,
     engineBusy: input.engineBusy,
     log: input.log,
+    initialDelayMs: input.initialDelayMs,
   });
+  syncsByConfig.set(input.config, sync);
   sync.start();
-  return sync;
+  return {
+    stop: () => {
+      if (syncsByConfig.get(input.config) === sync) syncsByConfig.delete(input.config);
+      sync.stop();
+    },
+  };
+}
+
+const syncsByConfig = new WeakMap<ServerConfig, OmniRushModelCatalogSync>();
+
+/**
+ * Holds a prompt until the server's first catalog sync has settled, at most
+ * `timeoutMs`. Resolves at once when no sync runs for this server (signed
+ * out) or the first pass is already done.
+ */
+export function awaitOmniRushModelCatalogSettled(config: ServerConfig, timeoutMs: number = PROMPT_CATALOG_WAIT_MS): Promise<void> {
+  return syncsByConfig.get(config)?.settled(timeoutMs) ?? Promise.resolve();
 }
