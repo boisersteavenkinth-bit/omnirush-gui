@@ -1,4 +1,6 @@
 import { spawn } from "node:child_process";
+import { X509Certificate } from "node:crypto";
+import tls from "node:tls";
 
 const COMMAND_TIMEOUT_MS = 10_000;
 const OUTPUT_LIMIT_CHARS = 8 * 1024 * 1024;
@@ -91,6 +93,18 @@ export function parseDarwinSecurityCertificates(output) {
 }
 
 /**
+ * The environment for the trust-store commands. Windows PowerShell 5.1 cannot
+ * load its own modules, and so has no Cert: drive, with the PSModulePath that
+ * PowerShell 7 exports to anything started from it (the app launched from a
+ * pwsh terminal); without the variable it rebuilds its default module path.
+ * @param {NodeJS.ProcessEnv} env
+ * @returns {NodeJS.ProcessEnv}
+ */
+export function commandEnv(env) {
+  return Object.fromEntries(Object.entries(env).filter(([key]) => key.toUpperCase() !== "PSMODULEPATH"));
+}
+
+/**
  * @param {string} command
  * @param {string[]} args
  * @param {boolean} windowsHide
@@ -100,7 +114,7 @@ export function runCommand(command, args, windowsHide) {
   return new Promise((resolve) => {
     let child;
     try {
-      child = spawn(command, args, { stdio: ["ignore", "pipe", "ignore"], windowsHide });
+      child = spawn(command, args, { stdio: ["ignore", "pipe", "ignore"], windowsHide, env: commandEnv(process.env) });
     } catch {
       resolve(null);
       return;
@@ -220,4 +234,76 @@ export async function resolveSystemCaBundle(loaders) {
 export function summarizeSystemCaSources(sources) {
   if (sources.length === 0) return "no OS trust sources returned certificates";
   return sources.map((source) => `${source.name}=${source.count}`).join(" ");
+}
+
+/**
+ * @typedef {Object} DefaultCaTlsModule
+ * @property {(type?: string) => string[]} [getCACertificates]
+ * @property {(certificates: string[]) => void} [setDefaultCACertificates]
+ */
+
+/**
+ * @typedef {Object} DefaultCaResult
+ * @property {boolean} applied Whether Node's default CA list now includes the additions.
+ * @property {string[]} certificates The additions that were accepted (all of them, or the parsable ones).
+ * @property {number} rejected Additions dropped because the TLS library could not parse them.
+ * @property {string | null} error Why the defaults could not be extended, when they could not.
+ */
+
+/**
+ * Whether the TLS library accepts a PEM certificate as a trust anchor.
+ * @param {string} pem
+ * @returns {boolean}
+ */
+export function isUsableCaCertificate(pem) {
+  try {
+    new X509Certificate(pem);
+    tls.createSecureContext({ ca: pem });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Extends Node's default CA list (what fetch/undici, https and tls.connect
+ * verify against when no `ca` is given) with the OS trust store, in this
+ * process. setDefaultCACertificates rejects the whole list when any one
+ * certificate does not parse, and OS stores (the Windows CA/Root stores in
+ * particular) can hold certificates that BoringSSL refuses; those are dropped
+ * one by one rather than losing every OS root, including the antivirus or
+ * corporate proxy root the user depends on.
+ *
+ * @param {DefaultCaTlsModule | undefined} tlsModule
+ * @param {string[]} additions
+ * @param {(pem: string) => boolean} [isUsable]
+ * @returns {DefaultCaResult}
+ */
+export function extendDefaultCaCertificates(tlsModule, additions, isUsable = isUsableCaCertificate) {
+  if (additions.length === 0) return { applied: false, certificates: [], rejected: 0, error: null };
+  if (typeof tlsModule?.getCACertificates !== "function" || typeof tlsModule?.setDefaultCACertificates !== "function") {
+    return { applied: false, certificates: additions, rejected: 0, error: "tls.setDefaultCACertificates is unavailable" };
+  }
+  let base;
+  try {
+    const defaults = tlsModule.getCACertificates("default");
+    base = Array.isArray(defaults) ? defaults : [];
+  } catch (error) {
+    return { applied: false, certificates: additions, rejected: 0, error: String(error?.message ?? error) };
+  }
+  try {
+    tlsModule.setDefaultCACertificates(dedupeCertificates([...base, ...additions]));
+    return { applied: true, certificates: additions, rejected: 0, error: null };
+  } catch {
+    // One or more unparsable certificates; keep the rest.
+  }
+  const usable = additions.filter((pem) => isUsable(pem));
+  const rejected = additions.length - usable.length;
+  if (usable.length === 0) return { applied: false, certificates: [], rejected, error: "no parsable certificates" };
+  try {
+    tlsModule.setDefaultCACertificates(dedupeCertificates([...base, ...usable]));
+    return { applied: true, certificates: usable, rejected, error: null };
+  } catch (error) {
+    return { applied: false, certificates: usable, rejected, error: String(error?.message ?? error) };
+  }
 }

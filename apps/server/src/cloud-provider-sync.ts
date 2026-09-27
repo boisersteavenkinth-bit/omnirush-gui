@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 
 import type { EnvService } from "./env-file.js";
 import { selectPrimaryCredentialEnvName, syncManagedProviderAuth } from "./managed-provider-auth.js";
+import { externalFetch } from "./server-fetch.js";
 import { writeOmniRushRuntimeConfigFile } from "./omnirush-runtime-config.js";
 import {
   hasOmniRushWorkspaceConfig,
@@ -341,8 +342,11 @@ export function parseCloudProviderDenSession(value: unknown): CloudProviderDenSe
   return { baseUrl: baseUrl.replace(/\/+$/, ""), token, orgId };
 }
 
+/** Den requests: always a URL string and a plain init. */
+type DenFetch = (input: string, init?: RequestInit) => Promise<Response>;
+
 async function requestJson(
-  fetchImpl: typeof globalThis.fetch,
+  fetchImpl: DenFetch,
   session: CloudProviderDenSession,
   path: string,
 ): Promise<unknown> {
@@ -369,7 +373,7 @@ async function requestJson(
 }
 
 async function fetchProviders(
-  fetchImpl: typeof globalThis.fetch,
+  fetchImpl: DenFetch,
   session: CloudProviderDenSession,
 ): Promise<DenProviderConnection[]> {
   const providers = parseProviderList(await requestJson(fetchImpl, session, "/v1/llm-providers"));
@@ -616,6 +620,7 @@ export class CloudProviderSync {
   private readonly reloadEngine: () => Promise<void>;
   private readonly engineBusy?: () => Promise<boolean>;
   private readonly fetchImpl: typeof globalThis.fetch;
+  private readonly denFetchImpl: DenFetch;
   private readonly logger?: CloudProviderSyncLogger;
   private readonly intervalMs: number;
   private session: CloudProviderDenSession | null = null;
@@ -642,6 +647,9 @@ export class CloudProviderSync {
     this.reloadEngine = options.reloadEngine;
     this.engineBusy = options.engineBusy;
     this.fetchImpl = options.fetchImpl ?? globalThis.fetch;
+    // Den is off the machine: Chromium's network stack under Electron (OS
+    // trust store, system proxy). Provider auth pushes stay on loopback.
+    this.denFetchImpl = options.fetchImpl ?? externalFetch;
     this.logger = options.logger;
     this.intervalMs = options.intervalMs ?? configuredIntervalMs();
     this.reloadRetryMs = configuredReloadRetryMs();
@@ -912,7 +920,7 @@ export class CloudProviderSync {
     const { reason, session } = request;
     try {
       const [providers, storedEnv] = await Promise.all([
-        fetchProviders(this.fetchImpl, session),
+        fetchProviders(this.denFetchImpl, session),
         this.env.list(),
       ]);
       // Local credentials only satisfy materialization eligibility. Never add

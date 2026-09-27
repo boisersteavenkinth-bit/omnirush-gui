@@ -23,6 +23,7 @@ import {
 } from "@omnirush/paths";
 import {
   dedupeCertificates,
+  extendDefaultCaCertificates,
   resolveSystemCaBundle,
   summarizeSystemCaSources,
   systemPlatformCertificateLoader,
@@ -1277,9 +1278,12 @@ async function repairIncompleteChains(options) {
   }
 }
 
+const CONFIGURED_EXTRA_CA_MESSAGE = "OmniRush.ai runtime: NODE_EXTRA_CA_CERTS is already set; child processes get it merged with the OS trust store.";
+const UNREADABLE_EXTRA_CA_MESSAGE = "OmniRush.ai runtime: NODE_EXTRA_CA_CERTS is set but unreadable; child processes keep it as is.";
+
 /**
  * @param {ResolveSystemCaEnvOptions} options
- * @returns {Promise<{ childEnv: NodeJS.ProcessEnv, trustedCertificates: string[] }>}
+ * @returns {Promise<{ childEnv: NodeJS.ProcessEnv, trustedCertificates: string[], mergedFrom: string | null }>}
  */
 async function resolveSystemCa({
   tlsModule = tls,
@@ -1292,17 +1296,26 @@ async function resolveSystemCa({
   chainRepair,
 }) {
   const env = parentEnv ?? {};
-  if (Object.prototype.hasOwnProperty.call(env, "NODE_EXTRA_CA_CERTS")) {
-    if (typeof logInfo === "function") {
-      logInfo("OmniRush.ai runtime: NODE_EXTRA_CA_CERTS is already set; skipping system CA bundle export.");
-    }
+  const info = (message) => {
+    if (typeof logInfo === "function") logInfo(message);
+  };
+  // A user-set NODE_EXTRA_CA_CERTS is kept: child processes get its
+  // certificates merged with the OS trust store, and this process adds both.
+  const configuredPath = Object.prototype.hasOwnProperty.call(env, "NODE_EXTRA_CA_CERTS")
+    ? String(env.NODE_EXTRA_CA_CERTS)
+    : null;
+  /** @type {string[]} */
+  let configuredCertificates = [];
+  let configuredReadable = false;
+  if (configuredPath !== null) {
     try {
-      const configuredPem = await readFile(String(env.NODE_EXTRA_CA_CERTS), "utf8");
-      return { childEnv: {}, trustedCertificates: parsePemCertificates(configuredPem) };
+      configuredCertificates = parsePemCertificates(await readFile(configuredPath, "utf8"));
+      configuredReadable = true;
     } catch {
-      return { childEnv: {}, trustedCertificates: [] };
+      configuredCertificates = [];
     }
   }
+  const mergedFrom = configuredReadable ? configuredPath : null;
 
   try {
     const platformLoader = loadPlatformCertificates
@@ -1316,12 +1329,12 @@ async function resolveSystemCa({
       },
       platform: platformLoader,
     });
-    if (typeof logInfo === "function") {
-      logInfo(`OmniRush.ai runtime: system CA bundle sources ${summarizeSystemCaSources(bundle.sources)}`);
-    }
+    info(`OmniRush.ai runtime: system CA bundle sources ${summarizeSystemCaSources(bundle.sources)}`);
+    const trustedCertificates = dedupeCertificates([...configuredCertificates, ...bundle.certificates]);
     let repairedPems = [];
     try {
-      const repaired = await repairIncompleteChains({
+      // Chain repair stays off when the user manages NODE_EXTRA_CA_CERTS.
+      const repaired = configuredPath !== null ? { pems: [], timedOut: false } : await repairIncompleteChains({
         tlsModule,
         userDataDir,
         parentEnv: env,
@@ -1332,33 +1345,41 @@ async function resolveSystemCa({
         chainRepair,
       });
       repairedPems = repaired.pems;
-      if (repaired.timedOut && typeof logInfo === "function") {
-        logInfo("OmniRush.ai runtime: chain repair skipped: timed out");
-      }
+      if (repaired.timedOut) info("OmniRush.ai runtime: chain repair skipped: timed out");
     } catch {
       repairedPems = [];
     }
-    const certificates = dedupeCertificates([...bundle.certificates, ...repairedPems]);
-    if (certificates.length === 0) return { childEnv: {}, trustedCertificates: bundle.certificates };
-    if (typeof tlsModule?.getCACertificates === "function" && typeof tlsModule?.setDefaultCACertificates === "function") {
-      try {
-        const defaultCerts = tlsModule.getCACertificates("default");
-        tlsModule.setDefaultCACertificates(dedupeCertificates([...(Array.isArray(defaultCerts) ? defaultCerts : []), ...certificates]));
-      } catch {
-        // Best-effort only; child processes still receive NODE_EXTRA_CA_CERTS.
-      }
+    const certificates = dedupeCertificates([...trustedCertificates, ...repairedPems]);
+    if (certificates.length === 0) return { childEnv: {}, trustedCertificates, mergedFrom: null };
+
+    const trust = extendDefaultCaCertificates(tlsModule, certificates);
+    if (trust.applied) {
+      info(`OmniRush.ai runtime: main-process TLS trusts ${trust.certificates.length} OS certificates${trust.rejected ? ` (skipped ${trust.rejected} the TLS library cannot parse)` : ""}`);
+    } else if (typeof tlsModule?.setDefaultCACertificates === "function") {
+      info(`OmniRush.ai runtime: main-process TLS trust unchanged: ${trust.error ?? "unknown error"}`);
     }
-    const pem = certificates.join("\n");
-    if (!pem) return { childEnv: {}, trustedCertificates: bundle.certificates };
+    if (configuredPath !== null && !configuredReadable) {
+      info(UNREADABLE_EXTRA_CA_MESSAGE);
+      return { childEnv: {}, trustedCertificates, mergedFrom: null };
+    }
+    if (configuredPath !== null) info(CONFIGURED_EXTRA_CA_MESSAGE);
+
+    // Child processes (Node, and Bun, which honors NODE_EXTRA_CA_CERTS too)
+    // get the certificates as a PEM file, including a user-set
+    // NODE_EXTRA_CA_CERTS file's. Unparsable entries are left out: a single
+    // bad certificate makes Node and Bun ignore the whole file.
+    const pem = trust.certificates.join("\n");
+    if (!pem) return { childEnv: {}, trustedCertificates, mergedFrom: null };
     const bundlePath = path.join(userDataDir, "system-ca-bundle.pem");
     await mkdir(path.dirname(bundlePath), { recursive: true });
     await writeFile(bundlePath, `${pem}\n`, "utf8");
     return {
       childEnv: { NODE_EXTRA_CA_CERTS: bundlePath },
-      trustedCertificates: bundle.certificates,
+      trustedCertificates,
+      mergedFrom,
     };
   } catch {
-    return { childEnv: {}, trustedCertificates: [] };
+    return { childEnv: {}, trustedCertificates: configuredCertificates, mergedFrom: null };
   }
 }
 
@@ -1370,12 +1391,17 @@ export async function resolveSystemCaEnv(options) {
  * @param {NodeJS.ProcessEnv} [baseEnv]
  * @param {NodeJS.ProcessEnv} [caEnv]
  * @param {NodeJS.ProcessEnv} [extra]
+ * @param {string | null} [mergedFrom] the user-set NODE_EXTRA_CA_CERTS the generated bundle includes
  * @returns {NodeJS.ProcessEnv}
  */
-export function mergeSystemCaChildEnv(baseEnv = {}, caEnv = {}, extra = {}) {
+export function mergeSystemCaChildEnv(baseEnv = {}, caEnv = {}, extra = {}, mergedFrom = null) {
+  // The generated bundle replaces a user-set NODE_EXTRA_CA_CERTS only when it
+  // was built from that same file (a superset of it). A value that changed
+  // since startup, or one the bundle does not include, is kept.
+  const userSet = Object.prototype.hasOwnProperty.call(baseEnv, "NODE_EXTRA_CA_CERTS");
   return {
     ...baseEnv,
-    ...(Object.prototype.hasOwnProperty.call(baseEnv, "NODE_EXTRA_CA_CERTS") ? {} : caEnv),
+    ...(!userSet || (mergedFrom !== null && String(baseEnv.NODE_EXTRA_CA_CERTS) === mergedFrom) ? caEnv : {}),
     ...extra,
   };
 }
@@ -1390,6 +1416,8 @@ export function createRuntimeManager({
   omnirushUiMcpLaunch = () => null,
   workspaceMkdir = mkdir,
   workspacePlatform = process.platform,
+  // Chromium-backed fetch for requests off the machine (see external-fetch.mjs).
+  externalFetch = null,
 }) {
   const inheritedProcessEnv = { ...process.env };
   let injectedUserEnvKeys = new Set();
@@ -1434,6 +1462,8 @@ export function createRuntimeManager({
       tlsModule: tls,
       userDataDir,
       parentEnv: { ...loadUserEnvFile(process.env), ...process.env },
+      // AIA intermediate downloads for chain repair.
+      chainRepair: typeof externalFetch === "function" ? { fetchImpl: externalFetch } : undefined,
     });
     return systemCaPromise;
   }
@@ -1584,10 +1614,10 @@ export function createRuntimeManager({
       ...process.env,
       BUN_CONFIG_DNS_RESULT_ORDER: "verbatim",
     };
-    const caEnv = Object.prototype.hasOwnProperty.call(baseEnv, "NODE_EXTRA_CA_CERTS") ? {} : (await systemCa()).childEnv;
+    const { childEnv: caEnv, mergedFrom } = await systemCa();
     // Bun honors Node's NODE_EXTRA_CA_CERTS, so bundled Bun sidecars inherit
     // the exported OS trust store through the same child env variable.
-    const env = mergeSystemCaChildEnv(baseEnv, caEnv, extra);
+    const env = mergeSystemCaChildEnv(baseEnv, caEnv, extra, mergedFrom);
     const pathKey =
       Object.prototype.hasOwnProperty.call(env, "PATH") ||
       !Object.prototype.hasOwnProperty.call(env, "Path")
