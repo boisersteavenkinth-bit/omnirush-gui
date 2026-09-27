@@ -503,3 +503,44 @@ test("live attachment notes render once across repeated updates", () => {
     cleanup();
   }
 });
+
+test("a user message with a pasted image renders only the typed text and the image", () => {
+  const syncInput = { workspaceId: "workspace-paste", baseUrl: "http://127.0.0.1:1234", omnirushToken: "token" };
+  const cleanup = __createWorkspaceSessionSyncForTest(syncInput);
+  const release = trackWorkspaceSessionSync(syncInput, "session-paste");
+  try {
+    __applySessionSyncEventForTest(syncInput, {
+      type: "message.updated",
+      properties: { info: { id: "msg-paste", role: "user", sessionID: "session-paste" } },
+    });
+    // The parts the 2.x engine adapter emits for the prompt the composer sent:
+    // the workspace-path note (synthetic), what was typed, and the image.
+    const note = [
+      "Attached files were copied into this worker workspace for tool access:",
+      "- image.png: .opencode/omnirush/inbox/chat-attachments/session-paste/1-image.png (file:///Users/someone/project/.opencode/omnirush/inbox/chat-attachments/session-paste/1-image.png)",
+      "Use these paths with Read/Bash/MCP/Docling when a tool needs the file bytes.",
+    ].join("\n");
+    const parts = [
+      { id: "prt_paste_u0", type: "text", synthetic: true, text: note, metadata: { omnirushAttachments: [] } },
+      { id: "prt_paste_u1", type: "text", text: "hi" },
+      { id: "prt_paste_f0", type: "file", mime: "image/png", filename: "image.png", url: "data:image/png;base64,AAAA" },
+    ];
+    for (const part of parts) {
+      __applySessionSyncEventForTest(syncInput, {
+        type: "message.part.updated",
+        properties: { part: { ...part, messageID: "msg-paste", sessionID: "session-paste" } },
+      });
+    }
+    const transcript = getReactQueryClient().getQueryData<UIMessage[]>(transcriptKey("workspace-paste", "session-paste"));
+    const rendered = transcript?.[0]?.parts ?? [];
+    expect(rendered).toMatchObject([
+      { type: "text", text: "hi" },
+      { type: "file", filename: "image.png", mediaType: "image/png" },
+    ]);
+    expect(rendered).toHaveLength(2);
+    expect(JSON.stringify(rendered)).not.toContain("file:///Users/");
+  } finally {
+    release();
+    cleanup();
+  }
+});

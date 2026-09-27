@@ -45,3 +45,17 @@ export function omitUndefined<T extends JsonRecord>(value: T): T {
   for (const key of Object.keys(value)) if (value[key] === undefined) delete value[key];
   return value;
 }
+
+/**
+ * The URL of a prompt file: its `uri`, or, for bytes the engine keeps inline
+ * (a pasted image sent as a `data:` URI is stored as `{data, mime, source: {type: "inline"}}`),
+ * the `data:` URI again, so the transcript keeps the image.
+ */
+export function promptFileUrl(file: unknown): string | undefined {
+  if (!isRecord(file)) return undefined;
+  const uri = str(file, "uri");
+  if (uri) return uri;
+  const data = str(file, "data");
+  const mime = str(file, "mime");
+  return data && mime ? `data:${mime};base64,${data}` : undefined;
+}

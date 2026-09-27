@@ -358,7 +358,9 @@ export async function startEngineFacade(options: EngineFacadeOptions): Promise<E
   const turnDiffs = new Map<string, JsonRecord[]>();
   const attachTurnDiffs = async (sessionID: string, messages: V1Message[]): Promise<void> => {
     const busy = translator.statusOf(sessionID)?.type === "busy";
-    const prompts = messages.filter((message) => message.info.role === "user" && !message.parts.some((part) => part.synthetic === true));
+    // A prompt may carry synthetic notes beside what was typed; a message of synthetic text alone is not a prompt.
+    const prompts = messages.filter((message) => message.info.role === "user"
+      && !(message.parts.length > 0 && message.parts.every((part) => part.type === "text" && part.synthetic === true)));
     for (const [index, message] of prompts.entries()) {
       const id = String(message.info.id);
       const key = `${sessionID}\u0000${id}`;
@@ -507,15 +509,29 @@ export async function startEngineFacade(options: EngineFacadeOptions): Promise<E
   /** A 1.x prompt's parts as the 2.x prompt (text, files, agent mentions). */
   const v2Prompt = (body: JsonRecord): JsonRecord => {
     const texts: string[] = [];
+    // 2.x keeps one text per prompt: the layout of the 1.x text parts lets reads split it back,
+    // so synthetic notes (attachment paths, mention instructions) reach the model but stay out
+    // of the user's bubble and the trace's typed prompt.
+    const textParts: JsonRecord[] = [];
+    let splitText = false;
     const files: JsonRecord[] = [];
     const agents: JsonRecord[] = [];
     for (const part of arr(body, "parts")) {
       if (!isRecord(part)) continue;
       const type = str(part, "type");
-      if (type === "text" && typeof part.text === "string") texts.push(part.text);
+      if (type === "text" && typeof part.text === "string") {
+        texts.push(part.text);
+        const synthetic = part.synthetic === true || undefined;
+        const metadata = isRecord(part.metadata) && Object.keys(part.metadata).length ? part.metadata : undefined;
+        if (synthetic || metadata) splitText = true;
+        textParts.push(omitUndefined({ length: part.text.length, synthetic, metadata }));
+      }
       else if (type === "file" && typeof part.url === "string") files.push(omitUndefined({ uri: part.url, name: str(part, "filename") }));
       else if (type === "agent" && typeof part.name === "string") agents.push({ id: part.name });
-      else if (type === "subtask" && typeof part.prompt === "string") texts.push(part.prompt);
+      else if (type === "subtask" && typeof part.prompt === "string") {
+        texts.push(part.prompt);
+        textParts.push({ length: part.prompt.length });
+      }
     }
     // The 1.x user message fields 2.x does not keep (system prompt, agent and model as picked,
     // tool switches) travel in the message metadata, so reads return them field for field.
@@ -525,6 +541,7 @@ export async function startEngineFacade(options: EngineFacadeOptions): Promise<E
       model: model ? omitUndefined({ providerID: model.providerID, modelID: model.modelID, variant: model.variant && model.variant !== "default" ? model.variant : undefined }) : undefined,
       system: str(body, "system"),
       tools: isRecord(body.tools) ? body.tools : undefined,
+      textParts: splitText ? textParts : undefined,
     });
     return omitUndefined({
       id: str(body, "messageID"),

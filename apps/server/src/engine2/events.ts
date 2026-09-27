@@ -18,12 +18,13 @@ import {
   partId,
   v1AssistantMessage,
   v1Error,
+  v1UserTextParts,
   v1PermissionRequest,
   v1QuestionRequest,
   v1Session,
   type QuestionMapping,
 } from "./shapes.js";
-import { arr, isRecord, num, omitUndefined, record, str, type JsonRecord } from "./util.js";
+import { arr, isRecord, num, omitUndefined, promptFileUrl, record, str, type JsonRecord } from "./util.js";
 
 export type V1Event = { type: string; properties: JsonRecord };
 /** A translated event and the directory it belongs to (null: every directory). */
@@ -272,13 +273,17 @@ export class EventTranslator {
         const text = str(payload, "text") ?? "";
         const files = arr(payload, "files");
         if (text || files.length === 0) {
-          out.push(this.scoped(sessionID, "message.part.updated", { sessionID, part: { id: partId(id, "u0"), sessionID, messageID: id, type: "text", text }, time: created }));
+          const layout = record(record(payload, "metadata"), "omnirush")?.textParts;
+          for (const part of v1UserTextParts({ messageID: id, sessionID }, text, layout, false)) {
+            out.push(this.scoped(sessionID, "message.part.updated", { sessionID, part, time: created }));
+          }
         }
         files.forEach((file, index) => {
-          if (!isRecord(file) || typeof file.uri !== "string") return;
+          const url = promptFileUrl(file);
+          if (!isRecord(file) || !url) return;
           out.push(this.scoped(sessionID, "message.part.updated", {
             sessionID,
-            part: omitUndefined({ id: partId(id, `f${index}`), sessionID, messageID: id, type: "file", mime: str(file, "mime") ?? "application/octet-stream", filename: str(file, "name"), url: file.uri }),
+            part: omitUndefined({ id: partId(id, `f${index}`), sessionID, messageID: id, type: "file", mime: str(file, "mime") ?? "application/octet-stream", filename: str(file, "name"), url }),
             time: created,
           }));
         });

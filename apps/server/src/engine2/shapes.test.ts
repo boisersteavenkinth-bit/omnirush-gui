@@ -304,6 +304,53 @@ describe("the 2.x engine's own fields ride along (additive)", () => {
   });
 });
 
+describe("prompts with synthetic notes", () => {
+  const note = "Attached files were copied into this worker workspace for tool access:\n- image.png: .opencode/omnirush/inbox/chat-attachments/s/1-image.png (file:///home/u/p/.opencode/omnirush/inbox/chat-attachments/s/1-image.png)";
+  const metadata = { omnirushAttachments: [] };
+  const payload = {
+    id: "msg_note",
+    text: `${note}\n\nhi`,
+    files: [{ uri: "data:image/png;base64,AAAA", name: "image.png", mime: "image/png" }],
+    metadata: { omnirush: { agent: "build", textParts: [{ length: note.length, synthetic: true, metadata }, { length: 2 }] } },
+  };
+  const expected = [
+    { id: partId("msg_note", "u0"), type: "text", text: note, synthetic: true, metadata },
+    { id: partId("msg_note", "u1"), type: "text", text: "hi" },
+    { id: partId("msg_note", "f0"), type: "file", filename: "image.png", url: "data:image/png;base64,AAAA" },
+  ];
+
+  test("read back: the typed prompt is its own text part, the note a synthetic part", () => {
+    const [message] = v1Messages([{ type: "user", time: { created: 1 }, ...payload }], { sessionID: "ses_n", directory: "/w", root: "/" });
+    expect(message!.parts).toMatchObject(expected);
+    expect(message!.parts[1]!.synthetic).toBeUndefined();
+    expect(message!.parts).toHaveLength(3);
+  });
+
+  test("live: the enqueued prompt shows the same parts", async () => {
+    const translator = new EventTranslator({ version: "2.0.18" });
+    const out = await translator.translate({ type: "session.inbox.enqueued", data: { sessionID: "ses_n", inboxID: "msg_note", item: { type: "user", payload } } });
+    const parts = out.filter((item) => item.event.type === "message.part.updated").map((item) => item.event.properties.part);
+    expect(parts).toMatchObject(expected);
+  });
+
+  test("an image the engine keeps inline reads back as its data: URL, bytes not repeated", () => {
+    const inline = { data: "AAAA", mime: "image/png", source: { type: "inline" }, name: "image.png" };
+    const tree = { type: "user", time: { created: 1 }, ...payload, files: [inline] };
+    const [message] = v1Messages([tree], { sessionID: "ses_n", directory: "/w", root: "/" });
+    expect(message!.parts).toMatchObject(expected);
+    expect(JSON.stringify(message).match(/AAAA/g)).toHaveLength(1);
+    // The engine's inline source is not a 1.x file source (the UI would render it as a document).
+    expect(message!.parts[2]!.source).toBeUndefined();
+    expect(message!.parts[2]!.data).toBeUndefined();
+  });
+
+  test("a text that no longer matches the layout stays one part", () => {
+    const [message] = v1Messages([{ type: "user", time: { created: 1 }, ...payload, text: "edited" }], { sessionID: "ses_n", directory: "/w", root: "/" });
+    expect(message!.parts.filter((part) => part.type === "text")).toMatchObject([{ text: "edited" }]);
+    expect(message!.parts[0]!.synthetic).toBeUndefined();
+  });
+});
+
 describe("live events and read-back agree", () => {
   test("parts built from the 2.x stream carry the ids and fields of the same parts read back", async () => {
     const tree = fixture("v2-sub");
