@@ -67,8 +67,9 @@ function modelRef(value: unknown): ModelRef | undefined {
   const providerID = str(value, "providerID");
   const modelID = str(value, "id") ?? str(value, "modelID");
   if (!providerID || !modelID) return undefined;
+  // 2.x records "default" when no variant was picked; 1.x left the field out.
   const variant = str(value, "variant");
-  return variant ? { providerID, modelID, variant } : { providerID, modelID };
+  return variant && variant !== "default" ? { providerID, modelID, variant } : { providerID, modelID };
 }
 
 export class EventTranslator {
@@ -346,6 +347,7 @@ export class EventTranslator {
           message: omitUndefined({
             id,
             type: "assistant",
+            snapshot: str(data, "snapshot") ? { start: str(data, "snapshot") } : undefined,
             agent,
             model: model ? { id: model.modelID, providerID: model.providerID, variant: state.model?.variant } : undefined,
             content: [],
@@ -363,10 +365,13 @@ export class EventTranslator {
         live.message.cost = num(data, "cost") ?? 0;
         live.message.tokens = record(data, "tokens") ?? live.message.tokens;
         const snapshot = str(data, "snapshot");
-        if (snapshot) live.message.snapshot = snapshot;
+        const files = arr(data, "files").filter((file) => typeof file === "string");
+        const previous = record(live.message, "snapshot") ?? {};
+        if (snapshot || files.length) live.message.snapshot = omitUndefined({ ...previous, end: snapshot ?? str(previous, "end"), files: files.length ? files : undefined });
         live.message.time = { ...(record(live.message, "time") ?? {}), completed: num(raw, "created") ?? this.now() };
         this.live.delete(str(live.message, "id") ?? "");
         const out = this.assistantEvents(live, partId(String(live.message.id), "f0"), false);
+        out.push(...this.assistantEvents(live, partId(String(live.message.id), "p0"), false));
         out.push(...this.assistantEvents(live, "", true).filter((item) => item.event.type === "message.updated"));
         return out;
       }
@@ -388,6 +393,7 @@ export class EventTranslator {
         const ordinal = num(data, "ordinal") ?? 0;
         const entry = this.contentEntry(live, kind, ordinal);
         entry.time = { created: num(raw, "created") ?? this.now() };
+        if (isRecord(data.state)) entry.state = data.state;
         return this.assistantEvents(live, partId(String(live.message.id), `${kind === "text" ? "t" : "r"}${ordinal}`), false);
       }
       case "session.text.delta":
@@ -420,6 +426,7 @@ export class EventTranslator {
         const ordinal = num(data, "ordinal") ?? 0;
         const entry = this.contentEntry(live, kind, ordinal);
         if (typeof data.text === "string") entry.text = data.text;
+        if (isRecord(data.state)) entry.state = data.state;
         entry.time = { ...(record(entry, "time") ?? {}), completed: num(raw, "created") ?? this.now() };
         return this.assistantEvents(live, partId(String(live.message.id), `${kind === "text" ? "t" : "r"}${ordinal}`), false);
       }
@@ -454,6 +461,7 @@ export class EventTranslator {
         if (!live || !callID) return [];
         const entry = this.toolEntry(live, callID, str(data, "name"));
         entry.state = { status: "running", input: data.input ?? {}, metadata: {} };
+        if (isRecord(data.providerState)) entry.providerState = data.providerState;
         entry.time = { ...(record(entry, "time") ?? {}), ran: num(raw, "created") ?? this.now() };
         return this.assistantEvents(live, partId(String(live.message.id), "c", callID), false);
       }

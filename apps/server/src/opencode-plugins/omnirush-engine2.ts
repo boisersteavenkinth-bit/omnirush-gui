@@ -225,6 +225,33 @@ export default {
 
     // ---- custom tools ------------------------------------------------------
     const tools: Array<[string, V1Tool]> = plugins.flatMap((plugin) => (isRec(plugin.tool) ? Object.entries(plugin.tool as Record<string, V1Tool>) : []));
+    // The 2.x engine has no todo list tool; the app's todo panel reads the 1.x one (`todowrite`).
+    const todoItem = z.object({
+      content: z.string().describe("Brief description of the task"),
+      status: z.string().describe("Current status of the task: pending, in_progress, completed, cancelled"),
+      priority: z.string().describe("Priority level of the task: high, medium, low"),
+      id: z.string().optional().describe("Unique identifier for the todo item"),
+    });
+    const todoArgs = { todos: z.array(todoItem).describe("The updated todo list") };
+    tools.push(["todowrite", {
+      description: "Use this tool to create and manage a structured task list for your current session. It helps you track progress on complex, multi-step work and shows the user what you are doing. Send the whole updated list every time; mark exactly one task in_progress while you work on it and mark tasks completed as soon as they are done.",
+      args: todoArgs,
+      async execute(raw: unknown, context: { sessionID?: string }) {
+        const todos = z.object(todoArgs).parse(raw).todos;
+        const baseUrl = process.env.OMNIRUSH_ENGINE_ADAPTER_URL?.trim();
+        if (baseUrl && context?.sessionID) {
+          const authorization = process.env.OMNIRUSH_ENGINE_ADAPTER_AUTHORIZATION?.trim();
+          await fetch(`${baseUrl}/omnirush/todos`, {
+            method: "POST",
+            headers: { "content-type": "application/json", ...(authorization ? { authorization } : {}) },
+            body: JSON.stringify({ sessionID: context.sessionID, todos }),
+            signal: AbortSignal.timeout(5_000),
+          }).catch(() => undefined);
+        }
+        return { title: `${todos.filter((todo) => todo.status !== "completed").length} todos`, output: JSON.stringify(todos, null, 2), metadata: { todos } };
+      },
+    }]);
+
     if (tools.length > 0) {
       await ctx.tool.transform((editor: any) => {
         for (const [name, definition] of tools) {
@@ -266,6 +293,11 @@ export default {
     }
 
     // ---- tool calls --------------------------------------------------------
+    // Sub-agents run in the foreground, as the 1.x task tool did (the swarm counts running
+    // sub-agents and the task result carries the sub-agent's answer).
+    await ctx.tool.hook("execute.before", async (event: any) => {
+      if (event.tool === "subagent" && isRec(event.input) && event.input.background === true) event.input = { ...event.input, background: false };
+    });
     const before = hooks("tool.execute.before");
     if (before.length) {
       await ctx.tool.hook("execute.before", async (event: any) => {
@@ -281,11 +313,10 @@ export default {
         if (event.status !== "completed" || !isRec(event.result)) return;
         const tool = v1ToolName(String(event.tool));
         const original = resultText(event.result.content ?? event.result.output);
-        const output: { title: string; output: string; metadata: Rec } = {
-          title: "",
-          output: original,
-          metadata: isRec(event.result.metadata) ? { ...event.result.metadata } : {},
-        };
+        const metadata: Rec = isRec(event.result.metadata) ? { ...event.result.metadata } : {};
+        // The 1.x task tool named its child session `sessionId`.
+        if (event.tool === "subagent" && typeof metadata.sessionID === "string" && metadata.sessionId === undefined) metadata.sessionId = metadata.sessionID;
+        const output: { title: string; output: string; metadata: Rec } = { title: "", output: original, metadata };
         for (const hook of after) await hook({ tool, sessionID: event.sessionID, callID: event.id, args: v1ToolInput(String(event.tool), event.input) }, output);
         const files = Array.isArray(event.result.content) ? event.result.content.filter((item: unknown) => isRec(item) && item.type === "file") : [];
         event.result = {
@@ -354,7 +385,17 @@ export default {
       await ctx.session.hook("prompt", async (event: any) => {
         const sessionID = String(event.sessionID ?? "");
         const info = await adapterJson(`/session/${encodeURIComponent(sessionID)}`, directory);
-        const current = isRec(info) && isRec(info.model) ? { providerID: String(info.model.providerID), modelID: String(info.model.id), variant: typeof info.model.variant === "string" && info.model.variant !== "default" ? info.model.variant : undefined } : undefined;
+        // A new sub-agent session has no step yet: it runs on the model of the session above it.
+        let current: { providerID: string; modelID: string; variant?: string } | undefined;
+        let cursor: unknown = info;
+        for (let hop = 0; hop < 5 && isRec(cursor); hop++) {
+          if (isRec(cursor.model) && typeof cursor.model.id === "string") {
+            current = { providerID: String(cursor.model.providerID), modelID: String(cursor.model.id), variant: typeof cursor.model.variant === "string" && cursor.model.variant !== "default" ? cursor.model.variant : undefined };
+            break;
+          }
+          if (typeof cursor.parentID !== "string") break;
+          cursor = await adapterJson(`/session/${encodeURIComponent(cursor.parentID)}`, directory);
+        }
         const message: Rec = { id: event.messageID, sessionID, role: "user", model: current ? { ...current } : undefined };
         const agent = isRec(info) && typeof info.agent === "string" ? info.agent : undefined;
         for (const hook of messageCreated) {

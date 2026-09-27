@@ -1,0 +1,242 @@
+{
+ "session": {
+  "id": "ses_f1edfb359ffey4j1DUiVnxf2Wi",
+  "slug": "crisp-eagle",
+  "projectID": "global",
+  "directory": "/work/proj",
+  "path": "work/proj",
+  "summary": {
+   "additions": 0,
+   "deletions": 0,
+   "files": 0
+  },
+  "cost": 0,
+  "tokens": {
+   "input": 405,
+   "output": 80,
+   "reasoning": 0,
+   "cache": {
+    "read": 2000,
+    "write": 0
+   }
+  },
+  "title": "Parity session title",
+  "agent": "build",
+  "model": {
+   "id": "mock-model",
+   "providerID": "mock",
+   "variant": "default"
+  },
+  "version": "1.18.32",
+  "time": {
+   "created": 1790483385510,
+   "updated": 1790483386553
+  }
+ },
+ "messages": [
+  {
+   "info": {
+    "id": "msg_0e1204cfc001iHkVyVS9ZNihHJ",
+    "sessionID": "ses_f1edfb359ffey4j1DUiVnxf2Wi",
+    "role": "user",
+    "time": {
+     "created": 1790483385596
+    },
+    "summary": {
+     "diffs": []
+    },
+    "agent": "build",
+    "model": {
+     "providerID": "mock",
+     "modelID": "mock-model"
+    }
+   },
+   "parts": [
+    {
+     "id": "prt_0e1204d0b001MohuznaygGdzKP",
+     "sessionID": "ses_f1edfb359ffey4j1DUiVnxf2Wi",
+     "messageID": "msg_0e1204cfc001iHkVyVS9ZNihHJ",
+     "type": "text",
+     "text": "PARITY-TOOLS find md files"
+    }
+   ]
+  },
+  {
+   "info": {
+    "id": "msg_0e1204d2c001fw6CAsiyNhOjP5",
+    "sessionID": "ses_f1edfb359ffey4j1DUiVnxf2Wi",
+    "role": "assistant",
+    "time": {
+     "created": 1790483385644,
+     "completed": 1790483386257
+    },
+    "parentID": "msg_0e1204cfc001iHkVyVS9ZNihHJ",
+    "modelID": "mock-model",
+    "providerID": "mock",
+    "mode": "build",
+    "agent": "build",
+    "path": {
+     "cwd": "/work/proj",
+     "root": "/"
+    },
+    "cost": 0,
+    "tokens": {
+     "total": 1242,
+     "input": 202,
+     "output": 40,
+     "reasoning": 0,
+     "cache": {
+      "read": 1000,
+      "write": 0
+     }
+    },
+    "finish": "tool-calls"
+   },
+   "parts": [
+    {
+     "id": "prt_0e1204ec0001HEE5kxKzcEWUhW",
+     "sessionID": "ses_f1edfb359ffey4j1DUiVnxf2Wi",
+     "messageID": "msg_0e1204d2c001fw6CAsiyNhOjP5",
+     "type": "step-start"
+    },
+    {
+     "id": "prt_0e1204eca001yNjmk8Z2sqvYM0",
+     "sessionID": "ses_f1edfb359ffey4j1DUiVnxf2Wi",
+     "messageID": "msg_0e1204d2c001fw6CAsiyNhOjP5",
+     "type": "tool",
+     "callID": "call_2_0",
+     "tool": "glob",
+     "state": {
+      "status": "completed",
+      "input": {
+       "pattern": "*.md"
+      },
+      "output": "/work/proj/extra.md\n/work/proj/notes.md",
+      "title": "work/proj",
+      "metadata": {
+       "count": 2,
+       "truncated": false
+      },
+      "time": {
+       "start": 1790483386079,
+       "end": 1790483386184
+      }
+     }
+    },
+    {
+     "id": "prt_0e1204ee7001l37M07L5JAFEFa",
+     "sessionID": "ses_f1edfb359ffey4j1DUiVnxf2Wi",
+     "messageID": "msg_0e1204d2c001fw6CAsiyNhOjP5",
+     "type": "tool",
+     "callID": "call_2_1",
+     "tool": "grep",
+     "state": {
+      "status": "completed",
+      "input": {
+       "pattern": "line",
+       "include": "*.md"
+      },
+      "output": "Found 2 matches\n/work/proj/notes.md:\n  Line 2: line one (patched)\n\n  Line 3: line two\n",
+      "title": "line",
+      "metadata": {
+       "matches": 2,
+       "truncated": false
+      },
+      "time": {
+       "start": 1790483386105,
+       "end": 1790483386223
+      }
+     }
+    },
+    {
+     "id": "prt_0e1204f78001fVqfUImW3mnra1",
+     "sessionID": "ses_f1edfb359ffey4j1DUiVnxf2Wi",
+     "messageID": "msg_0e1204d2c001fw6CAsiyNhOjP5",
+     "type": "step-finish",
+     "reason": "tool-calls",
+     "cost": 0,
+     "tokens": {
+      "total": 1242,
+      "input": 202,
+      "output": 40,
+      "reasoning": 0,
+      "cache": {
+       "read": 1000,
+       "write": 0
+      }
+     }
+    }
+   ]
+  },
+  {
+   "info": {
+    "id": "msg_0e1204fa1001M9po9cdFLR0pUg",
+    "sessionID": "ses_f1edfb359ffey4j1DUiVnxf2Wi",
+    "role": "assistant",
+    "time": {
+     "created": 1790483386273,
+     "completed": 1790483386543
+    },
+    "parentID": "msg_0e1204cfc001iHkVyVS9ZNihHJ",
+    "modelID": "mock-model",
+    "providerID": "mock",
+    "mode": "build",
+    "agent": "build",
+    "path": {
+     "cwd": "/work/proj",
+     "root": "/"
+    },
+    "cost": 0,
+    "tokens": {
+     "total": 1243,
+     "input": 203,
+     "output": 40,
+     "reasoning": 0,
+     "cache": {
+      "read": 1000,
+      "write": 0
+     }
+    },
+    "finish": "stop"
+   },
+   "parts": [
+    {
+     "id": "prt_0e120504a001iBzCXT70LCaRPt",
+     "sessionID": "ses_f1edfb359ffey4j1DUiVnxf2Wi",
+     "messageID": "msg_0e1204fa1001M9po9cdFLR0pUg",
+     "type": "step-start"
+    },
+    {
+     "id": "prt_0e1205051001QLrb3u4nGL2ZvL",
+     "sessionID": "ses_f1edfb359ffey4j1DUiVnxf2Wi",
+     "messageID": "msg_0e1204fa1001M9po9cdFLR0pUg",
+     "type": "text",
+     "text": "Found them.",
+     "time": {
+      "start": 1790483386449,
+      "end": 1790483386514
+     }
+    },
+    {
+     "id": "prt_0e120509c001EDIIwI6Qr2xNVM",
+     "sessionID": "ses_f1edfb359ffey4j1DUiVnxf2Wi",
+     "messageID": "msg_0e1204fa1001M9po9cdFLR0pUg",
+     "type": "step-finish",
+     "reason": "stop",
+     "cost": 0,
+     "tokens": {
+      "total": 1243,
+      "input": 203,
+      "output": 40,
+      "reasoning": 0,
+      "cache": {
+       "read": 1000,
+       "write": 0
+      }
+     }
+    }
+   ]
+  }
+ ],
+ "children": []
+}

@@ -18,7 +18,9 @@
  */
 import http from "node:http";
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
+import { dirname as parentDir, join as joinPath } from "node:path";
 import { homedir } from "node:os";
 import { buildEngine2Config, v2Mcp } from "./config.js";
 import { EventTranslator, v1EventEnvelope, type ScopedV1Event, type V1Event } from "./events.js";
@@ -87,6 +89,28 @@ function openInBrowser(url: string): void {
   } catch {
     // No browser launcher: the app shows the URL for manual completion.
   }
+}
+
+const roots = new Map<string, string>();
+/** The worktree root 1.x reported in `path.root` / relative paths: the enclosing git root, else "/". */
+export function worktreeRoot(directory: string | undefined): string {
+  if (!directory) return "/";
+  const known = roots.get(directory);
+  if (known) return known;
+  let current = directory;
+  let root = "/";
+  for (let depth = 0; depth < 64; depth++) {
+    if (existsSync(joinPath(current, ".git"))) {
+      root = current;
+      break;
+    }
+    const parent = parentDir(current);
+    if (parent === current) break;
+    current = parent;
+  }
+  if (roots.size > 256) roots.clear();
+  roots.set(directory, root);
+  return root;
 }
 
 class UpstreamError extends Error {
@@ -160,6 +184,7 @@ export async function startEngineFacade(options: EngineFacadeOptions): Promise<E
   /** Session model/agent last sent to the engine, to skip redundant switch records. */
   const selected = new Map<string, { model?: string; agent?: string; system?: string }>();
   const archived = new Map<string, number>();
+  const todos = new Map<string, JsonRecord[]>();
 
   const call = async (
     method: string,
@@ -190,6 +215,7 @@ export async function startEngineFacade(options: EngineFacadeOptions): Promise<E
 
   const translator = new EventTranslator({
     version: options.version,
+    rootFor: worktreeRoot,
     lookupSession: (sessionID) => call("GET", `/api/session/${encodeURIComponent(sessionID)}`),
   });
 
@@ -215,6 +241,14 @@ export async function startEngineFacade(options: EngineFacadeOptions): Promise<E
     if (!info) return null;
     const archivedAt = archived.get(sessionID) ?? num(record(info, "metadata"), "omnirushArchivedAt");
     if (archivedAt) info.time = { ...(record(info, "time") ?? {}), archived: archivedAt };
+    const picked = selected.get(sessionID);
+    if (picked?.model) {
+      // The model and agent this adapter last selected for the session (its next step runs on them).
+      const [ref, variant] = picked.model.split("#");
+      const slash = ref!.indexOf("/");
+      info.model = { id: ref!.slice(slash + 1), providerID: ref!.slice(0, slash), variant: variant || "default" };
+    }
+    if (picked?.agent) info.agent = picked.agent;
     if (!info.agent || !info.model) {
       // 2.x records the agent and model on each step, not on the session: take the latest step's.
       const recent = await call("GET", `/api/session/${encodeURIComponent(sessionID)}/message`, { query: { order: "desc", limit: "20" } }).catch(() => undefined);
@@ -255,20 +289,64 @@ export async function startEngineFacade(options: EngineFacadeOptions): Promise<E
     return all;
   };
 
+  // One read of a session's history serves the page reads that follow it for a moment (the
+  // turn observer and the renderer page a long history newest-first, one request per page).
+  const messageCache = new Map<string, { at: number; value: Promise<V1Message[]> }>();
   const sessionMessages = async (sessionID: string): Promise<V1Message[]> => {
+    const cached = messageCache.get(sessionID);
+    if (cached && Date.now() - cached.at < 1_500) return cached.value;
+    const value = readSessionMessages(sessionID);
+    messageCache.set(sessionID, { at: Date.now(), value });
+    if (messageCache.size > 64) messageCache.delete(messageCache.keys().next().value as string);
+    value.catch(() => messageCache.delete(sessionID));
+    return value;
+  };
+  const readSessionMessages = async (sessionID: string): Promise<V1Message[]> => {
     const info = await sessionInfo(sessionID).catch(() => null);
     const directory = info ? String(info.directory || "") || undefined : undefined;
+    const variant = str(info?.model, "variant");
     const model = isRecord(info?.model) && str(info!.model, "id")
-      ? { providerID: String(str(info!.model, "providerID")), modelID: String(str(info!.model, "id")), variant: str(info!.model, "variant") }
+      ? omitUndefined({ providerID: String(str(info!.model, "providerID")), modelID: String(str(info!.model, "id")), variant: variant && variant !== "default" ? variant : undefined })
       : undefined;
-    return v1Messages(await rawMessages(sessionID), {
+    const mapped = v1Messages(await rawMessages(sessionID), {
       sessionID,
       directory,
-      root: "/",
+      root: worktreeRoot(directory),
       agent: info ? str(info, "agent") : undefined,
       model,
       child: Boolean(info && str(info, "parentID")),
     });
+    await attachTurnDiffs(sessionID, mapped);
+    return mapped;
+  };
+
+  // 1.x put each prompt's turn diff (whole-file patches) on the user message as `summary.diffs`.
+  const turnDiffs = new Map<string, JsonRecord[]>();
+  const attachTurnDiffs = async (sessionID: string, messages: V1Message[]): Promise<void> => {
+    const busy = translator.statusOf(sessionID)?.type === "busy";
+    const prompts = messages.filter((message) => message.info.role === "user" && !message.parts.some((part) => part.synthetic === true));
+    for (const [index, message] of prompts.entries()) {
+      const id = String(message.info.id);
+      const key = `${sessionID}\u0000${id}`;
+      let diffs = turnDiffs.get(key);
+      const current = index === prompts.length - 1;
+      if (!diffs && !(current && busy)) {
+        const payload = await call("GET", `/api/session/${encodeURIComponent(sessionID)}/diff`, { query: { from: id } }).catch(() => undefined);
+        const list = unwrap(payload);
+        if (Array.isArray(list)) {
+          diffs = list.filter(isRecord).map((diff) => omitUndefined({
+            file: str(diff, "file"),
+            patch: str(diff, "patch"),
+            additions: num(diff, "additions") ?? 0,
+            deletions: num(diff, "deletions") ?? 0,
+            status: str(diff, "status"),
+          }));
+          if (!current) turnDiffs.set(key, diffs);
+          if (turnDiffs.size > 4096) turnDiffs.delete(turnDiffs.keys().next().value as string);
+        }
+      }
+      if (diffs) message.info.summary = { diffs };
+    }
   };
 
   const listSessions = async (directory: string | undefined, query: URLSearchParams, rootsOnly: boolean): Promise<JsonRecord[]> => {
@@ -358,11 +436,21 @@ export async function startEngineFacade(options: EngineFacadeOptions): Promise<E
       else if (type === "agent" && typeof part.name === "string") agents.push({ id: part.name });
       else if (type === "subtask" && typeof part.prompt === "string") texts.push(part.prompt);
     }
+    // The 1.x user message fields 2.x does not keep (system prompt, agent and model as picked,
+    // tool switches) travel in the message metadata, so reads return them field for field.
+    const model = modelRefFromBody(body);
+    const v1 = omitUndefined({
+      agent: str(body, "agent"),
+      model: model ? omitUndefined({ providerID: model.providerID, modelID: model.modelID, variant: model.variant && model.variant !== "default" ? model.variant : undefined }) : undefined,
+      system: str(body, "system"),
+      tools: isRecord(body.tools) ? body.tools : undefined,
+    });
     return omitUndefined({
       id: str(body, "messageID"),
       text: texts.join("\n\n"),
       files: files.length ? files : undefined,
       agents: agents.length ? agents : undefined,
+      metadata: Object.keys(v1).length ? { omnirush: v1 } : undefined,
       resume: body.noReply === true ? false : undefined,
     });
   };
@@ -488,6 +576,8 @@ export async function startEngineFacade(options: EngineFacadeOptions): Promise<E
   let streamStarted = false;
   const dispatch = (items: ScopedV1Event[]) => {
     for (const item of items) {
+      const touched = str(item.event.properties, "sessionID") ?? str(record(item.event.properties, "info"), "sessionID") ?? str(record(item.event.properties, "part"), "sessionID");
+      if (touched) messageCache.delete(touched);
       for (const subscriber of subscribers) {
         if (!subscriber.global && subscriber.directory && item.directory && item.directory !== subscriber.directory) continue;
         subscriber.write(item.event, item.directory);
@@ -771,9 +861,17 @@ export async function startEngineFacade(options: EngineFacadeOptions): Promise<E
           json(res, 200, v1Session(created, { version: options.version, directory }));
           return;
         }
-        case "todo":
-          json(res, 200, []);
+        case "todo": {
+          if (!todos.has(sessionID)) {
+            // Rebuilt from the session's last todo list call when the adapter has not seen one yet.
+            const messages = await sessionMessages(sessionID).catch(() => []);
+            const last = messages.flatMap((message) => message.parts).filter((part) => part.type === "tool" && part.tool === "todowrite").at(-1);
+            const input = record(record(last, "state"), "input");
+            todos.set(sessionID, arr(input, "todos").filter(isRecord));
+          }
+          json(res, 200, todos.get(sessionID) ?? []);
           return;
+        }
         case "diff":
           json(res, 200, []);
           return;
@@ -1027,6 +1125,18 @@ export async function startEngineFacade(options: EngineFacadeOptions): Promise<E
           return;
         }
       }
+    }
+    if (method === "POST" && path === "/omnirush/todos") {
+      // The plugin bridge's todo list tool: remembered per session and announced as the 1.x event.
+      const body = ((await readBody(req)) ?? {}) as JsonRecord;
+      const sessionID = str(body, "sessionID");
+      if (sessionID) {
+        const list = arr(body, "todos").filter(isRecord);
+        todos.set(sessionID, list);
+        dispatch([{ directory: translator.directoryOf(sessionID), event: { type: "todo.updated", properties: { sessionID, todos: list } } }]);
+      }
+      json(res, 200, true);
+      return;
     }
     if (method === "POST" && path === "/omnirush/engine-tools") {
       // The plugin bridge reports the tools the engine offers (1.x names) for the tool listing routes.

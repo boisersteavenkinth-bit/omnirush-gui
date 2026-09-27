@@ -324,7 +324,7 @@ describe("omnirush runtime config file", () => {
     expect(prompt).toContain("## OmniRush.ai Artifacts");
     expect(prompt).toContain("## Connected work");
     expect(prompt).toContain("delegate bounded, independent work to subagents");
-    expect(prompt).toContain("make that many distinct task-tool calls");
+    expect(prompt).toContain("make that many distinct subagent-tool calls");
     expect(prompt).toContain("Never replace an explicit delegation request with a simulated multi-role answer");
     expect(prompt).toContain("Wait for every delegated task");
     // Den removed the Memory Bank; the prompt must not teach capabilities that
@@ -374,7 +374,7 @@ describe("omnirush runtime config file", () => {
     const section = prompt.slice(prompt.indexOf("## Sub-agent swarms"), prompt.indexOf("## Editing files"));
     expect(section).toContain(`load the \`${OMNIRUSH_SWARM_SKILL_NAME}\` skill first`);
     expect(section).toContain("Before you start 3 or more sub-agents for one request");
-    expect(section).toContain("at most 1-2 sub-agents with the task tool and no board");
+    expect(section).toContain("at most 1-2 sub-agents with the subagent tool and no board");
     // No board mechanics on every request: no file name, no table, no layers.
     expect(prompt).not.toContain("swarm.md");
     expect(prompt).not.toContain("## Tasks");

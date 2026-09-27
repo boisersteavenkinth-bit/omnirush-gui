@@ -137,7 +137,13 @@ describe("1.x engine adapter over the 2.x engine", () => {
     expect(recorded[0]!.body).toEqual({ model: { providerID: "omnirush", id: "gpt-6-astra", variant: "high" } });
     expect(recorded[1]!.body).toEqual({ agent: "omnirush" });
     expect(recorded[2]!.body).toEqual({ value: "Extra system" });
-    expect(recorded[3]!.body).toEqual({ id: "msg_client_1", text: "hello", files: [{ uri: "data:image/png;base64,AAAA", name: "a.png" }] });
+    expect(recorded[3]!.body).toEqual({
+      id: "msg_client_1",
+      text: "hello",
+      files: [{ uri: "data:image/png;base64,AAAA", name: "a.png" }],
+      // The 1.x user message fields 2.x does not keep travel as message metadata.
+      metadata: { omnirush: { agent: "omnirush", model: { providerID: "omnirush", modelID: "gpt-6-astra", variant: "high" }, system: "Extra system" } },
+    });
     // The same selection is not sent again.
     recorded.length = 0;
     await post(`/session/${SESSION}/prompt_async`, { model: { providerID: "omnirush", modelID: "gpt-6-astra" }, variant: "high", agent: "omnirush", system: "Extra system", parts: [{ type: "text", text: "again" }] });

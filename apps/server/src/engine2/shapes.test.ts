@@ -10,7 +10,8 @@ import { partId, v1Messages, v1PermissionRequest, v1QuestionRequest, v1Session, 
  * and on the 2.x engine (2.0.18), read back with each engine's own API
  * (`v1-*.json`: `/session/:id/message`, `v2-*.json`: `/api/session/:id/message`),
  * machine paths replaced by /work. p1: shell, write, edit and a text answer;
- * sub: two parallel sub-agents; nest: sub-agents three layers deep.
+ * sub: two parallel sub-agents; nest: sub-agents three layers deep; patch: a GPT-style
+ * apply_patch (2.x `patch`) that updates one file and adds another; tools: glob and grep.
  */
 type Tree = { session: Record<string, unknown>; messages: unknown[]; children: Tree[] };
 const fixture = (name: string): Tree => JSON.parse(readFileSync(join(import.meta.dir, "fixtures", `${name}.json`), "utf8"));
@@ -77,7 +78,7 @@ function compareTrees(v1: Tree, mapped: Mapped, path: string, out: string[]): vo
 }
 
 describe("2.x messages in the 1.x shape (uploaded trace parity)", () => {
-  for (const scenario of ["p1", "sub", "nest"]) {
+  for (const scenario of ["p1", "sub", "nest", "patch", "tools"]) {
     test(`${scenario}: every message, part and field the 1.x engine wrote, and no other`, () => {
       const out: string[] = [];
       compareTrees(fixture(`v1-${scenario}`), mapTree(fixture(`v2-${scenario}`)), "root", out);

@@ -73,8 +73,11 @@ export function v1ToolInput(name: string, raw: unknown): JsonRecord {
       return { filePath: path, ...rest };
     }
     case "subagent": {
-      if (typeof input.agent !== "string" || "subagent_type" in input) return input;
-      const { agent, ...rest } = input;
+      // Sub-agents always run in the foreground here (the plugin bridge keeps `background` off),
+      // as the 1.x task tool did; the flag is not part of the 1.x input.
+      const { background: _background, ...withoutBackground } = input;
+      if (typeof withoutBackground.agent !== "string" || "subagent_type" in withoutBackground) return withoutBackground;
+      const { agent, ...rest } = withoutBackground;
       return { subagent_type: agent, ...rest };
     }
     default:
@@ -154,9 +157,28 @@ function v1ToolTitle(name: string, input: JsonRecord, ctx: ToolContext): string 
       return String(input.query ?? "");
     case "skill":
       return String(input.id ?? input.name ?? "");
+    case "todowrite": {
+      const todos = Array.isArray(input.todos) ? input.todos : [];
+      return `${todos.filter((todo) => !isRecord(todo) || todo.status !== "completed").length} todos`;
+    }
     default:
       return v1ToolName(name);
   }
+}
+
+/** A 2.x patch file entry (`{file, patch, status, additions, deletions}`) as the 1.x apply_patch one. */
+function v1PatchFile(entry: JsonRecord, ctx: ToolContext): JsonRecord {
+  const file = absoluteFrom(ctx.directory, String(entry.file ?? entry.filePath ?? ""));
+  const status = str(entry, "status");
+  return omitUndefined({
+    filePath: file,
+    relativePath: relativeTo(ctx.root && ctx.root !== "/" ? ctx.root : "/", file),
+    type: status === "added" ? "add" : status === "deleted" ? "delete" : status === "moved" || status === "renamed" ? "move" : "update",
+    patch: typeof entry.patch === "string" ? entry.patch : str(entry, "diff") ?? "",
+    additions: typeof entry.additions === "number" ? entry.additions : 0,
+    deletions: typeof entry.deletions === "number" ? entry.deletions : 0,
+    movePath: str(entry, "movePath") ?? str(entry, "target"),
+  });
 }
 
 /** A completed 2.x tool call's metadata with the 1.x keys the app, swarm board and converter read. */
@@ -203,8 +225,7 @@ function v1ToolMetadata(name: string, input: JsonRecord, metadata: JsonRecord, o
       const { existed: _existed, ...rest } = metadata;
       return { diagnostics: {}, filepath: file, exists, ...rest };
     }
-    case "edit":
-    case "patch": {
+    case "edit": {
       const files = Array.isArray(metadata.files) ? metadata.files.filter(isRecord) : [];
       const first = files[0];
       const { files: _files, ...rest } = metadata;
@@ -220,9 +241,19 @@ function v1ToolMetadata(name: string, input: JsonRecord, metadata: JsonRecord, o
           additions: typeof first.additions === "number" ? first.additions : 0,
           deletions: typeof first.deletions === "number" ? first.deletions : 0,
         }),
-        ...(name === "patch" ? { files: files.map((entry) => ({ ...entry, file: absoluteFrom(ctx.directory, String(entry.file ?? "")) })) } : {}),
         ...rest,
       });
+    }
+    case "patch": {
+      // 1.x apply_patch: one combined diff and a file list keyed filePath / relativePath.
+      const files = (Array.isArray(metadata.files) ? metadata.files.filter(isRecord) : []).map((entry) => v1PatchFile(entry, ctx));
+      const { files: _files, ...rest } = metadata;
+      return {
+        diff: files.map((entry) => String(entry.patch ?? "")).filter(Boolean).join("\n"),
+        files,
+        diagnostics: {},
+        ...rest,
+      };
     }
     default:
       return metadata;
@@ -256,6 +287,22 @@ function errorMessage(value: unknown): string {
   return value === undefined ? "" : String(value);
 }
 
+/**
+ * 2.x keeps a content entry's provider state bare (`{itemId, …}`); 1.x kept the same values as
+ * part metadata under the provider's namespace (`{openai: {itemId, …}}`). The namespace follows
+ * from the state's keys (OpenAI Responses item ids, Anthropic signatures, Google thought
+ * signatures); the reasoning-field hint of chat-completions providers is not provider metadata.
+ */
+export function v1ProviderMetadata(state: unknown): JsonRecord | undefined {
+  if (!isRecord(state)) return undefined;
+  const { reasoningField: _reasoningField, ...rest } = state;
+  if (Object.keys(rest).length === 0) return undefined;
+  if ("itemId" in rest || "responseId" in rest) return { openai: rest };
+  if ("signature" in rest || "redactedData" in rest) return { anthropic: rest };
+  if ("thoughtSignature" in rest) return { google: rest };
+  return undefined;
+}
+
 /** Part ids: `prt_<message id sans prefix>_<slot>[_<call id>]`, the same from a read and from events. */
 export function partId(messageID: string, slot: string, callID?: string): string {
   const core = messageID.startsWith("msg_") ? messageID.slice(4) : messageID;
@@ -280,6 +327,7 @@ export function v1ToolPart(
   const end = num(time, "completed") ?? start;
   const input = v1ToolInput(name, state.input);
   const rawInput = parseInput(state.input);
+  const providerMetadata = v1ProviderMetadata(entry.providerState);
   const base = {
     id: partId(ids.messageID, "c", callID),
     sessionID: ids.sessionID,
@@ -287,6 +335,7 @@ export function v1ToolPart(
     type: "tool",
     callID,
     tool: v1ToolName(name),
+    ...(providerMetadata ? { metadata: providerMetadata } : {}),
   };
   if (status === "streaming" || status === "pending") {
     return { ...base, state: { status: "pending", input, raw: typeof state.input === "string" ? state.input : JSON.stringify(state.input ?? {}) } };
@@ -419,8 +468,9 @@ function modelRef(value: unknown): ModelRef | undefined {
   const providerID = str(value, "providerID");
   const modelID = str(value, "id") ?? str(value, "modelID");
   if (!providerID || !modelID) return undefined;
+  // 2.x records "default" when no variant was picked; 1.x left the field out.
   const variant = str(value, "variant");
-  return variant ? { providerID, modelID, variant } : { providerID, modelID };
+  return variant && variant !== "default" ? { providerID, modelID, variant } : { providerID, modelID };
 }
 
 /** One 2.x assistant message (one step) as a 1.x assistant message. */
@@ -436,8 +486,13 @@ export function v1AssistantMessage(message: JsonRecord, ctx: MessageContext, par
   const tokens = v1Tokens(message.tokens);
   const cost = num(message, "cost") ?? 0;
   const finish = str(message, "finish");
-  const snapshot = str(message, "snapshot");
-  const parts: JsonRecord[] = [omitUndefined({ id: partId(id, "s0"), sessionID: ctx.sessionID, messageID: id, type: "step-start", snapshot })];
+  // 2.x keeps the step's snapshots together (`{start, end, files}`); 1.x put the start on
+  // step-start, the end on step-finish, and the changed files in a `patch` part.
+  const snapshots = record(message, "snapshot") ?? {};
+  const snapshotStart = str(snapshots, "start") ?? str(message, "snapshot");
+  const snapshotEnd = str(snapshots, "end") ?? snapshotStart;
+  const changed = arr(snapshots, "files").filter((file): file is string => typeof file === "string");
+  const parts: JsonRecord[] = [omitUndefined({ id: partId(id, "s0"), sessionID: ctx.sessionID, messageID: id, type: "step-start", snapshot: snapshotStart })];
   const ordinals = { text: 0, reasoning: 0 };
   for (const entry of arr(message, "content")) {
     if (!isRecord(entry)) continue;
@@ -448,6 +503,7 @@ export function v1AssistantMessage(message: JsonRecord, ctx: MessageContext, par
       const entryTime = record(entry, "time");
       const start = num(entryTime, "created");
       const end = num(entryTime, "completed");
+      const metadata = v1ProviderMetadata(entry.state);
       if (type === "reasoning") {
         parts.push(omitUndefined({
           id: partId(id, `r${ordinal}`),
@@ -455,6 +511,7 @@ export function v1AssistantMessage(message: JsonRecord, ctx: MessageContext, par
           messageID: id,
           type: "reasoning",
           text,
+          metadata,
           time: omitUndefined({ start: start ?? created, end: end ?? (completed !== undefined ? completed : undefined) }),
         }));
       } else {
@@ -465,6 +522,7 @@ export function v1AssistantMessage(message: JsonRecord, ctx: MessageContext, par
           type: "text",
           text,
           time: start !== undefined || completed !== undefined ? omitUndefined({ start: start ?? created, end: end ?? completed }) : undefined,
+          metadata,
         }));
       }
       continue;
@@ -482,10 +540,21 @@ export function v1AssistantMessage(message: JsonRecord, ctx: MessageContext, par
       messageID: id,
       type: "step-finish",
       reason: finish,
-      snapshot,
+      snapshot: snapshotEnd,
       cost,
       tokens,
     }));
+    if (changed.length > 0 && snapshotStart) {
+      const base = ctx.root && ctx.root !== "/" ? ctx.root : ctx.directory;
+      parts.push({
+        id: partId(id, "p0"),
+        sessionID: ctx.sessionID,
+        messageID: id,
+        type: "patch",
+        hash: snapshotStart,
+        files: changed.map((file) => absoluteFrom(base, file)),
+      });
+    }
   }
   const error = v1Error(message.error, model?.providerID);
   const info = omitUndefined({
@@ -516,6 +585,7 @@ function v1UserMessage(
   synthetic: boolean,
   agent: string,
   model: ModelRef | undefined,
+  extra: { system?: string; tools?: JsonRecord } = {},
 ): V1Message {
   const id = str(message, "id") ?? "";
   const created = num(record(message, "time"), "created") ?? 0;
@@ -533,6 +603,8 @@ function v1UserMessage(
     summary: { diffs: [] },
     agent,
     model: model ? omitUndefined({ providerID: model.providerID, modelID: model.modelID, variant: model.variant }) : { providerID: "", modelID: "" },
+    system: extra.system,
+    tools: extra.tools,
   });
   return { info, parts };
 }
@@ -660,7 +732,16 @@ export function v1Messages(messages: unknown[], ctx: MessageContext): V1Message[
         let text = str(message, "text") ?? "";
         if (ctx.child && firstUser && type === "user" && text.startsWith(SUBAGENT_PROMPT_PREFIX)) text = text.slice(SUBAGENT_PROMPT_PREFIX.length);
         if (type === "user") firstUser = false;
-        const mapped = v1UserMessage(message, ctx, text, arr(message, "files"), type === "synthetic", replyAgent ?? agent, replyModel ?? model);
+        const sent = record(record(message, "metadata"), "omnirush");
+        const sentModel = record(sent, "model");
+        const mapped = v1UserMessage(
+          message, ctx, text, arr(message, "files"), type === "synthetic",
+          str(sent, "agent") ?? replyAgent ?? agent,
+          sentModel && str(sentModel, "providerID") && str(sentModel, "modelID")
+            ? { providerID: str(sentModel, "providerID")!, modelID: str(sentModel, "modelID")!, ...(str(sentModel, "variant") ? { variant: str(sentModel, "variant")! } : {}) }
+            : replyModel ?? model,
+          { system: str(sent, "system"), tools: record(sent, "tools") },
+        );
         lastUserId = String(mapped.info.id);
         out.push(mapped);
         return;
