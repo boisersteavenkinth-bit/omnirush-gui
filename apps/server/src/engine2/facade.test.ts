@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { EventTranslator } from "./events.js";
 import { startEngineFacade, type EngineFacade } from "./facade.js";
 
 type Tree = { session: Record<string, unknown>; messages: Array<Record<string, unknown>>; children: Tree[] };
@@ -220,6 +221,25 @@ describe("1.x engine adapter over the 2.x engine", () => {
     expect(config.providers.mock.settings.apiKey).toBe("sk-1");
   });
 
+  test("revert stages a reversible revert and unrevert clears it; neither commits", async () => {
+    recorded.length = 0;
+    const reverted = await post(`/session/${SESSION}/revert`, { messageID: "msg_b" });
+    expect(reverted.status).toBe(200);
+    const unreverted = await post(`/session/${SESSION}/unrevert`, {});
+    expect(unreverted.status).toBe(200);
+    const calls = recorded.filter((entry) => entry.path.includes("/revert")).map((entry) => `${entry.method} ${entry.path}`);
+    expect(calls).toEqual([`POST /api/session/${SESSION}/revert/stage`, `DELETE /api/session/${SESSION}/revert`]);
+    expect(recorded.find((entry) => entry.path.endsWith("/revert/stage"))!.body).toEqual({ messageID: "msg_b" });
+  });
+
+  test("a shell command or slash command makes a staged revert final first", async () => {
+    recorded.length = 0;
+    expect((await post(`/session/${SESSION}/shell`, { command: "ls", agent: "build" })).status).toBe(200);
+    expect((await post(`/session/${SESSION}/command`, { command: "/review", arguments: "" })).status).toBe(204);
+    const calls = recorded.filter((entry) => entry.method === "POST" && /\/(revert\/commit|shell|command)$/.test(entry.path)).map((entry) => entry.path.split("/").slice(4).join("/"));
+    expect(calls).toEqual(["revert/commit", "shell", "revert/commit", "command"]);
+  });
+
   test("the event stream speaks 1.x and keeps to the request's directory", async () => {
     const controller = new AbortController();
     const response = await fetch(`${facade.url}/event`, { headers: auth, signal: controller.signal });
@@ -253,5 +273,43 @@ describe("1.x engine adapter over the 2.x engine", () => {
       `session.status:${SESSION}`,
       `session.idle:${SESSION}`,
     ]);
+  });
+});
+
+describe("revert events", () => {
+  const info = (revert?: Record<string, unknown>) => ({ data: { id: "ses_r", title: "T", location: { directory: DIRECTORY }, time: { created: 1, updated: 1 }, ...(revert ? { revert } : {}) } });
+  const make = (current: { revert?: Record<string, unknown> }) => new EventTranslator({
+    version: "2.0.18",
+    lookupSession: async () => info(current.revert),
+    messageIDs: async () => ["msg_a", "msg_a2", "msg_b", "msg_b2", "msg_c", "msg_c2"],
+  });
+
+  test("staged, cleared and committed reach the app as session.updated and message.removed", async () => {
+    const current: { revert?: Record<string, unknown> } = {};
+    const translator = make(current);
+    const summary = (out: Awaited<ReturnType<EventTranslator["translate"]>>) => out.map((item) => {
+      const properties = item.event.properties as Record<string, any>;
+      return item.event.type === "message.removed" ? `removed:${properties.messageID}` : `${item.event.type}:${properties.info?.revert?.messageID ?? "-"}`;
+    });
+
+    current.revert = { messageID: "msg_b", snapshot: "abc" };
+    const staged = await translator.translate({ type: "session.revert.staged", data: { sessionID: "ses_r", revert: { messageID: "msg_b", snapshot: "abc", files: [] } } });
+    expect(summary(staged)).toEqual(["session.updated:msg_b"]);
+    expect((staged[0]!.event.properties as any).info.revert).toEqual({ messageID: "msg_b", snapshot: "abc" });
+
+    current.revert = undefined;
+    expect(summary(await translator.translate({ type: "session.revert.cleared", data: { sessionID: "ses_r" } }))).toEqual(["session.updated:-"]);
+
+    current.revert = { messageID: "msg_b" };
+    await translator.translate({ type: "session.revert.staged", data: { sessionID: "ses_r", revert: { messageID: "msg_b" } } });
+    current.revert = undefined;
+    const committed = await translator.translate({ type: "session.revert.committed", data: { sessionID: "ses_r", to: "msg_b" } });
+    expect(summary(committed)).toEqual(["removed:msg_b", "removed:msg_b2", "removed:msg_c", "removed:msg_c2", "session.updated:-"]);
+  });
+
+  test("a revert committed without a staged one seen removes the boundary message", async () => {
+    const translator = make({});
+    const out = await translator.translate({ type: "session.revert.committed", data: { sessionID: "ses_r", to: "msg_c" } });
+    expect(out.map((item) => item.event.type)).toEqual(["message.removed", "session.updated"]);
   });
 });

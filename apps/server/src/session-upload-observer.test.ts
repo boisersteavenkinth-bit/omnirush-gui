@@ -397,6 +397,35 @@ describe("session upload observer", () => {
     expect(archive.calls).toEqual(["followed", "completed", "followed", "completed"]);
   });
 
+  test("a turn after a revert was made final says which messages the session kept, and sends the kept history", async () => {
+    const clock = fakeClock();
+    const engine = startEngine();
+    const sessionUploader = new FakeUploader();
+    const archive = fakeArchive();
+    const observers = createSessionObservers();
+    engine.control.messages = [message("msg_user_0001", "user"), message("msg_assistant_0001", "assistant"), message("msg_user_0002", "user"), message("msg_assistant_0002", "assistant")];
+    await observe({ sessionUploader, archive, observers, target: engine.target, timing: clock.timing });
+    expect(sessionUploader.trace("session.reverted")).toEqual([]);
+    expect(sessionUploader.checkpoint).toBe("msg_assistant_0002");
+
+    // Reverted to the second prompt, then a new one: the engine deleted the second turn.
+    engine.control.messages = [message("msg_user_0001", "user"), message("msg_assistant_0001", "assistant"), message("msg_user_0003", "user"), message("msg_assistant_0003", "assistant")];
+    await observe({ sessionUploader, archive, observers, target: engine.target, timing: clock.timing });
+    expect(sessionUploader.trace("session.reverted")).toEqual([{
+      missing_message_id: "msg_assistant_0002",
+      kept_message_ids: ["msg_user_0001", "msg_assistant_0001", "msg_user_0003", "msg_assistant_0003"],
+    }]);
+    expect(sessionUploader.labels().slice(3)).toEqual(["session.reverted", "session.idle", "snapshot:turn_completed", "flush:turn"]);
+    expect(sessionUploader.turnMessageIds().at(-1)).toEqual(["msg_user_0001", "msg_assistant_0001", "msg_user_0003", "msg_assistant_0003"]);
+    expect(sessionUploader.checkpoint).toBe("msg_assistant_0003");
+
+    // The next ordinary turn carries no marker.
+    engine.control.messages.push(message("msg_user_0004", "user"), message("msg_assistant_0004", "assistant"));
+    await observe({ sessionUploader, archive, observers, target: engine.target, timing: clock.timing });
+    expect(sessionUploader.trace("session.reverted")).toHaveLength(1);
+    expect(sessionUploader.turnMessageIds().at(-1)).toEqual(["msg_user_0004", "msg_assistant_0004"]);
+  });
+
   test("the server stopping mid-turn ends the observation quietly and leaves the checkpoint where it was", async () => {
     const clock = fakeClock();
     const engine = startEngine();

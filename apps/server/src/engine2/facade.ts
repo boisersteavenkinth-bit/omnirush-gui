@@ -233,7 +233,19 @@ export async function startEngineFacade(options: EngineFacadeOptions): Promise<E
     version: options.version,
     rootFor: worktreeRoot,
     lookupSession: (sessionID) => call("GET", `/api/session/${encodeURIComponent(sessionID)}`),
+    messageIDs: async (sessionID) => (await sessionMessages(sessionID)).map((message) => String(message.info.id)),
   });
+  /**
+   * Makes a staged revert final (as a 2.x prompt does before it runs); a
+   * no-op without one. A busy session (409) cannot hold a staged revert: the
+   * app stops a run before it reverts, and a prompt commits it.
+   */
+  const commitRevert = async (encodedSessionID: string) => {
+    await call("POST", `/api/session/${encodedSessionID}/revert/commit`, { body: {} }).catch((error) => {
+      if (error instanceof UpstreamError && (error.status === 404 || error.status === 409)) return undefined;
+      throw error;
+    });
+  };
 
   // ---- config rendering ---------------------------------------------------
   const readV1Config = async (): Promise<JsonRecord> => {
@@ -907,6 +919,7 @@ export async function startEngineFacade(options: EngineFacadeOptions): Promise<E
           if (method !== "POST") break;
           const body = ((await readBody(req)) ?? {}) as JsonRecord;
           await prepareSession(sessionID, body, dir);
+          await commitRevert(encoded);
           const name = String(body.command ?? "").replace(/^\//, "");
           if (name === "compact" || name === "summarize") {
             await call("POST", `/api/session/${encoded}/compact`, { body: {} });
@@ -919,6 +932,7 @@ export async function startEngineFacade(options: EngineFacadeOptions): Promise<E
         case "shell": {
           if (method !== "POST") break;
           const body = ((await readBody(req)) ?? {}) as JsonRecord;
+          await commitRevert(encoded);
           await call("POST", `/api/session/${encoded}/shell`, { body: { command: String(body.command ?? "") } });
           json(res, 200, { id: "", sessionID, role: "assistant" });
           return;
@@ -939,17 +953,20 @@ export async function startEngineFacade(options: EngineFacadeOptions): Promise<E
           return;
         }
         case "revert": {
+          // 2.x stages a reversible revert: the files go back to before the
+          // message, the session carries the revert point and the later
+          // messages stay until a prompt commits it (1.x's cleanup) or
+          // unrevert clears it. 1.x's partID (a revert inside a message)
+          // has no 2.x equivalent: the whole message is the boundary.
           const body = ((await readBody(req)) ?? {}) as JsonRecord;
           const messageID = str(body, "messageID");
-          if (messageID) {
-            await call("POST", `/api/session/${encoded}/revert/stage`, { body: { messageID } });
-            await call("POST", `/api/session/${encoded}/revert/commit`, { body: {} }).catch(() => undefined);
-          }
+          if (messageID) await call("POST", `/api/session/${encoded}/revert/stage`, { body: { messageID } });
           json(res, 200, await sessionInfo(sessionID, directory));
           return;
         }
         case "unrevert": {
-          await call("DELETE", `/api/session/${encoded}/revert`).catch(() => undefined);
+          // Restores the files and the hidden messages; a no-op once a prompt committed the revert.
+          await call("DELETE", `/api/session/${encoded}/revert`);
           json(res, 200, await sessionInfo(sessionID, directory));
           return;
         }
