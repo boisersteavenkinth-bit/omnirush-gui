@@ -8,6 +8,8 @@ import { startEngineFacade, type EngineFacade } from "./facade.js";
 type Tree = { session: Record<string, unknown>; messages: Array<Record<string, unknown>>; children: Tree[] };
 const tree: Tree = JSON.parse(readFileSync(join(import.meta.dir, "fixtures", "v2-p1.json"), "utf8"));
 const SESSION = String(tree.session.id);
+// How many copies of the fixture's messages the mock engine serves (a long history spans several 200-message pages).
+let LONG_REPEAT = 1;
 const DIRECTORY = "/work/proj";
 
 type Recorded = { method: string; path: string; query: Record<string, string>; body: unknown };
@@ -47,8 +49,19 @@ beforeAll(async () => {
       }
       if (url.pathname === `/api/session/${SESSION}` && request.method === "GET") return json({ data: tree.session });
       if (url.pathname === `/api/session/${SESSION}/message`) {
-        const messages = query.order === "desc" ? [...tree.messages].reverse() : tree.messages;
-        return json({ data: messages.slice(0, Number(query.limit ?? 50)), cursor: {} });
+        // Like 2.0.18: a cursor carries its own direction, and naming `order` next to it is refused.
+        if (query.cursor && query.order) return json({ name: "InvalidCursorError", data: { message: "Cursor cannot be combined with order" } }, 400);
+        const long = Array.from({ length: LONG_REPEAT }, (_, round) =>
+          tree.messages.map((message) => {
+            const m = message as { id: string };
+            return round === 0 ? message : { ...m, id: `${m.id}_r${String(round).padStart(3, "0")}` };
+          }),
+        ).flat();
+        const [order, start] = query.cursor ? (JSON.parse(atob(query.cursor)) as [string, number]) : [query.order ?? "asc", 0];
+        const messages = order === "desc" ? [...long].reverse() : long;
+        const limit = Number(query.limit ?? 50);
+        const end = start + limit;
+        return json({ data: messages.slice(start, end), cursor: { next: end < messages.length ? btoa(JSON.stringify([order, end])) : null } });
       }
       if (url.pathname === "/api/session/active") return json({ data: {} });
       if (url.pathname === "/api/session" && request.method === "POST") return json({ data: { ...tree.session, id: "ses_new", title: undefined } });
@@ -106,6 +119,21 @@ describe("1.x engine adapter over the 2.x engine", () => {
     expect(older.map((message) => message.info.id)).toEqual(all.slice(1, 3).map((message) => message.info.id));
     const one = (await (await get(`/session/${SESSION}/message/${all[0]!.info.id}`)).json()) as { info: { role: string } };
     expect(one.info.role).toBe("user");
+  });
+
+  test("a history longer than one engine page loads without naming order next to the cursor", async () => {
+    LONG_REPEAT = 90;
+    try {
+      const response = await get(`/session/${SESSION}/message`);
+      expect(response.status).toBe(200);
+      const all = (await response.json()) as Array<{ info: { id: string } }>;
+      expect(all.length).toBe(5 * 90); // the fixture's 6 engine messages read as 5 in 1.x form
+      const paged = recorded.filter((r) => r.path === `/api/session/${SESSION}/message` && r.query.cursor);
+      expect(paged.length).toBeGreaterThan(0);
+      expect(paged.every((r) => r.query.order === undefined)).toBe(true);
+    } finally {
+      LONG_REPEAT = 1;
+    }
   });
 
   test("a session reads with the agent and model of its latest step", async () => {

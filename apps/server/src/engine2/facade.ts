@@ -294,7 +294,9 @@ export async function startEngineFacade(options: EngineFacadeOptions): Promise<E
     let cursor: string | undefined;
     for (let page = 0; page < 500; page++) {
       const payload = await call("GET", `/api/session/${encodeURIComponent(sessionID)}/message`, {
-        query: { order: "asc", limit: "200", cursor },
+        // 2.x rejects `order` next to a cursor (InvalidCursorError: the cursor
+        // already carries the direction), so only the first page names it.
+        query: cursor ? { limit: "200", cursor } : { order: "asc", limit: "200" },
       });
       const items = arr(payload, "data");
       all.push(...items);
