@@ -1,0 +1,418 @@
+{
+ "session": {
+  "id": "ses_f1f13b606ffel12K7Au2wc8hY8",
+  "projectID": "a34c8d566d1fcce901d1be6ac3f41a8f903e9c7d",
+  "cost": 0,
+  "tokens": {
+   "input": 688,
+   "output": 120,
+   "reasoning": 0,
+   "cache": {
+    "read": 3000,
+    "write": 0
+   }
+  },
+  "outcome": "succeeded",
+  "time": {
+   "created": 1790479976963,
+   "updated": 1790479977131,
+   "idle": 1790479978022
+  },
+  "title": "Parity session title",
+  "location": {
+   "directory": "/work/proj"
+  }
+ },
+ "messages": [
+  {
+   "id": "msg_0e0ec4a1a001wYsqsBh3umsAkX",
+   "time": {
+    "created": 1790479977013
+   },
+   "text": "PARITY-NEST go deep",
+   "type": "user"
+  },
+  {
+   "id": "msg_0e0ec4a500010pgCV3ZprOOvKl",
+   "time": {
+    "created": 1790479977072,
+    "streamed": 1790479977142,
+    "completed": 1790479977862
+   },
+   "type": "assistant",
+   "agent": "build",
+   "model": {
+    "id": "mock-model",
+    "providerID": "mock"
+   },
+   "content": [
+    {
+     "type": "tool",
+     "id": "call_28_0",
+     "name": "subagent",
+     "executed": false,
+     "state": {
+      "status": "completed",
+      "input": {
+       "agent": "general",
+       "description": "Nested level one",
+       "prompt": "CHILD-N1: delegate once more"
+      },
+      "content": [
+       {
+        "type": "text",
+        "text": "<subagent sessionID=\"ses_f1f13b544ffe3zzZq9HY7Rui06\" state=\"completed\">\nLevel one done.\n</subagent>"
+       }
+      ],
+      "metadata": {
+       "sessionID": "ses_f1f13b544ffe3zzZq9HY7Rui06",
+       "status": "completed",
+       "truncated": false
+      }
+     },
+     "time": {
+      "created": 1790479977084,
+      "ran": 1790479977138,
+      "completed": 1790479977859
+     }
+    }
+   ],
+   "finish": "tool-calls",
+   "rawFinish": "tool_calls",
+   "cost": 0,
+   "tokens": {
+    "input": 228,
+    "output": 40,
+    "reasoning": 0,
+    "cache": {
+     "read": 1000,
+     "write": 0
+    }
+   }
+  },
+  {
+   "id": "msg_0e0ec4d94001yh6LSEUWLKVi83",
+   "time": {
+    "created": 1790479977894,
+    "streamed": 1790479977992,
+    "completed": 1790479977998
+   },
+   "type": "assistant",
+   "agent": "build",
+   "model": {
+    "id": "mock-model",
+    "providerID": "mock"
+   },
+   "content": [
+    {
+     "type": "text",
+     "text": "Nested run finished."
+    }
+   ],
+   "finish": "stop",
+   "rawFinish": "stop",
+   "cost": 0,
+   "tokens": {
+    "input": 233,
+    "output": 40,
+    "reasoning": 0,
+    "cache": {
+     "read": 1000,
+     "write": 0
+    }
+   }
+  },
+  {
+   "id": "msg_0e0ec4e26001t1NjuIOXyJMOnO",
+   "time": {
+    "created": 1790479978022
+   },
+   "type": "idle",
+   "outcome": "succeeded"
+  }
+ ],
+ "children": [
+  {
+   "session": {
+    "id": "ses_f1f13b544ffe3zzZq9HY7Rui06",
+    "parentID": "ses_f1f13b606ffel12K7Au2wc8hY8",
+    "projectID": "a34c8d566d1fcce901d1be6ac3f41a8f903e9c7d",
+    "agent": "general",
+    "cost": 0,
+    "tokens": {
+     "input": 461,
+     "output": 80,
+     "reasoning": 0,
+     "cache": {
+      "read": 2000,
+      "write": 0
+     }
+    },
+    "outcome": "succeeded",
+    "time": {
+     "created": 1790479977152,
+     "updated": 1790479977159,
+     "idle": 1790479977855
+    },
+    "title": "Nested level one",
+    "location": {
+     "directory": "/work/proj"
+    }
+   },
+   "messages": [
+    {
+     "id": "msg_0e0ec4ac40014Mzgyh1vGj4wrC",
+     "time": {
+      "created": 1790479977180
+     },
+     "text": "You are a subagent spawned by another session.\nCHILD-N1: delegate once more",
+     "type": "user"
+    },
+    {
+     "id": "msg_0e0ec4ae500109IjVh7FzVJFEd",
+     "time": {
+      "created": 1790479977220,
+      "streamed": 1790479977286,
+      "completed": 1790479977704
+     },
+     "type": "assistant",
+     "agent": "general",
+     "model": {
+      "id": "mock-model",
+      "providerID": "mock"
+     },
+     "content": [
+      {
+       "type": "tool",
+       "id": "call_29_0",
+       "name": "subagent",
+       "executed": false,
+       "state": {
+        "status": "completed",
+        "input": {
+         "agent": "general",
+         "description": "Nested level two",
+         "prompt": "CHILD-A: read notes.md and summarise it"
+        },
+        "content": [
+         {
+          "type": "text",
+          "text": "<subagent sessionID=\"ses_f1f13b4b2ffeTbh2YYIxytmdXX\" state=\"completed\">\nnotes.md has a heading and two lines.\n</subagent>"
+         }
+        ],
+        "metadata": {
+         "sessionID": "ses_f1f13b4b2ffeTbh2YYIxytmdXX",
+         "status": "completed",
+         "truncated": false
+        }
+       },
+       "time": {
+        "created": 1790479977234,
+        "ran": 1790479977282,
+        "completed": 1790479977701
+       }
+      }
+     ],
+     "finish": "tool-calls",
+     "rawFinish": "tool_calls",
+     "cost": 0,
+     "tokens": {
+      "input": 229,
+      "output": 40,
+      "reasoning": 0,
+      "cache": {
+       "read": 1000,
+       "write": 0
+      }
+     }
+    },
+    {
+     "id": "msg_0e0ec4cfd001HXI0W8KDwcYXnm",
+     "time": {
+      "created": 1790479977752,
+      "streamed": 1790479977848,
+      "completed": 1790479977851
+     },
+     "type": "assistant",
+     "agent": "general",
+     "model": {
+      "id": "mock-model",
+      "providerID": "mock"
+     },
+     "content": [
+      {
+       "type": "text",
+       "text": "Level one done."
+      }
+     ],
+     "finish": "stop",
+     "rawFinish": "stop",
+     "cost": 0,
+     "tokens": {
+      "input": 232,
+      "output": 40,
+      "reasoning": 0,
+      "cache": {
+       "read": 1000,
+       "write": 0
+      }
+     }
+    },
+    {
+     "id": "msg_0e0ec4d7f0018XJpAShUg4Npa9",
+     "time": {
+      "created": 1790479977855
+     },
+     "type": "idle",
+     "outcome": "succeeded"
+    }
+   ],
+   "children": [
+    {
+     "session": {
+      "id": "ses_f1f13b4b2ffeTbh2YYIxytmdXX",
+      "parentID": "ses_f1f13b544ffe3zzZq9HY7Rui06",
+      "projectID": "a34c8d566d1fcce901d1be6ac3f41a8f903e9c7d",
+      "agent": "general",
+      "cost": 0,
+      "tokens": {
+       "input": 461,
+       "output": 68,
+       "reasoning": 12,
+       "cache": {
+        "read": 2000,
+        "write": 0
+       }
+      },
+      "outcome": "succeeded",
+      "time": {
+       "created": 1790479977300,
+       "updated": 1790479977309,
+       "idle": 1790479977696
+      },
+      "title": "Nested level two",
+      "location": {
+       "directory": "/work/proj"
+      }
+     },
+     "messages": [
+      {
+       "id": "msg_0e0ec4b5a001BvMsDXZ8wWbEd5",
+       "time": {
+        "created": 1790479977330
+       },
+       "text": "You are a subagent spawned by another session.\nCHILD-A: read notes.md and summarise it",
+       "type": "user"
+      },
+      {
+       "id": "msg_0e0ec4b79001dn7C7jEwWaIOGQ",
+       "time": {
+        "created": 1790479977359,
+        "streamed": 1790479977457,
+        "completed": 1790479977497
+       },
+       "type": "assistant",
+       "agent": "general",
+       "model": {
+        "id": "mock-model",
+        "providerID": "mock"
+       },
+       "content": [
+        {
+         "type": "reasoning",
+         "text": "Read the file.",
+         "state": {
+          "reasoningField": "reasoning_content"
+         },
+         "time": {
+          "created": 1790479977374,
+          "completed": 1790479977447
+         }
+        },
+        {
+         "type": "tool",
+         "id": "call_30_0",
+         "name": "read",
+         "executed": false,
+         "state": {
+          "status": "completed",
+          "input": {
+           "path": "/work/proj/notes.md"
+          },
+          "content": [
+           {
+            "type": "text",
+            "text": "Read file /work/proj/notes.md, lines 1-3\n1: # Notes\n2: line one\n3: line two"
+           }
+          ],
+          "metadata": {
+           "truncated": false
+          }
+         },
+         "time": {
+          "created": 1790479977397,
+          "ran": 1790479977453,
+          "completed": 1790479977493
+         }
+        }
+       ],
+       "finish": "tool-calls",
+       "rawFinish": "tool_calls",
+       "cost": 0,
+       "tokens": {
+        "input": 230,
+        "output": 28,
+        "reasoning": 12,
+        "cache": {
+         "read": 1000,
+         "write": 0
+        }
+       }
+      },
+      {
+       "id": "msg_0e0ec4c3100132TIGSw44f8ukv",
+       "time": {
+        "created": 1790479977551,
+        "streamed": 1790479977688,
+        "completed": 1790479977691
+       },
+       "type": "assistant",
+       "agent": "general",
+       "model": {
+        "id": "mock-model",
+        "providerID": "mock"
+       },
+       "content": [
+        {
+         "type": "text",
+         "text": "notes.md has a heading and two lines."
+        }
+       ],
+       "finish": "stop",
+       "rawFinish": "stop",
+       "cost": 0,
+       "tokens": {
+        "input": 231,
+        "output": 40,
+        "reasoning": 0,
+        "cache": {
+         "read": 1000,
+         "write": 0
+        }
+       }
+      },
+      {
+       "id": "msg_0e0ec4ce0001cS1VrODNLo0omO",
+       "time": {
+        "created": 1790479977696
+       },
+       "type": "idle",
+       "outcome": "succeeded"
+      }
+     ],
+     "children": []
+    }
+   ]
+  }
+ ]
+}

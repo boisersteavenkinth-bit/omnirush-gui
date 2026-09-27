@@ -1,0 +1,728 @@
+{
+ "session": {
+  "id": "ses_f1f13f690ffe0YPBQS9qpNaxs7",
+  "slug": "silent-tiger",
+  "projectID": "global",
+  "directory": "/work/proj",
+  "path": "work/proj",
+  "summary": {
+   "additions": 0,
+   "deletions": 0,
+   "files": 0
+  },
+  "cost": 0,
+  "tokens": {
+   "input": 419,
+   "output": 68,
+   "reasoning": 12,
+   "cache": {
+    "read": 2000,
+    "write": 0
+   }
+  },
+  "title": "Parity session title",
+  "agent": "build",
+  "model": {
+   "id": "mock-model",
+   "providerID": "mock",
+   "variant": "default"
+  },
+  "version": "1.18.32",
+  "time": {
+   "created": 1790479960432,
+   "updated": 1790479962317
+  }
+ },
+ "messages": [
+  {
+   "info": {
+    "id": "msg_0e0ec09a1001iv9xZgwHwbEu1b",
+    "sessionID": "ses_f1f13f690ffe0YPBQS9qpNaxs7",
+    "role": "user",
+    "time": {
+     "created": 1790479960481
+    },
+    "summary": {
+     "diffs": []
+    },
+    "agent": "build",
+    "model": {
+     "providerID": "mock",
+     "modelID": "mock-model"
+    }
+   },
+   "parts": [
+    {
+     "id": "prt_0e0ec09a7001tLLL8l7H5kzeFl",
+     "sessionID": "ses_f1f13f690ffe0YPBQS9qpNaxs7",
+     "messageID": "msg_0e0ec09a1001iv9xZgwHwbEu1b",
+     "type": "text",
+     "text": "PARITY-SUB use two helpers"
+    }
+   ]
+  },
+  {
+   "info": {
+    "id": "msg_0e0ec09bc001tdekd1Ii9Rp8Qq",
+    "sessionID": "ses_f1f13f690ffe0YPBQS9qpNaxs7",
+    "role": "assistant",
+    "time": {
+     "created": 1790479960508,
+     "completed": 1790479962052
+    },
+    "parentID": "msg_0e0ec09a1001iv9xZgwHwbEu1b",
+    "modelID": "mock-model",
+    "providerID": "mock",
+    "mode": "build",
+    "agent": "build",
+    "path": {
+     "cwd": "/work/proj",
+     "root": "/"
+    },
+    "cost": 0,
+    "tokens": {
+     "total": 1247,
+     "input": 207,
+     "output": 28,
+     "reasoning": 12,
+     "cache": {
+      "read": 1000,
+      "write": 0
+     }
+    },
+    "finish": "tool-calls"
+   },
+   "parts": [
+    {
+     "id": "prt_0e0ec0b0a001YWUbJz6re4JIvr",
+     "sessionID": "ses_f1f13f690ffe0YPBQS9qpNaxs7",
+     "messageID": "msg_0e0ec09bc001tdekd1Ii9Rp8Qq",
+     "type": "step-start"
+    },
+    {
+     "id": "prt_0e0ec0b0f001Tz5Gj0FzNlJbn3",
+     "sessionID": "ses_f1f13f690ffe0YPBQS9qpNaxs7",
+     "messageID": "msg_0e0ec09bc001tdekd1Ii9Rp8Qq",
+     "type": "reasoning",
+     "text": "Delegate to two helpers.",
+     "time": {
+      "start": 1790479960847,
+      "end": 1790479960888
+     }
+    },
+    {
+     "id": "prt_0e0ec0b3d001bZUJ5SQD93yBsZ",
+     "sessionID": "ses_f1f13f690ffe0YPBQS9qpNaxs7",
+     "messageID": "msg_0e0ec09bc001tdekd1Ii9Rp8Qq",
+     "type": "tool",
+     "callID": "call_7_0",
+     "tool": "task",
+     "state": {
+      "status": "completed",
+      "input": {
+       "subagent_type": "general",
+       "description": "Read notes",
+       "prompt": "CHILD-A: read notes.md and summarise it"
+      },
+      "output": "<task id=\"ses_f1f13f4b6ffehFDFUBI5qx3Zsd\" state=\"completed\">\n<task_result>\nnotes.md has a heading and two lines.\n</task_result>\n</task>",
+      "title": "Read notes",
+      "metadata": {
+       "parentSessionId": "ses_f1f13f690ffe0YPBQS9qpNaxs7",
+       "sessionId": "ses_f1f13f4b6ffehFDFUBI5qx3Zsd",
+       "model": {
+        "modelID": "mock-model",
+        "providerID": "mock"
+       },
+       "truncated": false
+      },
+      "time": {
+       "start": 1790479960912,
+       "end": 1790479962026
+      }
+     }
+    },
+    {
+     "id": "prt_0e0ec0b780012cfKkovTlLxCQO",
+     "sessionID": "ses_f1f13f690ffe0YPBQS9qpNaxs7",
+     "messageID": "msg_0e0ec09bc001tdekd1Ii9Rp8Qq",
+     "type": "tool",
+     "callID": "call_7_1",
+     "tool": "task",
+     "state": {
+      "status": "completed",
+      "input": {
+       "subagent_type": "general",
+       "description": "List folder",
+       "prompt": "CHILD-B: list the folder"
+      },
+      "output": "<task id=\"ses_f1f13f47dffe0UEEbHXZERyxC3\" state=\"completed\">\n<task_result>\nThe folder holds notes.md.\n</task_result>\n</task>",
+      "title": "List folder",
+      "metadata": {
+       "parentSessionId": "ses_f1f13f690ffe0YPBQS9qpNaxs7",
+       "sessionId": "ses_f1f13f47dffe0UEEbHXZERyxC3",
+       "model": {
+        "modelID": "mock-model",
+        "providerID": "mock"
+       },
+       "truncated": false
+      },
+      "time": {
+       "start": 1790479960969,
+       "end": 1790479961576
+      }
+     }
+    },
+    {
+     "id": "prt_0e0ec0fb3001m6tfHe1ByWvbZP",
+     "sessionID": "ses_f1f13f690ffe0YPBQS9qpNaxs7",
+     "messageID": "msg_0e0ec09bc001tdekd1Ii9Rp8Qq",
+     "type": "step-finish",
+     "reason": "tool-calls",
+     "cost": 0,
+     "tokens": {
+      "total": 1247,
+      "input": 207,
+      "output": 28,
+      "reasoning": 12,
+      "cache": {
+       "read": 1000,
+       "write": 0
+      }
+     }
+    }
+   ]
+  },
+  {
+   "info": {
+    "id": "msg_0e0ec0fcf001aPjWuo4NJ3UlL7",
+    "sessionID": "ses_f1f13f690ffe0YPBQS9qpNaxs7",
+    "role": "assistant",
+    "time": {
+     "created": 1790479962064,
+     "completed": 1790479962309
+    },
+    "parentID": "msg_0e0ec09a1001iv9xZgwHwbEu1b",
+    "modelID": "mock-model",
+    "providerID": "mock",
+    "mode": "build",
+    "agent": "build",
+    "path": {
+     "cwd": "/work/proj",
+     "root": "/"
+    },
+    "cost": 0,
+    "tokens": {
+     "total": 1252,
+     "input": 212,
+     "output": 40,
+     "reasoning": 0,
+     "cache": {
+      "read": 1000,
+      "write": 0
+     }
+    },
+    "finish": "stop"
+   },
+   "parts": [
+    {
+     "id": "prt_0e0ec105a001HrSOo9rHt4DnG7",
+     "sessionID": "ses_f1f13f690ffe0YPBQS9qpNaxs7",
+     "messageID": "msg_0e0ec0fcf001aPjWuo4NJ3UlL7",
+     "type": "step-start"
+    },
+    {
+     "id": "prt_0e0ec1063001GDlAQ3J7AQ9gqy",
+     "sessionID": "ses_f1f13f690ffe0YPBQS9qpNaxs7",
+     "messageID": "msg_0e0ec0fcf001aPjWuo4NJ3UlL7",
+     "type": "text",
+     "text": "Both helpers finished.",
+     "time": {
+      "start": 1790479962211,
+      "end": 1790479962290
+     }
+    },
+    {
+     "id": "prt_0e0ec10ba001CGRkC7BcQwA0eG",
+     "sessionID": "ses_f1f13f690ffe0YPBQS9qpNaxs7",
+     "messageID": "msg_0e0ec0fcf001aPjWuo4NJ3UlL7",
+     "type": "step-finish",
+     "reason": "stop",
+     "cost": 0,
+     "tokens": {
+      "total": 1252,
+      "input": 212,
+      "output": 40,
+      "reasoning": 0,
+      "cache": {
+       "read": 1000,
+       "write": 0
+      }
+     }
+    }
+   ]
+  }
+ ],
+ "children": [
+  {
+   "session": {
+    "id": "ses_f1f13f4b6ffehFDFUBI5qx3Zsd",
+    "slug": "quick-meadow",
+    "projectID": "global",
+    "directory": "/work/proj",
+    "path": "work/proj",
+    "parentID": "ses_f1f13f690ffe0YPBQS9qpNaxs7",
+    "summary": {
+     "additions": 0,
+     "deletions": 0,
+     "files": 0
+    },
+    "cost": 0,
+    "tokens": {
+     "input": 420,
+     "output": 68,
+     "reasoning": 12,
+     "cache": {
+      "read": 2000,
+      "write": 0
+     }
+    },
+    "title": "Read notes (@general subagent)",
+    "agent": "general",
+    "model": {
+     "id": "mock-model",
+     "providerID": "mock",
+     "variant": "default"
+    },
+    "version": "1.18.32",
+    "time": {
+     "created": 1790479960905,
+     "updated": 1790479962075
+    },
+    "permission": []
+   },
+   "messages": [
+    {
+     "info": {
+      "id": "msg_0e0ec0b58001JRNYR2QFjvJVq9",
+      "sessionID": "ses_f1f13f4b6ffehFDFUBI5qx3Zsd",
+      "role": "user",
+      "time": {
+       "created": 1790479960921
+      },
+      "summary": {
+       "diffs": []
+      },
+      "agent": "general",
+      "model": {
+       "providerID": "mock",
+       "modelID": "mock-model"
+      }
+     },
+     "parts": [
+      {
+       "id": "prt_0e0ec0b600017brs5q9rM69OkU",
+       "sessionID": "ses_f1f13f4b6ffehFDFUBI5qx3Zsd",
+       "messageID": "msg_0e0ec0b58001JRNYR2QFjvJVq9",
+       "type": "text",
+       "text": "CHILD-A: read notes.md and summarise it"
+      }
+     ]
+    },
+    {
+     "info": {
+      "id": "msg_0e0ec0bba001nhq65tMsAnDxh0",
+      "sessionID": "ses_f1f13f4b6ffehFDFUBI5qx3Zsd",
+      "role": "assistant",
+      "time": {
+       "created": 1790479961018,
+       "completed": 1790479961651
+      },
+      "parentID": "msg_0e0ec0b58001JRNYR2QFjvJVq9",
+      "modelID": "mock-model",
+      "providerID": "mock",
+      "mode": "general",
+      "agent": "general",
+      "path": {
+       "cwd": "/work/proj",
+       "root": "/"
+      },
+      "cost": 0,
+      "tokens": {
+       "total": 1249,
+       "input": 209,
+       "output": 28,
+       "reasoning": 12,
+       "cache": {
+        "read": 1000,
+        "write": 0
+       }
+      },
+      "finish": "tool-calls"
+     },
+     "parts": [
+      {
+       "id": "prt_0e0ec0c96001qT7ImpIdkPIPDS",
+       "sessionID": "ses_f1f13f4b6ffehFDFUBI5qx3Zsd",
+       "messageID": "msg_0e0ec0bba001nhq65tMsAnDxh0",
+       "type": "step-start"
+      },
+      {
+       "id": "prt_0e0ec0c9a001l2UiXCVrxV2Cw6",
+       "sessionID": "ses_f1f13f4b6ffehFDFUBI5qx3Zsd",
+       "messageID": "msg_0e0ec0bba001nhq65tMsAnDxh0",
+       "type": "reasoning",
+       "text": "Read the file.",
+       "time": {
+        "start": 1790479961242,
+        "end": 1790479961354
+       }
+      },
+      {
+       "id": "prt_0e0ec0d0e001U2B014Ig4bFOTw",
+       "sessionID": "ses_f1f13f4b6ffehFDFUBI5qx3Zsd",
+       "messageID": "msg_0e0ec0bba001nhq65tMsAnDxh0",
+       "type": "tool",
+       "callID": "call_9_0",
+       "tool": "read",
+       "state": {
+        "status": "completed",
+        "input": {
+         "filePath": "/work/proj/notes.md"
+        },
+        "output": "<path>/work/proj/notes.md</path>\n<type>file</type>\n<content>\n1: # Notes\n2: line one\n3: line two\n\n(End of file - total 3 lines)\n</content>",
+        "title": "work/proj/notes.md",
+        "metadata": {
+         "preview": "# Notes\nline one\nline two",
+         "truncated": false,
+         "loaded": [],
+         "display": {
+          "type": "file",
+          "path": "/work/proj/notes.md",
+          "text": "# Notes\nline one\nline two",
+          "lineStart": 1,
+          "lineEnd": 3,
+          "totalLines": 3,
+          "truncated": false
+         }
+        },
+        "time": {
+         "start": 1790479961367,
+         "end": 1790479961630
+        }
+       }
+      },
+      {
+       "id": "prt_0e0ec0e23001MK1t2p8W4YKD1T",
+       "sessionID": "ses_f1f13f4b6ffehFDFUBI5qx3Zsd",
+       "messageID": "msg_0e0ec0bba001nhq65tMsAnDxh0",
+       "type": "step-finish",
+       "reason": "tool-calls",
+       "cost": 0,
+       "tokens": {
+        "total": 1249,
+        "input": 209,
+        "output": 28,
+        "reasoning": 12,
+        "cache": {
+         "read": 1000,
+         "write": 0
+        }
+       }
+      }
+     ]
+    },
+    {
+     "info": {
+      "id": "msg_0e0ec0e3a001mPOUEVl1sCmZTg",
+      "sessionID": "ses_f1f13f4b6ffehFDFUBI5qx3Zsd",
+      "role": "assistant",
+      "time": {
+       "created": 1790479961658,
+       "completed": 1790479962000
+      },
+      "parentID": "msg_0e0ec0b58001JRNYR2QFjvJVq9",
+      "modelID": "mock-model",
+      "providerID": "mock",
+      "mode": "general",
+      "agent": "general",
+      "path": {
+       "cwd": "/work/proj",
+       "root": "/"
+      },
+      "cost": 0,
+      "tokens": {
+       "total": 1251,
+       "input": 211,
+       "output": 40,
+       "reasoning": 0,
+       "cache": {
+        "read": 1000,
+        "write": 0
+       }
+      },
+      "finish": "stop"
+     },
+     "parts": [
+      {
+       "id": "prt_0e0ec0f09001Uxl1XYcRwdxfZv",
+       "sessionID": "ses_f1f13f4b6ffehFDFUBI5qx3Zsd",
+       "messageID": "msg_0e0ec0e3a001mPOUEVl1sCmZTg",
+       "type": "step-start"
+      },
+      {
+       "id": "prt_0e0ec0f11001xM5V0LIMc4ekh3",
+       "sessionID": "ses_f1f13f4b6ffehFDFUBI5qx3Zsd",
+       "messageID": "msg_0e0ec0e3a001mPOUEVl1sCmZTg",
+       "type": "text",
+       "text": "notes.md has a heading and two lines.",
+       "time": {
+        "start": 1790479961873,
+        "end": 1790479961980
+       }
+      },
+      {
+       "id": "prt_0e0ec0f8300122BMcV39F4W0mJ",
+       "sessionID": "ses_f1f13f4b6ffehFDFUBI5qx3Zsd",
+       "messageID": "msg_0e0ec0e3a001mPOUEVl1sCmZTg",
+       "type": "step-finish",
+       "reason": "stop",
+       "cost": 0,
+       "tokens": {
+        "total": 1251,
+        "input": 211,
+        "output": 40,
+        "reasoning": 0,
+        "cache": {
+         "read": 1000,
+         "write": 0
+        }
+       }
+      }
+     ]
+    }
+   ],
+   "children": []
+  },
+  {
+   "session": {
+    "id": "ses_f1f13f47dffe0UEEbHXZERyxC3",
+    "slug": "kind-wizard",
+    "projectID": "global",
+    "directory": "/work/proj",
+    "path": "work/proj",
+    "parentID": "ses_f1f13f690ffe0YPBQS9qpNaxs7",
+    "summary": {
+     "additions": 0,
+     "deletions": 0,
+     "files": 0
+    },
+    "cost": 0,
+    "tokens": {
+     "input": 418,
+     "output": 80,
+     "reasoning": 0,
+     "cache": {
+      "read": 2000,
+      "write": 0
+     }
+    },
+    "title": "List folder (@general subagent)",
+    "agent": "general",
+    "model": {
+     "id": "mock-model",
+     "providerID": "mock",
+     "variant": "default"
+    },
+    "version": "1.18.32",
+    "time": {
+     "created": 1790479960962,
+     "updated": 1790479961582
+    },
+    "permission": []
+   },
+   "messages": [
+    {
+     "info": {
+      "id": "msg_0e0ec0b8d001qKf4KHIngQ5esm",
+      "sessionID": "ses_f1f13f47dffe0UEEbHXZERyxC3",
+      "role": "user",
+      "time": {
+       "created": 1790479960975
+      },
+      "summary": {
+       "diffs": []
+      },
+      "agent": "general",
+      "model": {
+       "providerID": "mock",
+       "modelID": "mock-model"
+      }
+     },
+     "parts": [
+      {
+       "id": "prt_0e0ec0b940010KuE6dzbLSTPhf",
+       "sessionID": "ses_f1f13f47dffe0UEEbHXZERyxC3",
+       "messageID": "msg_0e0ec0b8d001qKf4KHIngQ5esm",
+       "type": "text",
+       "text": "CHILD-B: list the folder"
+      }
+     ]
+    },
+    {
+     "info": {
+      "id": "msg_0e0ec0bc8001WD9A3zmrls3IQN",
+      "sessionID": "ses_f1f13f47dffe0UEEbHXZERyxC3",
+      "role": "assistant",
+      "time": {
+       "created": 1790479961032,
+       "completed": 1790479961314
+      },
+      "parentID": "msg_0e0ec0b8d001qKf4KHIngQ5esm",
+      "modelID": "mock-model",
+      "providerID": "mock",
+      "mode": "general",
+      "agent": "general",
+      "path": {
+       "cwd": "/work/proj",
+       "root": "/"
+      },
+      "cost": 0,
+      "tokens": {
+       "total": 1248,
+       "input": 208,
+       "output": 40,
+       "reasoning": 0,
+       "cache": {
+        "read": 1000,
+        "write": 0
+       }
+      },
+      "finish": "tool-calls"
+     },
+     "parts": [
+      {
+       "id": "prt_0e0ec0c66001E7txmGBCJaZ1qB",
+       "sessionID": "ses_f1f13f47dffe0UEEbHXZERyxC3",
+       "messageID": "msg_0e0ec0bc8001WD9A3zmrls3IQN",
+       "type": "step-start"
+      },
+      {
+       "id": "prt_0e0ec0c6c001OTYMsuy2fRX6Fg",
+       "sessionID": "ses_f1f13f47dffe0UEEbHXZERyxC3",
+       "messageID": "msg_0e0ec0bc8001WD9A3zmrls3IQN",
+       "type": "tool",
+       "callID": "call_8_0",
+       "tool": "bash",
+       "state": {
+        "status": "completed",
+        "input": {
+         "command": "ls",
+         "description": "List folder"
+        },
+        "output": "notes.md\n",
+        "title": "ls",
+        "metadata": {
+         "output": "notes.md\n",
+         "exit": 0,
+         "truncated": false
+        },
+        "time": {
+         "start": 1790479961216,
+         "end": 1790479961300
+        }
+       }
+      },
+      {
+       "id": "prt_0e0ec0cda001JfWXEZMXyU7rXD",
+       "sessionID": "ses_f1f13f47dffe0UEEbHXZERyxC3",
+       "messageID": "msg_0e0ec0bc8001WD9A3zmrls3IQN",
+       "type": "step-finish",
+       "reason": "tool-calls",
+       "cost": 0,
+       "tokens": {
+        "total": 1248,
+        "input": 208,
+        "output": 40,
+        "reasoning": 0,
+        "cache": {
+         "read": 1000,
+         "write": 0
+        }
+       }
+      }
+     ]
+    },
+    {
+     "info": {
+      "id": "msg_0e0ec0ce6001Cy4WbgIDNaGKHq",
+      "sessionID": "ses_f1f13f47dffe0UEEbHXZERyxC3",
+      "role": "assistant",
+      "time": {
+       "created": 1790479961318,
+       "completed": 1790479961564
+      },
+      "parentID": "msg_0e0ec0b8d001qKf4KHIngQ5esm",
+      "modelID": "mock-model",
+      "providerID": "mock",
+      "mode": "general",
+      "agent": "general",
+      "path": {
+       "cwd": "/work/proj",
+       "root": "/"
+      },
+      "cost": 0,
+      "tokens": {
+       "total": 1250,
+       "input": 210,
+       "output": 40,
+       "reasoning": 0,
+       "cache": {
+        "read": 1000,
+        "write": 0
+       }
+      },
+      "finish": "stop"
+     },
+     "parts": [
+      {
+       "id": "prt_0e0ec0d7d001rdcpHnrV0Ve6uF",
+       "sessionID": "ses_f1f13f47dffe0UEEbHXZERyxC3",
+       "messageID": "msg_0e0ec0ce6001Cy4WbgIDNaGKHq",
+       "type": "step-start"
+      },
+      {
+       "id": "prt_0e0ec0d81001pXh3X3V8e2t6mb",
+       "sessionID": "ses_f1f13f47dffe0UEEbHXZERyxC3",
+       "messageID": "msg_0e0ec0ce6001Cy4WbgIDNaGKHq",
+       "type": "text",
+       "text": "The folder holds notes.md.",
+       "time": {
+        "start": 1790479961473,
+        "end": 1790479961549
+       }
+      },
+      {
+       "id": "prt_0e0ec0dd3001KevS0vGYY3i4XP",
+       "sessionID": "ses_f1f13f47dffe0UEEbHXZERyxC3",
+       "messageID": "msg_0e0ec0ce6001Cy4WbgIDNaGKHq",
+       "type": "step-finish",
+       "reason": "stop",
+       "cost": 0,
+       "tokens": {
+        "total": 1250,
+        "input": 210,
+        "output": 40,
+        "reasoning": 0,
+        "cache": {
+         "read": 1000,
+         "write": 0
+        }
+       }
+      }
+     ]
+    }
+   ],
+   "children": []
+  }
+ ]
+}

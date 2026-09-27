@@ -1,0 +1,236 @@
+{
+ "session": {
+  "id": "ses_f1ef0adefffe1mLGRXHvrnGDh8",
+  "slug": "quiet-sailor",
+  "projectID": "global",
+  "directory": "/work/proj",
+  "path": "work/proj",
+  "summary": {
+   "additions": 0,
+   "deletions": 0,
+   "files": 0
+  },
+  "cost": 0,
+  "tokens": {
+   "input": 405,
+   "output": 80,
+   "reasoning": 0,
+   "cache": {
+    "read": 2000,
+    "write": 0
+   }
+  },
+  "title": "Parity session title",
+  "agent": "build",
+  "model": {
+   "id": "gpt-5.1-mock",
+   "providerID": "mock",
+   "variant": "default"
+  },
+  "version": "1.18.32",
+  "time": {
+   "created": 1790482272785,
+   "updated": 1790482276533
+  }
+ },
+ "messages": [
+  {
+   "info": {
+    "id": "msg_0e10f52a1001SiLMvcNLzPM1nJ",
+    "sessionID": "ses_f1ef0adefffe1mLGRXHvrnGDh8",
+    "role": "user",
+    "time": {
+     "created": 1790482272929
+    },
+    "summary": {
+     "diffs": []
+    },
+    "agent": "build",
+    "model": {
+     "providerID": "mock",
+     "modelID": "gpt-5.1-mock"
+    }
+   },
+   "parts": [
+    {
+     "id": "prt_0e10f52b4001NblUWTBupEiTXV",
+     "sessionID": "ses_f1ef0adefffe1mLGRXHvrnGDh8",
+     "messageID": "msg_0e10f52a1001SiLMvcNLzPM1nJ",
+     "type": "text",
+     "text": "PARITY-PATCH patch it"
+    }
+   ]
+  },
+  {
+   "info": {
+    "id": "msg_0e10f588c001DqiHIAVcBbfTc0",
+    "sessionID": "ses_f1ef0adefffe1mLGRXHvrnGDh8",
+    "role": "assistant",
+    "time": {
+     "created": 1790482274444,
+     "completed": 1790482276278
+    },
+    "parentID": "msg_0e10f52a1001SiLMvcNLzPM1nJ",
+    "modelID": "gpt-5.1-mock",
+    "providerID": "mock",
+    "mode": "build",
+    "agent": "build",
+    "path": {
+     "cwd": "/work/proj",
+     "root": "/"
+    },
+    "cost": 0,
+    "tokens": {
+     "total": 1242,
+     "input": 202,
+     "output": 40,
+     "reasoning": 0,
+     "cache": {
+      "read": 1000,
+      "write": 0
+     }
+    },
+    "finish": "tool-calls"
+   },
+   "parts": [
+    {
+     "id": "prt_0e10f5f1b001rp6sQuvmATowun",
+     "sessionID": "ses_f1ef0adefffe1mLGRXHvrnGDh8",
+     "messageID": "msg_0e10f588c001DqiHIAVcBbfTc0",
+     "type": "step-start"
+    },
+    {
+     "id": "prt_0e10f5f27001N6pmzc2qvbVB6p",
+     "sessionID": "ses_f1ef0adefffe1mLGRXHvrnGDh8",
+     "messageID": "msg_0e10f588c001DqiHIAVcBbfTc0",
+     "type": "tool",
+     "callID": "call_2_0",
+     "tool": "apply_patch",
+     "state": {
+      "status": "completed",
+      "input": {
+       "patchText": "*** Begin Patch\n*** Update File: notes.md\n@@\n # Notes\n-line one\n+line one (patched)\n*** Add File: extra.md\n+# Extra\n+added by patch\n*** End Patch"
+      },
+      "output": "Success. Updated the following files:\nM work/proj/notes.md\nA work/proj/extra.md",
+      "title": "Success. Updated the following files:\nM work/proj/notes.md\nA work/proj/extra.md",
+      "metadata": {
+       "diff": "Index: /work/proj/notes.md\n===================================================================\n--- /work/proj/notes.md\n+++ /work/proj/notes.md\n@@ -1,3 +1,3 @@\n # Notes\n-line one\n+line one (patched)\n line two\n\nIndex: /work/proj/extra.md\n===================================================================\n--- /work/proj/extra.md\n+++ /work/proj/extra.md\n@@ -0,0 +1,2 @@\n+# Extra\n+added by patch\n\n",
+       "files": [
+        {
+         "filePath": "/work/proj/notes.md",
+         "relativePath": "work/proj/notes.md",
+         "type": "update",
+         "patch": "Index: /work/proj/notes.md\n===================================================================\n--- /work/proj/notes.md\n+++ /work/proj/notes.md\n@@ -1,3 +1,3 @@\n # Notes\n-line one\n+line one (patched)\n line two\n",
+         "additions": 1,
+         "deletions": 1
+        },
+        {
+         "filePath": "/work/proj/extra.md",
+         "relativePath": "work/proj/extra.md",
+         "type": "add",
+         "patch": "Index: /work/proj/extra.md\n===================================================================\n--- /work/proj/extra.md\n+++ /work/proj/extra.md\n@@ -0,0 +1,2 @@\n+# Extra\n+added by patch\n",
+         "additions": 2,
+         "deletions": 0
+        }
+       ],
+       "diagnostics": {},
+       "truncated": false
+      },
+      "time": {
+       "start": 1790482276168,
+       "end": 1790482276259
+      }
+     }
+    },
+    {
+     "id": "prt_0e10f5fab001ArFbDOdbbOq0t5",
+     "sessionID": "ses_f1ef0adefffe1mLGRXHvrnGDh8",
+     "messageID": "msg_0e10f588c001DqiHIAVcBbfTc0",
+     "type": "step-finish",
+     "reason": "tool-calls",
+     "cost": 0,
+     "tokens": {
+      "total": 1242,
+      "input": 202,
+      "output": 40,
+      "reasoning": 0,
+      "cache": {
+       "read": 1000,
+       "write": 0
+      }
+     }
+    }
+   ]
+  },
+  {
+   "info": {
+    "id": "msg_0e10f5fbd001D4MaLmLLR4Dkt3",
+    "sessionID": "ses_f1ef0adefffe1mLGRXHvrnGDh8",
+    "role": "assistant",
+    "time": {
+     "created": 1790482276285,
+     "completed": 1790482276523
+    },
+    "parentID": "msg_0e10f52a1001SiLMvcNLzPM1nJ",
+    "modelID": "gpt-5.1-mock",
+    "providerID": "mock",
+    "mode": "build",
+    "agent": "build",
+    "path": {
+     "cwd": "/work/proj",
+     "root": "/"
+    },
+    "cost": 0,
+    "tokens": {
+     "total": 1243,
+     "input": 203,
+     "output": 40,
+     "reasoning": 0,
+     "cache": {
+      "read": 1000,
+      "write": 0
+     }
+    },
+    "finish": "stop"
+   },
+   "parts": [
+    {
+     "id": "prt_0e10f606b001a9Rr6364lC3CS3",
+     "sessionID": "ses_f1ef0adefffe1mLGRXHvrnGDh8",
+     "messageID": "msg_0e10f5fbd001D4MaLmLLR4Dkt3",
+     "type": "step-start"
+    },
+    {
+     "id": "prt_0e10f60710016t92zGHB6wjILn",
+     "sessionID": "ses_f1ef0adefffe1mLGRXHvrnGDh8",
+     "messageID": "msg_0e10f5fbd001D4MaLmLLR4Dkt3",
+     "type": "text",
+     "text": "Patched.",
+     "time": {
+      "start": 1790482276465,
+      "end": 1790482276476
+     }
+    },
+    {
+     "id": "prt_0e10f60a1001lnb5A41avmsWFl",
+     "sessionID": "ses_f1ef0adefffe1mLGRXHvrnGDh8",
+     "messageID": "msg_0e10f5fbd001D4MaLmLLR4Dkt3",
+     "type": "step-finish",
+     "reason": "stop",
+     "cost": 0,
+     "tokens": {
+      "total": 1243,
+      "input": 203,
+      "output": 40,
+      "reasoning": 0,
+      "cache": {
+       "read": 1000,
+       "write": 0
+      }
+     }
+    }
+   ]
+  }
+ ],
+ "children": []
+}

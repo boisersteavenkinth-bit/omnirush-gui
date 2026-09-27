@@ -1,0 +1,160 @@
+{
+ "session": {
+  "id": "ses_f1edf9e51ffeFpOjh7F1D1wA30",
+  "projectID": "a34c8d566d1fcce901d1be6ac3f41a8f903e9c7d",
+  "cost": 0,
+  "tokens": {
+   "input": 615,
+   "output": 120,
+   "reasoning": 0,
+   "cache": {
+    "read": 3000,
+    "write": 0
+   }
+  },
+  "outcome": "succeeded",
+  "time": {
+   "created": 1790483390905,
+   "updated": 1790483391147,
+   "idle": 1790483391438
+  },
+  "title": "Parity session title",
+  "location": {
+   "directory": "/work/proj"
+  }
+ },
+ "messages": [
+  {
+   "id": "msg_0e12061dd001yN4fM9kLBKKuF4",
+   "time": {
+    "created": 1790483391009
+   },
+   "text": "PARITY-TOOLS find md files",
+   "type": "user"
+  },
+  {
+   "id": "msg_0e120624d001JQ5eNDVTSXQ9MQ",
+   "time": {
+    "created": 1790483391088,
+    "streamed": 1790483391189,
+    "completed": 1790483391266
+   },
+   "type": "assistant",
+   "agent": "build",
+   "model": {
+    "id": "mock-model",
+    "providerID": "mock"
+   },
+   "content": [
+    {
+     "type": "tool",
+     "id": "call_5_0",
+     "name": "glob",
+     "executed": false,
+     "state": {
+      "status": "completed",
+      "input": {
+       "pattern": "*.md"
+      },
+      "content": [
+       {
+        "type": "text",
+        "text": "/work/proj/extra.md\n/work/proj/notes.md"
+       }
+      ],
+      "metadata": {
+       "count": 2,
+       "truncated": false
+      }
+     },
+     "time": {
+      "created": 1790483391113,
+      "ran": 1790483391167,
+      "completed": 1790483391257
+     }
+    },
+    {
+     "type": "tool",
+     "id": "call_5_1",
+     "name": "grep",
+     "executed": false,
+     "state": {
+      "status": "completed",
+      "input": {
+       "pattern": "line",
+       "include": "*.md"
+      },
+      "content": [
+       {
+        "type": "text",
+        "text": "Found 2 matches\n/work/proj/notes.md:\n  Line 2: line one (patched)\n\n  Line 3: line two\n"
+       }
+      ],
+      "metadata": {
+       "matches": 2,
+       "truncated": false
+      }
+     },
+     "time": {
+      "created": 1790483391125,
+      "ran": 1790483391182,
+      "completed": 1790483391247
+     }
+    }
+   ],
+   "finish": "tool-calls",
+   "rawFinish": "tool_calls",
+   "cost": 0,
+   "tokens": {
+    "input": 205,
+    "output": 40,
+    "reasoning": 0,
+    "cache": {
+     "read": 1000,
+     "write": 0
+    }
+   }
+  },
+  {
+   "id": "msg_0e12063420011ZeWOYCJRtpmdu",
+   "time": {
+    "created": 1790483391321,
+    "streamed": 1790483391420,
+    "completed": 1790483391427
+   },
+   "type": "assistant",
+   "agent": "build",
+   "model": {
+    "id": "mock-model",
+    "providerID": "mock"
+   },
+   "content": [
+    {
+     "type": "text",
+     "text": "Found them."
+    }
+   ],
+   "finish": "stop",
+   "rawFinish": "stop",
+   "cost": 0,
+   "tokens": {
+    "input": 206,
+    "output": 40,
+    "reasoning": 0,
+    "cache": {
+     "read": 1000,
+     "write": 0
+    }
+   }
+  },
+  {
+   "id": "msg_0e12063ce001mIBxZYd8sE1KbV",
+   "time": {
+    "created": 1790483391438
+   },
+   "type": "idle",
+   "outcome": "succeeded"
+  }
+ ],
+ "children": []
+}

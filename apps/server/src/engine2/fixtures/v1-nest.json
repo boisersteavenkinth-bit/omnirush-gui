@@ -1,0 +1,692 @@
+{
+ "session": {
+  "id": "ses_f1f13cbbdffe1XNHL5h8tqoTRe",
+  "slug": "sunny-wizard",
+  "projectID": "global",
+  "directory": "/work/proj",
+  "path": "work/proj",
+  "summary": {
+   "additions": 0,
+   "deletions": 0,
+   "files": 0
+  },
+  "cost": 0,
+  "tokens": {
+   "input": 447,
+   "output": 80,
+   "reasoning": 0,
+   "cache": {
+    "read": 2000,
+    "write": 0
+   }
+  },
+  "title": "Parity session title",
+  "agent": "build",
+  "model": {
+   "id": "mock-model",
+   "providerID": "mock",
+   "variant": "default"
+  },
+  "version": "1.18.32",
+  "time": {
+   "created": 1790479971394,
+   "updated": 1790479973398
+  }
+ },
+ "messages": [
+  {
+   "info": {
+    "id": "msg_0e0ec3462001HRzYTUY6Ug2hJL",
+    "sessionID": "ses_f1f13cbbdffe1XNHL5h8tqoTRe",
+    "role": "user",
+    "time": {
+     "created": 1790479971426
+    },
+    "summary": {
+     "diffs": []
+    },
+    "agent": "build",
+    "model": {
+     "providerID": "mock",
+     "modelID": "mock-model"
+    }
+   },
+   "parts": [
+    {
+     "id": "prt_0e0ec346b00155NRtrVvRDoEzB",
+     "sessionID": "ses_f1f13cbbdffe1XNHL5h8tqoTRe",
+     "messageID": "msg_0e0ec3462001HRzYTUY6Ug2hJL",
+     "type": "text",
+     "text": "PARITY-NEST go deep"
+    }
+   ]
+  },
+  {
+   "info": {
+    "id": "msg_0e0ec348c001IqeTNkU4s5lqZJ",
+    "sessionID": "ses_f1f13cbbdffe1XNHL5h8tqoTRe",
+    "role": "assistant",
+    "time": {
+     "created": 1790479971468,
+     "completed": 1790479973207
+    },
+    "parentID": "msg_0e0ec3462001HRzYTUY6Ug2hJL",
+    "modelID": "mock-model",
+    "providerID": "mock",
+    "mode": "build",
+    "agent": "build",
+    "path": {
+     "cwd": "/work/proj",
+     "root": "/"
+    },
+    "cost": 0,
+    "tokens": {
+     "total": 1261,
+     "input": 221,
+     "output": 40,
+     "reasoning": 0,
+     "cache": {
+      "read": 1000,
+      "write": 0
+     }
+    },
+    "finish": "tool-calls"
+   },
+   "parts": [
+    {
+     "id": "prt_0e0ec361b0016er6leUCL1QdgW",
+     "sessionID": "ses_f1f13cbbdffe1XNHL5h8tqoTRe",
+     "messageID": "msg_0e0ec348c001IqeTNkU4s5lqZJ",
+     "type": "step-start"
+    },
+    {
+     "id": "prt_0e0ec3626001u8uyyFG52DMl0v",
+     "sessionID": "ses_f1f13cbbdffe1XNHL5h8tqoTRe",
+     "messageID": "msg_0e0ec348c001IqeTNkU4s5lqZJ",
+     "type": "tool",
+     "callID": "call_21_0",
+     "tool": "task",
+     "state": {
+      "status": "completed",
+      "input": {
+       "subagent_type": "general",
+       "description": "Nested level one",
+       "prompt": "CHILD-N1: delegate once more"
+      },
+      "output": "<task id=\"ses_f1f13c9c7ffeErSXxQ26Uvsr6O\" state=\"completed\">\n<task_result>\nLevel one done.\n</task_result>\n</task>",
+      "title": "Nested level one",
+      "metadata": {
+       "parentSessionId": "ses_f1f13cbbdffe1XNHL5h8tqoTRe",
+       "sessionId": "ses_f1f13c9c7ffeErSXxQ26Uvsr6O",
+       "model": {
+        "modelID": "mock-model",
+        "providerID": "mock"
+       },
+       "truncated": false
+      },
+      "time": {
+       "start": 1790479971907,
+       "end": 1790479973189
+      }
+     }
+    },
+    {
+     "id": "prt_0e0ec3b4a001uplnLmFO7BG4zf",
+     "sessionID": "ses_f1f13cbbdffe1XNHL5h8tqoTRe",
+     "messageID": "msg_0e0ec348c001IqeTNkU4s5lqZJ",
+     "type": "step-finish",
+     "reason": "tool-calls",
+     "cost": 0,
+     "tokens": {
+      "total": 1261,
+      "input": 221,
+      "output": 40,
+      "reasoning": 0,
+      "cache": {
+       "read": 1000,
+       "write": 0
+      }
+     }
+    }
+   ]
+  },
+  {
+   "info": {
+    "id": "msg_0e0ec3b5d00101DqRqkRe3SpHh",
+    "sessionID": "ses_f1f13cbbdffe1XNHL5h8tqoTRe",
+    "role": "assistant",
+    "time": {
+     "created": 1790479973213,
+     "completed": 1790479973390
+    },
+    "parentID": "msg_0e0ec3462001HRzYTUY6Ug2hJL",
+    "modelID": "mock-model",
+    "providerID": "mock",
+    "mode": "build",
+    "agent": "build",
+    "path": {
+     "cwd": "/work/proj",
+     "root": "/"
+    },
+    "cost": 0,
+    "tokens": {
+     "total": 1266,
+     "input": 226,
+     "output": 40,
+     "reasoning": 0,
+     "cache": {
+      "read": 1000,
+      "write": 0
+     }
+    },
+    "finish": "stop"
+   },
+   "parts": [
+    {
+     "id": "prt_0e0ec3b8a001y9B38jRbMkN8ae",
+     "sessionID": "ses_f1f13cbbdffe1XNHL5h8tqoTRe",
+     "messageID": "msg_0e0ec3b5d00101DqRqkRe3SpHh",
+     "type": "step-start"
+    },
+    {
+     "id": "prt_0e0ec3b8e001GpcJ90wfA3ynlh",
+     "sessionID": "ses_f1f13cbbdffe1XNHL5h8tqoTRe",
+     "messageID": "msg_0e0ec3b5d00101DqRqkRe3SpHh",
+     "type": "text",
+     "text": "Nested run finished.",
+     "time": {
+      "start": 1790479973262,
+      "end": 1790479973376
+     }
+    },
+    {
+     "id": "prt_0e0ec3c06001j6DGqnl4FzZ948",
+     "sessionID": "ses_f1f13cbbdffe1XNHL5h8tqoTRe",
+     "messageID": "msg_0e0ec3b5d00101DqRqkRe3SpHh",
+     "type": "step-finish",
+     "reason": "stop",
+     "cost": 0,
+     "tokens": {
+      "total": 1266,
+      "input": 226,
+      "output": 40,
+      "reasoning": 0,
+      "cache": {
+       "read": 1000,
+       "write": 0
+      }
+     }
+    }
+   ]
+  }
+ ],
+ "children": [
+  {
+   "session": {
+    "id": "ses_f1f13c9c7ffeErSXxQ26Uvsr6O",
+    "slug": "tidy-wolf",
+    "projectID": "global",
+    "directory": "/work/proj",
+    "path": "work/proj",
+    "parentID": "ses_f1f13cbbdffe1XNHL5h8tqoTRe",
+    "summary": {
+     "additions": 0,
+     "deletions": 0,
+     "files": 0
+    },
+    "cost": 0,
+    "tokens": {
+     "input": 447,
+     "output": 80,
+     "reasoning": 0,
+     "cache": {
+      "read": 2000,
+      "write": 0
+     }
+    },
+    "title": "Nested level one (@general subagent)",
+    "agent": "general",
+    "model": {
+     "id": "mock-model",
+     "providerID": "mock",
+     "variant": "default"
+    },
+    "version": "1.18.32",
+    "time": {
+     "created": 1790479971896,
+     "updated": 1790479973223
+    },
+    "permission": []
+   },
+   "messages": [
+    {
+     "info": {
+      "id": "msg_0e0ec364e001Qy2gQweXYBXKi0",
+      "sessionID": "ses_f1f13c9c7ffeErSXxQ26Uvsr6O",
+      "role": "user",
+      "time": {
+       "created": 1790479971921
+      },
+      "summary": {
+       "diffs": []
+      },
+      "agent": "general",
+      "model": {
+       "providerID": "mock",
+       "modelID": "mock-model"
+      }
+     },
+     "parts": [
+      {
+       "id": "prt_0e0ec365c001USjXeDrZg4z7b9",
+       "sessionID": "ses_f1f13c9c7ffeErSXxQ26Uvsr6O",
+       "messageID": "msg_0e0ec364e001Qy2gQweXYBXKi0",
+       "type": "text",
+       "text": "CHILD-N1: delegate once more"
+      }
+     ]
+    },
+    {
+     "info": {
+      "id": "msg_0e0ec3684001dL34qllcV1WR30",
+      "sessionID": "ses_f1f13c9c7ffeErSXxQ26Uvsr6O",
+      "role": "assistant",
+      "time": {
+       "created": 1790479971972,
+       "completed": 1790479972898
+      },
+      "parentID": "msg_0e0ec364e001Qy2gQweXYBXKi0",
+      "modelID": "mock-model",
+      "providerID": "mock",
+      "mode": "general",
+      "agent": "general",
+      "path": {
+       "cwd": "/work/proj",
+       "root": "/"
+      },
+      "cost": 0,
+      "tokens": {
+       "total": 1262,
+       "input": 222,
+       "output": 40,
+       "reasoning": 0,
+       "cache": {
+        "read": 1000,
+        "write": 0
+       }
+      },
+      "finish": "tool-calls"
+     },
+     "parts": [
+      {
+       "id": "prt_0e0ec3735001mncaPAtcjMJzTo",
+       "sessionID": "ses_f1f13c9c7ffeErSXxQ26Uvsr6O",
+       "messageID": "msg_0e0ec3684001dL34qllcV1WR30",
+       "type": "step-start"
+      },
+      {
+       "id": "prt_0e0ec373f001DnLpSqR0XslJ50",
+       "sessionID": "ses_f1f13c9c7ffeErSXxQ26Uvsr6O",
+       "messageID": "msg_0e0ec3684001dL34qllcV1WR30",
+       "type": "tool",
+       "callID": "call_22_0",
+       "tool": "task",
+       "state": {
+        "status": "completed",
+        "input": {
+         "subagent_type": "general",
+         "description": "Nested level two",
+         "prompt": "CHILD-A: read notes.md and summarise it"
+        },
+        "output": "<task id=\"ses_f1f13c8adffe0RmAt7VUPtZZjk\" state=\"completed\">\n<task_result>\nnotes.md has a heading and two lines.\n</task_result>\n</task>",
+        "title": "Nested level two",
+        "metadata": {
+         "parentSessionId": "ses_f1f13c9c7ffeErSXxQ26Uvsr6O",
+         "sessionId": "ses_f1f13c8adffe0RmAt7VUPtZZjk",
+         "model": {
+          "modelID": "mock-model",
+          "providerID": "mock"
+         },
+         "truncated": false
+        },
+        "time": {
+         "start": 1790479972187,
+         "end": 1790479972886
+        }
+       }
+      },
+      {
+       "id": "prt_0e0ec3a1b001RosCgLC7c662zf",
+       "sessionID": "ses_f1f13c9c7ffeErSXxQ26Uvsr6O",
+       "messageID": "msg_0e0ec3684001dL34qllcV1WR30",
+       "type": "step-finish",
+       "reason": "tool-calls",
+       "cost": 0,
+       "tokens": {
+        "total": 1262,
+        "input": 222,
+        "output": 40,
+        "reasoning": 0,
+        "cache": {
+         "read": 1000,
+         "write": 0
+        }
+       }
+      }
+     ]
+    },
+    {
+     "info": {
+      "id": "msg_0e0ec3a27001WwtZkrp4HKcuyu",
+      "sessionID": "ses_f1f13c9c7ffeErSXxQ26Uvsr6O",
+      "role": "assistant",
+      "time": {
+       "created": 1790479972903,
+       "completed": 1790479973178
+      },
+      "parentID": "msg_0e0ec364e001Qy2gQweXYBXKi0",
+      "modelID": "mock-model",
+      "providerID": "mock",
+      "mode": "general",
+      "agent": "general",
+      "path": {
+       "cwd": "/work/proj",
+       "root": "/"
+      },
+      "cost": 0,
+      "tokens": {
+       "total": 1265,
+       "input": 225,
+       "output": 40,
+       "reasoning": 0,
+       "cache": {
+        "read": 1000,
+        "write": 0
+       }
+      },
+      "finish": "stop"
+     },
+     "parts": [
+      {
+       "id": "prt_0e0ec3adb001pnNL6KMNqiSA0S",
+       "sessionID": "ses_f1f13c9c7ffeErSXxQ26Uvsr6O",
+       "messageID": "msg_0e0ec3a27001WwtZkrp4HKcuyu",
+       "type": "step-start"
+      },
+      {
+       "id": "prt_0e0ec3ae0001pVv8h803QqMswS",
+       "sessionID": "ses_f1f13c9c7ffeErSXxQ26Uvsr6O",
+       "messageID": "msg_0e0ec3a27001WwtZkrp4HKcuyu",
+       "type": "text",
+       "text": "Level one done.",
+       "time": {
+        "start": 1790479973088,
+        "end": 1790479973167
+       }
+      },
+      {
+       "id": "prt_0e0ec3b330017GrJ2q4tybJrSC",
+       "sessionID": "ses_f1f13c9c7ffeErSXxQ26Uvsr6O",
+       "messageID": "msg_0e0ec3a27001WwtZkrp4HKcuyu",
+       "type": "step-finish",
+       "reason": "stop",
+       "cost": 0,
+       "tokens": {
+        "total": 1265,
+        "input": 225,
+        "output": 40,
+        "reasoning": 0,
+        "cache": {
+         "read": 1000,
+         "write": 0
+        }
+       }
+      }
+     ]
+    }
+   ],
+   "children": [
+    {
+     "session": {
+      "id": "ses_f1f13c8adffe0RmAt7VUPtZZjk",
+      "slug": "jolly-pixel",
+      "projectID": "global",
+      "directory": "/work/proj",
+      "path": "work/proj",
+      "parentID": "ses_f1f13c9c7ffeErSXxQ26Uvsr6O",
+      "summary": {
+       "additions": 0,
+       "deletions": 0,
+       "files": 0
+      },
+      "cost": 0,
+      "tokens": {
+       "input": 447,
+       "output": 68,
+       "reasoning": 12,
+       "cache": {
+        "read": 2000,
+        "write": 0
+       }
+      },
+      "title": "Nested level two (@general subagent)",
+      "agent": "general",
+      "model": {
+       "id": "mock-model",
+       "providerID": "mock",
+       "variant": "default"
+      },
+      "version": "1.18.32",
+      "time": {
+       "created": 1790479972178,
+       "updated": 1790479972911
+      },
+      "permission": []
+     },
+     "messages": [
+      {
+       "info": {
+        "id": "msg_0e0ec3764001fbCj63CXyrAmw3",
+        "sessionID": "ses_f1f13c8adffe0RmAt7VUPtZZjk",
+        "role": "user",
+        "time": {
+         "created": 1790479972197
+        },
+        "summary": {
+         "diffs": []
+        },
+        "agent": "general",
+        "model": {
+         "providerID": "mock",
+         "modelID": "mock-model"
+        }
+       },
+       "parts": [
+        {
+         "id": "prt_0e0ec3770001gzRxgoBpC9WLDg",
+         "sessionID": "ses_f1f13c8adffe0RmAt7VUPtZZjk",
+         "messageID": "msg_0e0ec3764001fbCj63CXyrAmw3",
+         "type": "text",
+         "text": "CHILD-A: read notes.md and summarise it"
+        }
+       ]
+      },
+      {
+       "info": {
+        "id": "msg_0e0ec3793001IQrOngidHiUc2l",
+        "sessionID": "ses_f1f13c8adffe0RmAt7VUPtZZjk",
+        "role": "assistant",
+        "time": {
+         "created": 1790479972243,
+         "completed": 1790479972683
+        },
+        "parentID": "msg_0e0ec3764001fbCj63CXyrAmw3",
+        "modelID": "mock-model",
+        "providerID": "mock",
+        "mode": "general",
+        "agent": "general",
+        "path": {
+         "cwd": "/work/proj",
+         "root": "/"
+        },
+        "cost": 0,
+        "tokens": {
+         "total": 1263,
+         "input": 223,
+         "output": 28,
+         "reasoning": 12,
+         "cache": {
+          "read": 1000,
+          "write": 0
+         }
+        },
+        "finish": "tool-calls"
+       },
+       "parts": [
+        {
+         "id": "prt_0e0ec3862001i2IRhssBnMmQb7",
+         "sessionID": "ses_f1f13c8adffe0RmAt7VUPtZZjk",
+         "messageID": "msg_0e0ec3793001IQrOngidHiUc2l",
+         "type": "step-start"
+        },
+        {
+         "id": "prt_0e0ec3869001z1C4Oyj9tl2qlr",
+         "sessionID": "ses_f1f13c8adffe0RmAt7VUPtZZjk",
+         "messageID": "msg_0e0ec3793001IQrOngidHiUc2l",
+         "type": "reasoning",
+         "text": "Read the file.",
+         "time": {
+          "start": 1790479972457,
+          "end": 1790479972483
+         }
+        },
+        {
+         "id": "prt_0e0ec389f001LRMG2jPQnI16nu",
+         "sessionID": "ses_f1f13c8adffe0RmAt7VUPtZZjk",
+         "messageID": "msg_0e0ec3793001IQrOngidHiUc2l",
+         "type": "tool",
+         "callID": "call_23_0",
+         "tool": "read",
+         "state": {
+          "status": "completed",
+          "input": {
+           "filePath": "/work/proj/notes.md"
+          },
+          "output": "<path>/work/proj/notes.md</path>\n<type>file</type>\n<content>\n1: # Notes\n2: line one\n3: line two\n\n(End of file - total 3 lines)\n</content>",
+          "title": "work/proj/notes.md",
+          "metadata": {
+           "preview": "# Notes\nline one\nline two",
+           "truncated": false,
+           "loaded": [],
+           "display": {
+            "type": "file",
+            "path": "/work/proj/notes.md",
+            "text": "# Notes\nline one\nline two",
+            "lineStart": 1,
+            "lineEnd": 3,
+            "totalLines": 3,
+            "truncated": false
+           }
+          },
+          "time": {
+           "start": 1790479972518,
+           "end": 1790479972670
+          }
+         }
+        },
+        {
+         "id": "prt_0e0ec3943001fGw9oK0i6wgcbo",
+         "sessionID": "ses_f1f13c8adffe0RmAt7VUPtZZjk",
+         "messageID": "msg_0e0ec3793001IQrOngidHiUc2l",
+         "type": "step-finish",
+         "reason": "tool-calls",
+         "cost": 0,
+         "tokens": {
+          "total": 1263,
+          "input": 223,
+          "output": 28,
+          "reasoning": 12,
+          "cache": {
+           "read": 1000,
+           "write": 0
+          }
+         }
+        }
+       ]
+      },
+      {
+       "info": {
+        "id": "msg_0e0ec3950001Ozf0Q2sHHIc7IE",
+        "sessionID": "ses_f1f13c8adffe0RmAt7VUPtZZjk",
+        "role": "assistant",
+        "time": {
+         "created": 1790479972688,
+         "completed": 1790479972877
+        },
+        "parentID": "msg_0e0ec3764001fbCj63CXyrAmw3",
+        "modelID": "mock-model",
+        "providerID": "mock",
+        "mode": "general",
+        "agent": "general",
+        "path": {
+         "cwd": "/work/proj",
+         "root": "/"
+        },
+        "cost": 0,
+        "tokens": {
+         "total": 1264,
+         "input": 224,
+         "output": 40,
+         "reasoning": 0,
+         "cache": {
+          "read": 1000,
+          "write": 0
+         }
+        },
+        "finish": "stop"
+       },
+       "parts": [
+        {
+         "id": "prt_0e0ec3975001ZN4dbRvNN9Y9lq",
+         "sessionID": "ses_f1f13c8adffe0RmAt7VUPtZZjk",
+         "messageID": "msg_0e0ec3950001Ozf0Q2sHHIc7IE",
+         "type": "step-start"
+        },
+        {
+         "id": "prt_0e0ec3982001G0r03p0qPKRgUJ",
+         "sessionID": "ses_f1f13c8adffe0RmAt7VUPtZZjk",
+         "messageID": "msg_0e0ec3950001Ozf0Q2sHHIc7IE",
+         "type": "text",
+         "text": "notes.md has a heading and two lines.",
+         "time": {
+          "start": 1790479972738,
+          "end": 1790479972862
+         }
+        },
+        {
+         "id": "prt_0e0ec3a04001A4ipciCfI98sON",
+         "sessionID": "ses_f1f13c8adffe0RmAt7VUPtZZjk",
+         "messageID": "msg_0e0ec3950001Ozf0Q2sHHIc7IE",
+         "type": "step-finish",
+         "reason": "stop",
+         "cost": 0,
+         "tokens": {
+          "total": 1264,
+          "input": 224,
+          "output": 40,
+          "reasoning": 0,
+          "cache": {
+           "read": 1000,
+           "write": 0
+          }
+         }
+        }
+       ]
+      }
+     ],
+     "children": []
+    }
+   ]
+  }
+ ]
+}

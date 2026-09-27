@@ -1,0 +1,165 @@
+{
+ "session": {
+  "id": "ses_f1eef747affejcuId07xwqSRnl",
+  "projectID": "a34c8d566d1fcce901d1be6ac3f41a8f903e9c7d",
+  "model": {
+   "id": "gpt-5.1-mock",
+   "providerID": "mock",
+   "variant": "default"
+  },
+  "cost": 0,
+  "tokens": {
+   "input": 624,
+   "output": 120,
+   "reasoning": 0,
+   "cache": {
+    "read": 3000,
+    "write": 0
+   }
+  },
+  "outcome": "succeeded",
+  "time": {
+   "created": 1790482353036,
+   "updated": 1790482353247,
+   "idle": 1790482353447
+  },
+  "title": "Parity session title",
+  "location": {
+   "directory": "/work/proj"
+  }
+ },
+ "messages": [
+  {
+   "id": "msg_0e1108bad0012No5STds62tAnP",
+   "time": {
+    "created": 1790482353069
+   },
+   "type": "model-switched",
+   "model": {
+    "id": "gpt-5.1-mock",
+    "providerID": "mock"
+   }
+  },
+  {
+   "id": "msg_0e1108bbb001de5s1Hv3CaXTlq",
+   "time": {
+    "created": 1790482353124
+   },
+   "text": "PARITY-PATCH patch it",
+   "type": "user"
+  },
+  {
+   "id": "msg_0e1108c03001LO0iCneNBc6MVL",
+   "time": {
+    "created": 1790482353181,
+    "streamed": 1790482353270,
+    "completed": 1790482353298
+   },
+   "type": "assistant",
+   "agent": "build",
+   "model": {
+    "id": "gpt-5.1-mock",
+    "providerID": "mock",
+    "variant": "default"
+   },
+   "content": [
+    {
+     "type": "tool",
+     "id": "call_8_0",
+     "name": "patch",
+     "executed": false,
+     "state": {
+      "status": "completed",
+      "input": {
+       "patchText": "*** Begin Patch\n*** Update File: notes.md\n@@\n # Notes\n-line one\n+line one (patched)\n*** Add File: extra.md\n+# Extra\n+added by patch\n*** End Patch"
+      },
+      "content": [
+       {
+        "type": "text",
+        "text": "Success. Updated the following files:\nM notes.md\nA extra.md"
+       }
+      ],
+      "metadata": {
+       "files": [
+        {
+         "file": "notes.md",
+         "patch": "Index: /work/proj/notes.md\n===================================================================\n--- /work/proj/notes.md\n+++ /work/proj/notes.md\n@@ -1,3 +1,3 @@\n # Notes\n-line one\n+line one (patched)\n line two\n",
+         "status": "modified",
+         "additions": 1,
+         "deletions": 1
+        },
+        {
+         "file": "extra.md",
+         "patch": "Index: /work/proj/extra.md\n===================================================================\n--- /work/proj/extra.md\n+++ /work/proj/extra.md\n@@ -0,0 +1,2 @@\n+# Extra\n+added by patch\n",
+         "status": "added",
+         "additions": 2,
+         "deletions": 0
+        }
+       ],
+       "truncated": false
+      }
+     },
+     "time": {
+      "created": 1790482353196,
+      "ran": 1790482353262,
+      "completed": 1790482353291
+     }
+    }
+   ],
+   "finish": "tool-calls",
+   "rawFinish": "tool_calls",
+   "cost": 0,
+   "tokens": {
+    "input": 208,
+    "output": 40,
+    "reasoning": 0,
+    "cache": {
+     "read": 1000,
+     "write": 0
+    }
+   }
+  },
+  {
+   "id": "msg_0e1108ca9001YQpGQphgQaVTkb",
+   "time": {
+    "created": 1790482353348,
+    "streamed": 1790482353431,
+    "completed": 1790482353437
+   },
+   "type": "assistant",
+   "agent": "build",
+   "model": {
+    "id": "gpt-5.1-mock",
+    "providerID": "mock",
+    "variant": "default"
+   },
+   "content": [
+    {
+     "type": "text",
+     "text": "Patched."
+    }
+   ],
+   "finish": "stop",
+   "rawFinish": "stop",
+   "cost": 0,
+   "tokens": {
+    "input": 209,
+    "output": 40,
+    "reasoning": 0,
+    "cache": {
+     "read": 1000,
+     "write": 0
+    }
+   }
+  },
+  {
+   "id": "msg_0e1108d27001EdHTWY68B3ZmPM",
+   "time": {
+    "created": 1790482353447
+   },
+   "type": "idle",
+   "outcome": "succeeded"
+  }
+ ],
+ "children": []
+}

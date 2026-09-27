@@ -4,6 +4,7 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
+import { createManagedOpencodeServer, type ManagedOpencodeServer } from "./managed-opencode.js";
 import { buildOmniRushRuntimeConfigObjectFromSnapshot } from "./omnirush-runtime-config.js";
 
 const repoRoot = resolve(import.meta.dir, "../../..");
@@ -91,26 +92,26 @@ const enginePath = findEngine();
 const describeMaybe = enginePath ? describe : describe.skip;
 
 describeMaybe("authorization-required MCP tool error pass-through", () => {
-  let engine: ChildProcess;
+  let engine: ManagedOpencodeServer;
   let mcp: ChildProcess;
   let llm: ReturnType<typeof Bun.serve>;
   let workspace = "";
   let dataDir = "";
-  let enginePort = 0;
   let mcpPort = 0;
   let modelSawAuthorizationError = false;
   let modelRequests: Array<{ hasToolError: boolean; toolNames: Array<string | undefined> }> = [];
   let engineLogs = "";
 
-  const engineUrl = () => `http://127.0.0.1:${enginePort}`;
+  // The engine as the app runs it: the bundled 2.x engine behind the 1.x engine adapter.
   const engineFetch = (path: string, init?: RequestInit) => {
-    const url = new URL(`${engineUrl()}${path}`);
+    const url = new URL(`${engine.url}${path}`);
     url.searchParams.set("directory", workspace);
-    return fetch(url, init);
+    const headers = new Headers(init?.headers);
+    headers.set("authorization", `Basic ${Buffer.from(`${engine.username}:${engine.password}`).toString("base64")}`);
+    return fetch(url, { ...init, headers });
   };
 
   beforeAll(async () => {
-    enginePort = await freePort();
     mcpPort = await freePort();
     workspace = mkdtempSync(join(tmpdir(), "mcp-authorization-link-ws-"));
     dataDir = mkdtempSync(join(tmpdir(), "mcp-authorization-link-data-"));
@@ -164,7 +165,7 @@ describeMaybe("authorization-required MCP tool error pass-through", () => {
     });
 
     const runtime = buildOmniRushRuntimeConfigObjectFromSnapshot({});
-    const configPath = join(workspace, "opencode.json");
+    const configPath = join(dataDir, "runtime-opencode-config.json");
     writeFileSync(configPath, JSON.stringify({
       $schema: "https://opencode.ai/config.json",
       formatter: false,
@@ -218,23 +219,20 @@ describeMaybe("authorization-required MCP tool error pass-through", () => {
     });
     await waitFor(async () => (await fetch(`http://127.0.0.1:${mcpPort}/health`)).ok ? true : null, "MCP mock");
 
-    engine = spawn(enginePath!, ["serve", "--pure", "--hostname", "127.0.0.1", "--port", String(enginePort)], {
+    engine = await createManagedOpencodeServer({
+      bin: enginePath!,
+      cwd: workspace,
       env: {
-        ...process.env,
         OPENCODE_CONFIG: configPath,
         OPENCODE_DISABLE_AUTOUPDATE: "1",
+        OPENCODE_DISABLE_MODELS_FETCH: "1",
+        OMNIRUSH_ENGINE_PLUGINS: "0",
+        OMNIRUSH_ENGINE2_CONFIG_DIR: join(dataDir, "engine2"),
         XDG_DATA_HOME: join(dataDir, "data"),
         XDG_CONFIG_HOME: join(dataDir, "config"),
         XDG_STATE_HOME: join(dataDir, "state"),
         XDG_CACHE_HOME: join(dataDir, "cache"),
       },
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    engine.stdout?.on("data", (chunk) => {
-      engineLogs = `${engineLogs}${String(chunk)}`.slice(-8_000);
-    });
-    engine.stderr?.on("data", (chunk) => {
-      engineLogs = `${engineLogs}${String(chunk)}`.slice(-8_000);
     });
     await waitFor(async () => (await engineFetch("/mcp")).ok ? true : null, "OpenCode engine");
     await waitFor(async () => {
@@ -243,8 +241,8 @@ describeMaybe("authorization-required MCP tool error pass-through", () => {
     }, "MCP connection");
   }, 60_000);
 
-  afterAll(() => {
-    engine?.kill();
+  afterAll(async () => {
+    await engine?.close();
     mcp?.kill();
     llm?.stop(true);
     if (workspace) rmSync(workspace, { recursive: true, force: true });

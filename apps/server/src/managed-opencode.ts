@@ -1,6 +1,8 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import net from "node:net";
 import { randomUUID } from "node:crypto";
+import { startEngineFacade } from "./engine2/facade.js";
+import { prepareEngine2Launch, resolveEngineIdentity, type EngineDialect } from "./engine2/launch.js";
 
 export type ManagedChildProcess = {
   exitCode: number | null;
@@ -121,6 +123,12 @@ async function findFreePort(hostname: string, excludedPorts: number[] = []): Pro
 
 type ManagedOpencodeServerOptions = {
   bin?: string;
+  /**
+   * The engine API the binary speaks. Unset: resolved from the binary
+   * (engine2/launch.ts). A 2.x engine is started behind the 1.x engine
+   * adapter (engine2/facade.ts), whose URL and credentials are returned.
+   */
+  dialect?: EngineDialect;
   cwd: string;
   hostname?: string;
   port?: number;
@@ -144,11 +152,135 @@ function isRetryableAddressInUseExit(error: unknown): boolean {
     /\bEADDRINUSE\b/.test(error.message);
 }
 
+function redactedEnv(entries: Record<string, string | undefined>): OpencodeExecutionEnvEntry[] {
+  return Object.entries(entries)
+    .filter((entry): entry is [string, string] => typeof entry[1] === "string")
+    .map(([name, value]) => ({
+      name,
+      value: SECRET_ENV_PATTERN.test(name) ? "<redacted>" : value,
+      redacted: SECRET_ENV_PATTERN.test(name),
+    }))
+    .sort((left, right) => left.name.localeCompare(right.name));
+}
+
+/**
+ * Starts a 2.x engine on an ephemeral loopback port and the 1.x engine
+ * adapter on `port`: callers get the adapter's URL and Basic credentials,
+ * exactly as they got the 1.x engine's.
+ */
+async function startManagedEngine2Server(
+  options: ManagedOpencodeServerOptions,
+  hostname: string,
+  port: number,
+  version: string | null,
+): Promise<ManagedOpencodeServer> {
+  const username = randomSecret();
+  const password = randomSecret();
+  const enginePassword = randomSecret();
+  const command = options.bin?.trim() || "opencode";
+  const args = ["serve", "--hostname", "127.0.0.1", "--port", "0"];
+  const adapterUrl = `http://${hostname.includes(":") ? `[${hostname}]` : hostname}:${port}`;
+  const adapterAuthorization = `Basic ${Buffer.from(`${username}:${password}`).toString("base64")}`;
+  const engineEnvDefaults = { npm_config_audit: "false" };
+  const launch = await prepareEngine2Launch({
+    env: { ...process.env, ...engineEnvDefaults, ...options.env },
+    cwd: options.cwd,
+    password: enginePassword,
+    adapterUrl,
+    adapterAuthorization,
+  });
+  const env: NodeJS.ProcessEnv = { ...launch.env };
+  delete env.OMNIRUSH_ENCRYPTION_KEY;
+  delete env.OPENCODE_SERVER_USERNAME;
+  delete env.OPENCODE_SERVER_PASSWORD;
+  const injectedEnv = redactedEnv({
+    ...engineEnvDefaults,
+    ...(options.env ?? {}),
+    OPENCODE_CONFIG: launch.configFile,
+    OPENCODE_PASSWORD: enginePassword,
+    OMNIRUSH_ENGINE_ADAPTER_URL: adapterUrl,
+    OMNIRUSH_ENGINE_ADAPTER_AUTHORIZATION: adapterAuthorization,
+  });
+  const child: ChildProcess = spawn(command, args, { cwd: options.cwd, env, stdio: ["ignore", "pipe", "pipe"] });
+  const processLifecycle = createManagedProcessClose(child);
+  const timeoutMs = Math.max(options.timeoutMs ?? 15_000, 90_000);
+  let engineUrl: string;
+  try {
+    engineUrl = await new Promise<string>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error(`Timeout waiting for OpenCode server after ${timeoutMs}ms`)), timeoutMs);
+      let output = "";
+      const done = (value: string) => {
+        clearTimeout(timeout);
+        resolve(value);
+      };
+      const fail = (error: Error) => {
+        clearTimeout(timeout);
+        reject(error);
+      };
+      child.stdout?.on("data", (chunk) => {
+        output += chunk.toString();
+        for (const line of output.split("\n")) {
+          const match = line.match(/server listening on\s+(https?:\/\/[^\s]+)/);
+          if (match?.[1]) return done(match[1]);
+        }
+      });
+      child.stderr?.on("data", (chunk) => {
+        output += chunk.toString();
+      });
+      child.once("error", fail);
+      child.once("close", (code) => fail(new ManagedOpencodeExitError(code, output)));
+    });
+  } catch (error) {
+    await processLifecycle.close();
+    throw error;
+  }
+  let facade: Awaited<ReturnType<typeof startEngineFacade>>;
+  try {
+    facade = await startEngineFacade({
+      upstreamUrl: engineUrl,
+      upstreamPassword: enginePassword,
+      username,
+      password,
+      hostname,
+      port,
+      version: version ?? "2",
+      defaultDirectory: options.cwd,
+      v1ConfigPath: launch.v1ConfigPath,
+      writeEngineConfig: launch.writeEngineConfig,
+      plugins: launch.plugins,
+      log: (message, attributes) => console.warn(`[engine-adapter] ${message}`, attributes ? JSON.stringify(attributes) : ""),
+    });
+  } catch (error) {
+    await processLifecycle.close();
+    const message = error instanceof Error ? error.message : String(error);
+    throw new ManagedOpencodeExitError(1, `engine adapter could not listen: ${message}`);
+  }
+  child.once("exit", () => {
+    void facade.close().catch(() => undefined);
+  });
+  return {
+    url: facade.url,
+    username,
+    password,
+    pid: child.pid ?? null,
+    execution: { command, args, cwd: options.cwd, env: injectedEnv },
+    isAlive: processLifecycle.isAlive,
+    close: async () => {
+      await facade.close().catch(() => undefined);
+      await processLifecycle.close();
+    },
+  };
+}
+
 async function startManagedOpencodeServer(
   options: ManagedOpencodeServerOptions,
   hostname: string,
   port: number,
 ): Promise<ManagedOpencodeServer> {
+  const identity = options.dialect
+    ? { dialect: options.dialect, version: null }
+    : await resolveEngineIdentity(options.bin?.trim() || "opencode", { ...process.env, ...options.env });
+  if (identity.dialect === "v2") return startManagedEngine2Server(options, hostname, port, identity.version);
   const username = randomSecret();
   const password = randomSecret();
   const args = ["serve", "--hostname", hostname, "--port", String(port), "--cors", "*"];
