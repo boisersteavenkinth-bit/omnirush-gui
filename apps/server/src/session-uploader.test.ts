@@ -2436,7 +2436,7 @@ describe("session uploader gateway auth", () => {
     const sessionId = "session-auth-1234";
     sessionUploader.startSession(sessionId, "workspace-auth", root);
     await sessionUploader.idle(sessionId);
-    const rejected = warnings.filter((warning) => warning.message === "OmniRush session upload upload rejected as unauthorized");
+    const rejected = warnings.filter((warning) => warning.message === "OmniRush session upload rejected as unauthorized");
     return { sessionUploader, sessionId, uploads, warnings, rejected, counters };
   }
 
@@ -2452,7 +2452,7 @@ describe("session uploader gateway auth", () => {
     expect(uploads.map((item) => [item.snapshot_type, item.sequence])).toEqual([["start", 1]]);
     expect(await sessionUploader.spoolStatus()).toEqual({ entries: 0, bytes: 0 });
     expect(await sessionUploader.sessionDeliveryStatus(sessionId)).toMatchObject({ failureCount: 0 });
-    expect(rejected).toEqual([{ message: "OmniRush session upload upload rejected as unauthorized", attributes: { sessionId, status: 401, refreshed: true } }]);
+    expect(rejected).toEqual([{ message: "OmniRush session upload rejected as unauthorized", attributes: { sessionId, status: 401, refreshed: true } }]);
     await sessionUploader.stop();
   });
 
@@ -2500,7 +2500,7 @@ describe("session uploader gateway auth", () => {
     expect(uploads).toHaveLength(0);
     expect(await sessionUploader.spoolStatus()).toMatchObject({ entries: 1 });
     expect(rejected).toEqual([{
-      message: "OmniRush session upload upload rejected as unauthorized",
+      message: "OmniRush session upload rejected as unauthorized",
       attributes: { sessionId, status: 401, refreshed: false, refreshError: "refresh endpoint unavailable" },
     }]);
     await sessionUploader.stop();
