@@ -48,6 +48,8 @@ type SessionState = {
   lastUserID: string;
   status: JsonRecord;
   info?: JsonRecord;
+  /** The 1.x ids of the messages a staged revert hides (removed when it is committed). */
+  reverted?: string[];
 };
 
 export type EventTranslatorOptions = {
@@ -56,6 +58,8 @@ export type EventTranslatorOptions = {
   rootFor?: (directory: string) => string | undefined;
   /** Looks up a session the stream has not described yet (its directory and parent). */
   lookupSession?: (sessionID: string) => Promise<unknown>;
+  /** The 1.x ids of a session's messages, oldest first (what a staged revert hides). */
+  messageIDs?: (sessionID: string) => Promise<string[]>;
   now?: () => number;
 };
 
@@ -118,6 +122,19 @@ export class EventTranslator {
 
   isChild(sessionID: string): boolean {
     return Boolean(this.sessions.get(sessionID)?.parentID);
+  }
+
+  /** The session's 1.x info, read fresh when possible (else the last one seen). */
+  private async currentInfo(sessionID: string): Promise<JsonRecord | null> {
+    if (this.options.lookupSession) {
+      try {
+        const info = v1Session(await this.options.lookupSession(sessionID), { version: this.options.version });
+        if (info) return info;
+      } catch {
+        // fall back to the last info seen
+      }
+    }
+    return this.session(sessionID).info ?? null;
   }
 
   private session(sessionID: string): SessionState {
@@ -235,6 +252,43 @@ export class EventTranslator {
         }
         this.noteSession(sessionID, { info, directory: String(info.directory || "") || null });
         return [this.scoped(sessionID, "session.updated", { sessionID, info })];
+      }
+      case "session.revert.staged":
+      case "session.revert.cleared":
+      case "session.revert.committed": {
+        // 2.x stages a revert (files restored, later messages kept), clears it
+        // (files back) or commits it (the later messages are deleted, which a
+        // prompt does first). 1.x showed the same through session.revert.
+        if (!sessionID) return [];
+        const state = this.session(sessionID);
+        const out: ScopedV1Event[] = [];
+        let revert: JsonRecord | undefined;
+        if (type === "session.revert.staged") {
+          const staged = record(data, "revert");
+          const boundary = str(staged, "messageID");
+          if (boundary) {
+            revert = omitUndefined({ messageID: boundary, partID: str(staged, "partID"), snapshot: str(staged, "snapshot") });
+            const ids = this.options.messageIDs ? await this.options.messageIDs(sessionID).catch(() => []) : [];
+            const index = ids.indexOf(boundary);
+            state.reverted = index >= 0 ? ids.slice(index) : [boundary];
+          }
+        } else if (type === "session.revert.committed") {
+          const boundary = str(data, "to");
+          const removed = state.reverted ?? (boundary ? [boundary] : []);
+          for (const messageID of removed) out.push(this.scoped(sessionID, "message.removed", { sessionID, messageID }));
+          state.reverted = undefined;
+        } else {
+          state.reverted = undefined;
+        }
+        const info = await this.currentInfo(sessionID);
+        if (info) {
+          const next = { ...info, time: { ...(record(info, "time") ?? {}), updated: num(raw, "created") ?? this.now() } } as JsonRecord;
+          if (revert) next.revert = revert;
+          else delete next.revert;
+          this.noteSession(sessionID, { info: next });
+          out.push(this.scoped(sessionID, "session.updated", { sessionID, info: next }));
+        }
+        return out;
       }
       case "session.deleted": {
         if (!sessionID) return [];

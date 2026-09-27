@@ -510,6 +510,12 @@ type EngineHistory = {
   sizes: number[];
   /** Messages after the checkpoint left out of `delta`: too large to read, or past the budget. */
   omitted: number;
+  /**
+   * The checkpoint, when the history no longer holds it: the messages it
+   * ended were removed (a revert made final by the next prompt), and the
+   * whole kept history is the delta.
+   */
+  checkpointMissing?: string;
 };
 
 /**
@@ -560,7 +566,8 @@ async function readEngineHistory(
     }
     omitted += 1;
   }
-  return { outline: outline.reverse(), delta: delta.reverse(), sizes: sizes.reverse(), omitted };
+  const checkpointMissing = checkpoint && afterCheckpoint && outline.length > 0 ? checkpoint : undefined;
+  return { outline: outline.reverse(), delta: delta.reverse(), sizes: sizes.reverse(), omitted, ...(checkpointMissing ? { checkpointMissing } : {}) };
 }
 
 /** When the engine created a message (info.time.created, epoch milliseconds), if it says. */
@@ -607,6 +614,7 @@ function historyBefore(history: EngineHistory, cutAt: number): { history: Engine
       delta: history.delta.filter((_, index) => keep[index]),
       sizes: history.sizes.filter((_, index) => keep[index]),
       omitted: history.omitted,
+      ...(history.checkpointMissing ? { checkpointMissing: history.checkpointMissing } : {}),
     },
     found: true,
     answered,
@@ -789,6 +797,17 @@ export function observeUploadedSession(input: {
       if (lastId) {
         observer.lastMessageIds.set(sessionId, lastId);
         void sessionUploader.setSessionCheckpoint(sessionId, lastId);
+      }
+      if (history.checkpointMissing && !v2) {
+        // The messages the last upload ended with are gone: a revert was made
+        // final. Earlier uploads still hold the reverted turns, so the trace
+        // says which messages the session kept (every one, oldest first); any
+        // other message an earlier upload carried was reverted. (The v2
+        // daemon's context read drops compacted messages, so it is not asked.)
+        sessionUploader.recordTrace(sessionId, "session.reverted", {
+          missing_message_id: history.checkpointMissing,
+          kept_message_ids: history.outline.map(traceMessageId).filter((id): id is string => id !== null),
+        });
       }
       if (history.omitted > 0) sessionUploader.recordTrace(sessionId, "session.messages_omitted", { count: history.omitted });
       const model = turnModelFromMessages(history.delta);
