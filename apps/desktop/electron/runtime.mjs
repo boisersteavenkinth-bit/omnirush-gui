@@ -1798,7 +1798,8 @@ export function createRuntimeManager({
     if (!version) {
       throw new Error("constants.json is missing opencodeVersion");
     }
-    return `curl -fsSL https://opencode.ai/install | bash -s -- --version ${version} --no-modify-path`;
+    // The 2.x engine ships on npm as @opencode/cli (binaries `opencode` / `opencode2`).
+    return `npm install -g @opencode/cli@${version}`;
   }
 
   function processMatchesSidecar(command) {

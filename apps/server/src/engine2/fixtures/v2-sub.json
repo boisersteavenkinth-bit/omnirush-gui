@@ -1,0 +1,457 @@
+{
+ "session": {
+  "id": "ses_f1f13e0ccffe5XtNqflQuhSMLM",
+  "projectID": "a34c8d566d1fcce901d1be6ac3f41a8f903e9c7d",
+  "cost": 0,
+  "tokens": {
+   "input": 646,
+   "output": 108,
+   "reasoning": 12,
+   "cache": {
+    "read": 3000,
+    "write": 0
+   }
+  },
+  "outcome": "succeeded",
+  "time": {
+   "created": 1790479966015,
+   "updated": 1790479966217,
+   "idle": 1790479966961
+  },
+  "title": "Parity session title",
+  "location": {
+   "directory": "/work/proj"
+  }
+ },
+ "messages": [
+  {
+   "id": "msg_0e0ec1f660019qW5hlMuhfxia5",
+   "time": {
+    "created": 1790479966088
+   },
+   "text": "PARITY-SUB use two helpers",
+   "type": "user"
+  },
+  {
+   "id": "msg_0e0ec1fa6001GZ9bRlOF6m6y1c",
+   "time": {
+    "created": 1790479966146,
+    "streamed": 1790479966273,
+    "completed": 1790479966813
+   },
+   "type": "assistant",
+   "agent": "build",
+   "model": {
+    "id": "mock-model",
+    "providerID": "mock"
+   },
+   "content": [
+    {
+     "type": "reasoning",
+     "text": "Delegate to two helpers.",
+     "state": {
+      "reasoningField": "reasoning_content"
+     },
+     "time": {
+      "created": 1790479966159,
+      "completed": 1790479966250
+     }
+    },
+    {
+     "type": "tool",
+     "id": "call_14_0",
+     "name": "subagent",
+     "executed": false,
+     "state": {
+      "status": "completed",
+      "input": {
+       "agent": "general",
+       "description": "Read notes",
+       "prompt": "CHILD-A: read notes.md and summarise it"
+      },
+      "content": [
+       {
+        "type": "text",
+        "text": "<subagent sessionID=\"ses_f1f13dfb6ffeZS9tCB4p35mmoE\" state=\"completed\">\nnotes.md has a heading and two lines.\n</subagent>"
+       }
+      ],
+      "metadata": {
+       "sessionID": "ses_f1f13dfb6ffeZS9tCB4p35mmoE",
+       "status": "completed",
+       "truncated": false
+      }
+     },
+     "time": {
+      "created": 1790479966201,
+      "ran": 1790479966259,
+      "completed": 1790479966809
+     }
+    },
+    {
+     "type": "tool",
+     "id": "call_14_1",
+     "name": "subagent",
+     "executed": false,
+     "state": {
+      "status": "completed",
+      "input": {
+       "agent": "general",
+       "description": "List folder",
+       "prompt": "CHILD-B: list the folder"
+      },
+      "content": [
+       {
+        "type": "text",
+        "text": "<subagent sessionID=\"ses_f1f13dfb3ffeIzHsslPAtC1LRx\" state=\"completed\">\nThe folder holds notes.md.\n</subagent>"
+       }
+      ],
+      "metadata": {
+       "sessionID": "ses_f1f13dfb3ffeIzHsslPAtC1LRx",
+       "status": "completed",
+       "truncated": false
+      }
+     },
+     "time": {
+      "created": 1790479966207,
+      "ran": 1790479966267,
+      "completed": 1790479966688
+     }
+    }
+   ],
+   "finish": "tool-calls",
+   "rawFinish": "tool_calls",
+   "cost": 0,
+   "tokens": {
+    "input": 214,
+    "output": 28,
+    "reasoning": 12,
+    "cache": {
+     "read": 1000,
+     "write": 0
+    }
+   }
+  },
+  {
+   "id": "msg_0e0ec226f0010OfGce9PlSXV63",
+   "time": {
+    "created": 1790479966850,
+    "streamed": 1790479966951,
+    "completed": 1790479966955
+   },
+   "type": "assistant",
+   "agent": "build",
+   "model": {
+    "id": "mock-model",
+    "providerID": "mock"
+   },
+   "content": [
+    {
+     "type": "text",
+     "text": "Both helpers finished."
+    }
+   ],
+   "finish": "stop",
+   "rawFinish": "stop",
+   "cost": 0,
+   "tokens": {
+    "input": 219,
+    "output": 40,
+    "reasoning": 0,
+    "cache": {
+     "read": 1000,
+     "write": 0
+    }
+   }
+  },
+  {
+   "id": "msg_0e0ec22f1001cNkC0EpAcH0ynC",
+   "time": {
+    "created": 1790479966961
+   },
+   "type": "idle",
+   "outcome": "succeeded"
+  }
+ ],
+ "children": [
+  {
+   "session": {
+    "id": "ses_f1f13dfb3ffeIzHsslPAtC1LRx",
+    "parentID": "ses_f1f13e0ccffe5XtNqflQuhSMLM",
+    "projectID": "a34c8d566d1fcce901d1be6ac3f41a8f903e9c7d",
+    "agent": "general",
+    "cost": 0,
+    "tokens": {
+     "input": 432,
+     "output": 80,
+     "reasoning": 0,
+     "cache": {
+      "read": 2000,
+      "write": 0
+     }
+    },
+    "outcome": "succeeded",
+    "time": {
+     "created": 1790479966307,
+     "updated": 1790479966316,
+     "idle": 1790479966683
+    },
+    "title": "List folder",
+    "location": {
+     "directory": "/work/proj"
+    }
+   },
+   "messages": [
+    {
+     "id": "msg_0e0ec206a001GLZFj5hw1kDiBK",
+     "time": {
+      "created": 1790479966344
+     },
+     "text": "You are a subagent spawned by another session.\nCHILD-B: list the folder",
+     "type": "user"
+    },
+    {
+     "id": "msg_0e0ec2090001werAciyouOYr7H",
+     "time": {
+      "created": 1790479966374,
+      "streamed": 1790479966444,
+      "completed": 1790479966510
+     },
+     "type": "assistant",
+     "agent": "general",
+     "model": {
+      "id": "mock-model",
+      "providerID": "mock"
+     },
+     "content": [
+      {
+       "type": "tool",
+       "id": "call_15_0",
+       "name": "shell",
+       "executed": false,
+       "state": {
+        "status": "completed",
+        "input": {
+         "command": "ls",
+         "description": "List folder"
+        },
+        "content": [
+         {
+          "type": "text",
+          "text": "notes.md\n"
+         }
+        ],
+        "metadata": {
+         "status": "completed",
+         "truncated": false,
+         "exit": 0
+        }
+       },
+       "time": {
+        "created": 1790479966433,
+        "ran": 1790479966441,
+        "completed": 1790479966506
+       }
+      }
+     ],
+     "finish": "tool-calls",
+     "rawFinish": "tool_calls",
+     "cost": 0,
+     "tokens": {
+      "input": 215,
+      "output": 40,
+      "reasoning": 0,
+      "cache": {
+       "read": 1000,
+       "write": 0
+      }
+     }
+    },
+    {
+     "id": "msg_0e0ec21480014ACPlK4Y92Rd3E",
+     "time": {
+      "created": 1790479966565,
+      "streamed": 1790479966675,
+      "completed": 1790479966678
+     },
+     "type": "assistant",
+     "agent": "general",
+     "model": {
+      "id": "mock-model",
+      "providerID": "mock"
+     },
+     "content": [
+      {
+       "type": "text",
+       "text": "The folder holds notes.md."
+      }
+     ],
+     "finish": "stop",
+     "rawFinish": "stop",
+     "cost": 0,
+     "tokens": {
+      "input": 217,
+      "output": 40,
+      "reasoning": 0,
+      "cache": {
+       "read": 1000,
+       "write": 0
+      }
+     }
+    },
+    {
+     "id": "msg_0e0ec21db001wtPbUF18uj5Kio",
+     "time": {
+      "created": 1790479966683
+     },
+     "type": "idle",
+     "outcome": "succeeded"
+    }
+   ],
+   "children": []
+  },
+  {
+   "session": {
+    "id": "ses_f1f13dfb6ffeZS9tCB4p35mmoE",
+    "parentID": "ses_f1f13e0ccffe5XtNqflQuhSMLM",
+    "projectID": "a34c8d566d1fcce901d1be6ac3f41a8f903e9c7d",
+    "agent": "general",
+    "cost": 0,
+    "tokens": {
+     "input": 434,
+     "output": 68,
+     "reasoning": 12,
+     "cache": {
+      "read": 2000,
+      "write": 0
+     }
+    },
+    "outcome": "succeeded",
+    "time": {
+     "created": 1790479966321,
+     "updated": 1790479966326,
+     "idle": 1790479966805
+    },
+    "title": "Read notes",
+    "location": {
+     "directory": "/work/proj"
+    }
+   },
+   "messages": [
+    {
+     "id": "msg_0e0ec2074001V4UxN3Im17hT5V",
+     "time": {
+      "created": 1790479966393
+     },
+     "text": "You are a subagent spawned by another session.\nCHILD-A: read notes.md and summarise it",
+     "type": "user"
+    },
+    {
+     "id": "msg_0e0ec20c4001118N4AF962vqVE",
+     "time": {
+      "created": 1790479966425,
+      "streamed": 1790479966581,
+      "completed": 1790479966624
+     },
+     "type": "assistant",
+     "agent": "general",
+     "model": {
+      "id": "mock-model",
+      "providerID": "mock"
+     },
+     "content": [
+      {
+       "type": "reasoning",
+       "text": "Read the file.",
+       "state": {
+        "reasoningField": "reasoning_content"
+       },
+       "time": {
+        "created": 1790479966450,
+        "completed": 1790479966571
+       }
+      },
+      {
+       "type": "tool",
+       "id": "call_16_0",
+       "name": "read",
+       "executed": false,
+       "state": {
+        "status": "completed",
+        "input": {
+         "path": "/work/proj/notes.md"
+        },
+        "content": [
+         {
+          "type": "text",
+          "text": "Read file /work/proj/notes.md, lines 1-3\n1: # Notes\n2: line one\n3: line two"
+         }
+        ],
+        "metadata": {
+         "truncated": false
+        }
+       },
+       "time": {
+        "created": 1790479966492,
+        "ran": 1790479966578,
+        "completed": 1790479966616
+       }
+      }
+     ],
+     "finish": "tool-calls",
+     "rawFinish": "tool_calls",
+     "cost": 0,
+     "tokens": {
+      "input": 216,
+      "output": 28,
+      "reasoning": 12,
+      "cache": {
+       "read": 1000,
+       "write": 0
+      }
+     }
+    },
+    {
+     "id": "msg_0e0ec21b2001LWN1MnhyphTfOO",
+     "time": {
+      "created": 1790479966658,
+      "streamed": 1790479966796,
+      "completed": 1790479966799
+     },
+     "type": "assistant",
+     "agent": "general",
+     "model": {
+      "id": "mock-model",
+      "providerID": "mock"
+     },
+     "content": [
+      {
+       "type": "text",
+       "text": "notes.md has a heading and two lines."
+      }
+     ],
+     "finish": "stop",
+     "rawFinish": "stop",
+     "cost": 0,
+     "tokens": {
+      "input": 218,
+      "output": 40,
+      "reasoning": 0,
+      "cache": {
+       "read": 1000,
+       "write": 0
+      }
+     }
+    },
+    {
+     "id": "msg_0e0ec2255001BM5U9NSDgZzMSy",
+     "time": {
+      "created": 1790479966805
+     },
+     "type": "idle",
+     "outcome": "succeeded"
+    }
+   ],
+   "children": []
+  }
+ ]
+}

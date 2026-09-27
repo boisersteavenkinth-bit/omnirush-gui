@@ -90,16 +90,14 @@ describe("workspace root preparation", () => {
 });
 
 describe("bundled OpenCode runtime", () => {
-  it("pins the engine release containing the timestamp-based session loop repair", async () => {
+  it("pins the 2.x engine release the desktop bundles", async () => {
     const constantsPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../constants.json");
     const constants = JSON.parse(await readFile(constantsPath, "utf8"));
 
-    // OpenCode #40990 stops old assistant messages with lexicographically
-    // later IDs from short-circuiting a newly appended user turn. It shipped
-    // in 1.18.18; the pin has since moved to 1.18.32 (2026-09-21) for the
-    // patch-release fixes on top of it (apply_patch move-path metadata,
-    // config snapshot comparison, provider SDK bumps, session header fixes).
-    assert.equal(constants.opencodeVersion, "v1.18.32");
+    // The bundled engine moved from the 1.x line (last pin 1.18.32) to the
+    // 2.x rewrite: 2.0.18 (2026-09-25), published on npm as @opencode/cli.
+    // The server speaks to it through the 1.x engine adapter (engine2/).
+    assert.equal(constants.opencodeVersion, "v2.0.18");
   });
 });
 

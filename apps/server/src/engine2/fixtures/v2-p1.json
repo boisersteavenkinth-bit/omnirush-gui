@@ -1,0 +1,298 @@
+{
+ "session": {
+  "id": "ses_f1f14fdf6ffe32y5eLxrDN6MFs",
+  "projectID": "a34c8d566d1fcce901d1be6ac3f41a8f903e9c7d",
+  "cost": 0,
+  "tokens": {
+   "input": 1015,
+   "output": 152,
+   "reasoning": 48,
+   "cache": {
+    "read": 5000,
+    "write": 0
+   }
+  },
+  "outcome": "succeeded",
+  "time": {
+   "created": 1790479893010,
+   "updated": 1790479893261,
+   "idle": 1790479894016
+  },
+  "title": "Parity session title",
+  "location": {
+   "directory": "/work/proj"
+  }
+ },
+ "messages": [
+  {
+   "id": "msg_0e0eb02300010Ie6K3lQAqUici",
+   "time": {
+    "created": 1790479893113
+   },
+   "text": "PARITY-1 create the notes file",
+   "type": "user"
+  },
+  {
+   "id": "msg_0e0eb029c001Gb432955hHZq2J",
+   "time": {
+    "created": 1790479893170,
+    "streamed": 1790479893305,
+    "completed": 1790479893443
+   },
+   "type": "assistant",
+   "agent": "build",
+   "model": {
+    "id": "mock-model",
+    "providerID": "mock"
+   },
+   "content": [
+    {
+     "type": "reasoning",
+     "text": "Look at the folder first.",
+     "state": {
+      "reasoningField": "reasoning_content"
+     },
+     "time": {
+      "created": 1790479893188,
+      "completed": 1790479893285
+     }
+    },
+    {
+     "type": "tool",
+     "id": "call_2_0",
+     "name": "shell",
+     "executed": false,
+     "state": {
+      "status": "completed",
+      "input": {
+       "command": "ls -a",
+       "description": "List files"
+      },
+      "content": [
+       {
+        "type": "text",
+        "text": ".\n..\n"
+       }
+      ],
+      "metadata": {
+       "status": "completed",
+       "truncated": false,
+       "exit": 0
+      }
+     },
+     "time": {
+      "created": 1790479893236,
+      "ran": 1790479893299,
+      "completed": 1790479893435
+     }
+    }
+   ],
+   "finish": "tool-calls",
+   "rawFinish": "tool_calls",
+   "cost": 0,
+   "tokens": {
+    "input": 202,
+    "output": 28,
+    "reasoning": 12,
+    "cache": {
+     "read": 1000,
+     "write": 0
+    }
+   }
+  },
+  {
+   "id": "msg_0e0eb03ef001V2TaGkKtwcn9ie",
+   "time": {
+    "created": 1790479893512,
+    "streamed": 1790479893638,
+    "completed": 1790479893655
+   },
+   "type": "assistant",
+   "agent": "build",
+   "model": {
+    "id": "mock-model",
+    "providerID": "mock"
+   },
+   "content": [
+    {
+     "type": "reasoning",
+     "text": "Write the notes file.",
+     "state": {
+      "reasoningField": "reasoning_content"
+     },
+     "time": {
+      "created": 1790479893528,
+      "completed": 1790479893619
+     }
+    },
+    {
+     "type": "tool",
+     "id": "call_3_0",
+     "name": "write",
+     "executed": false,
+     "state": {
+      "status": "completed",
+      "input": {
+       "path": "/work/proj/notes.md",
+       "content": "# Notes\nline one\n"
+      },
+      "content": [
+       {
+        "type": "text",
+        "text": "Created file successfully: notes.md"
+       }
+      ],
+      "metadata": {
+       "truncated": false
+      }
+     },
+     "time": {
+      "created": 1790479893566,
+      "ran": 1790479893633,
+      "completed": 1790479893648
+     }
+    }
+   ],
+   "finish": "tool-calls",
+   "rawFinish": "tool_calls",
+   "cost": 0,
+   "tokens": {
+    "input": 203,
+    "output": 28,
+    "reasoning": 12,
+    "cache": {
+     "read": 1000,
+     "write": 0
+    }
+   }
+  },
+  {
+   "id": "msg_0e0eb04b0001KSgr6P55Kg6N8y",
+   "time": {
+    "created": 1790479893699,
+    "streamed": 1790479893807,
+    "completed": 1790479893821
+   },
+   "type": "assistant",
+   "agent": "build",
+   "model": {
+    "id": "mock-model",
+    "providerID": "mock"
+   },
+   "content": [
+    {
+     "type": "reasoning",
+     "text": "Append a line.",
+     "state": {
+      "reasoningField": "reasoning_content"
+     },
+     "time": {
+      "created": 1790479893709,
+      "completed": 1790479893791
+     }
+    },
+    {
+     "type": "tool",
+     "id": "call_4_0",
+     "name": "edit",
+     "executed": false,
+     "state": {
+      "status": "completed",
+      "input": {
+       "path": "/work/proj/notes.md",
+       "oldString": "line one",
+       "newString": "line one\nline two"
+      },
+      "content": [
+       {
+        "type": "text",
+        "text": "Edited notes.md (1 replacement)"
+       }
+      ],
+      "metadata": {
+       "files": [
+        {
+         "file": "notes.md",
+         "patch": "Index: notes.md\n===================================================================\n--- notes.md\n+++ notes.md\n@@ -1,2 +1,3 @@\n # Notes\n line one\n+line two\n",
+         "status": "modified",
+         "additions": 1,
+         "deletions": 0
+        }
+       ],
+       "truncated": false
+      }
+     },
+     "time": {
+      "created": 1790479893739,
+      "ran": 1790479893802,
+      "completed": 1790479893817
+     }
+    }
+   ],
+   "finish": "tool-calls",
+   "rawFinish": "tool_calls",
+   "cost": 0,
+   "tokens": {
+    "input": 204,
+    "output": 28,
+    "reasoning": 12,
+    "cache": {
+     "read": 1000,
+     "write": 0
+    }
+   }
+  },
+  {
+   "id": "msg_0e0eb054d001DInzE54o6PPbWT",
+   "time": {
+    "created": 1790479893856,
+    "streamed": 1790479894005,
+    "completed": 1790479894009
+   },
+   "type": "assistant",
+   "agent": "build",
+   "model": {
+    "id": "mock-model",
+    "providerID": "mock"
+   },
+   "content": [
+    {
+     "type": "reasoning",
+     "text": "Done; report.",
+     "state": {
+      "reasoningField": "reasoning_content"
+     },
+     "time": {
+      "created": 1790479893872,
+      "completed": 1790479893991
+     }
+    },
+    {
+     "type": "text",
+     "text": "Created notes.md with two lines."
+    }
+   ],
+   "finish": "stop",
+   "rawFinish": "stop",
+   "cost": 0,
+   "tokens": {
+    "input": 205,
+    "output": 28,
+    "reasoning": 12,
+    "cache": {
+     "read": 1000,
+     "write": 0
+    }
+   }
+  },
+  {
+   "id": "msg_0e0eb0600001Z6P4VHgDiDmR03",
+   "time": {
+    "created": 1790479894016
+   },
+   "type": "idle",
+   "outcome": "succeeded"
+  }
+ ],
+ "children": []
+}

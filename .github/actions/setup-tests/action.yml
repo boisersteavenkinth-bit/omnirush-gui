@@ -15,12 +15,9 @@ runs:
 
     - name: Install OpenCode CLI
       shell: bash
-      env:
-        GITHUB_TOKEN: ${{ github.token }}
       run: |
         set -euo pipefail
 
-        repo="${OPENCODE_GITHUB_REPO:-anomalyco/opencode}"
         version="$(node -e "const fs=require('fs'); const parsed=JSON.parse(fs.readFileSync('constants.json','utf8')); process.stdout.write(String(parsed.opencodeVersion||'').trim().replace(/^v/,''));")"
         version="$(echo "$version" | tr -d '\r\n' | sed 's/^v//')"
 
@@ -29,20 +26,22 @@ runs:
           exit 1
         fi
 
+        # The 2.x engine is published per platform on npm (@opencode/cli-<platform>),
+        # not as GitHub release assets.
         arch="$(uname -m)"
         case "${RUNNER_OS}" in
           Linux)
             if [ "$arch" = "aarch64" ] || [ "$arch" = "arm64" ]; then
-              opencode_asset="opencode-linux-arm64.tar.gz"
+              opencode_pkg="cli-linux-arm64"
             else
-              opencode_asset="opencode-linux-x64-baseline.tar.gz"
+              opencode_pkg="cli-linux-x64-baseline"
             fi
             ;;
           macOS)
             if [ "$arch" = "arm64" ]; then
-              opencode_asset="opencode-darwin-arm64.zip"
+              opencode_pkg="cli-darwin-arm64"
             else
-              opencode_asset="opencode-darwin-x64-baseline.zip"
+              opencode_pkg="cli-darwin-x64-baseline"
             fi
             ;;
           *)
@@ -51,32 +50,27 @@ runs:
             ;;
         esac
 
-        url="https://github.com/${repo}/releases/download/v${version}/${opencode_asset}"
+        registry="${OPENCODE_NPM_REGISTRY:-https://registry.npmjs.org}"
+        url="${registry}/@opencode/${opencode_pkg}/-/${opencode_pkg}-${version}.tgz"
         tmp_dir="$RUNNER_TEMP/opencode"
         extract_dir="$tmp_dir/extracted"
         rm -rf "$tmp_dir"
         mkdir -p "$extract_dir"
 
-        curl_headers=()
-        if [ -n "${GITHUB_TOKEN:-}" ]; then
-          curl_headers+=( -H "Authorization: Bearer ${GITHUB_TOKEN}" )
+        integrity="$(curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 "${registry}/@opencode/${opencode_pkg}/${version}" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>process.stdout.write(JSON.parse(s).dist.integrity))")"
+        curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 -o "$tmp_dir/opencode.tgz" "$url"
+        actual="sha512-$(openssl dgst -sha512 -binary "$tmp_dir/opencode.tgz" | base64 | tr -d '\n')"
+        if [ "$actual" != "$integrity" ]; then
+          echo "OpenCode package integrity mismatch: expected $integrity, got $actual" >&2
+          exit 1
         fi
+        tar -xzf "$tmp_dir/opencode.tgz" -C "$extract_dir"
 
-        curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 "${curl_headers[@]}" -o "$tmp_dir/$opencode_asset" "$url"
-
-        if [[ "$opencode_asset" == *.tar.gz ]]; then
-          tar -xzf "$tmp_dir/$opencode_asset" -C "$extract_dir"
+        if [ -f "$extract_dir/package/bin/opencode" ]; then
+          bin_path="$extract_dir/package/bin/opencode"
         else
-          unzip -q "$tmp_dir/$opencode_asset" -d "$extract_dir"
-        fi
-
-        if [ -f "$extract_dir/opencode" ]; then
-          bin_path="$extract_dir/opencode"
-        elif [ -f "$extract_dir/opencode.exe" ]; then
-          bin_path="$extract_dir/opencode.exe"
-        else
-          echo "OpenCode binary not found in archive" >&2
-          ls -la "$extract_dir"
+          echo "OpenCode binary not found in package" >&2
+          ls -laR "$extract_dir"
           exit 1
         fi
 

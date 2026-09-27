@@ -156,7 +156,11 @@ const findOpencodeBinary = (dir) => {
 const readBinaryVersion = (filePath) => {
   try {
     const result = spawnSync(filePath, ["--version"], { encoding: "utf8" });
-    if (result.status === 0 && result.stdout) return result.stdout.trim();
+    if (result.status === 0 && result.stdout) {
+      // 2.x prints "opencode v2.0.18"; 1.x printed the bare version.
+      const match = result.stdout.trim().match(/(\d+\.\d+\.\d+(?:[-+][\w.-]+)?)\s*$/);
+      return match ? match[1] : result.stdout.trim();
+    }
   } catch {
     // ignore
   }
@@ -220,20 +224,24 @@ if (!normalizedOpencodeVersion) {
   process.exit(1);
 }
 
-const opencodeAssetByTarget = {
-  "aarch64-apple-darwin": "opencode-darwin-arm64.zip",
-  "x86_64-apple-darwin": "opencode-darwin-x64-baseline.zip",
-  "x86_64-unknown-linux-gnu": "opencode-linux-x64-baseline.tar.gz",
-  "aarch64-unknown-linux-gnu": "opencode-linux-arm64.tar.gz",
-  "x86_64-pc-windows-msvc": "opencode-windows-x64-baseline.zip",
-  "aarch64-pc-windows-msvc": "opencode-windows-arm64.zip",
+// The 2.x engine ships no GitHub release assets: each platform binary is an
+// npm package (@opencode/cli-<platform>), a tarball holding package/bin/opencode.
+// Its sha512 is checked against the registry's dist.integrity before use.
+const opencodePackageByTarget = {
+  "aarch64-apple-darwin": "cli-darwin-arm64",
+  "x86_64-apple-darwin": "cli-darwin-x64-baseline",
+  "x86_64-unknown-linux-gnu": "cli-linux-x64-baseline",
+  "aarch64-unknown-linux-gnu": "cli-linux-arm64",
+  "x86_64-pc-windows-msvc": "cli-windows-x64-baseline",
+  "aarch64-pc-windows-msvc": "cli-windows-arm64",
 };
 
-const opencodeAsset =
-  opencodeAssetOverride ?? (resolvedTargetTriple ? opencodeAssetByTarget[resolvedTargetTriple] : null);
-
-const opencodeUrl = opencodeAsset
-  ? `https://github.com/${opencodeGithubRepo}/releases/download/v${normalizedOpencodeVersion}/${opencodeAsset}`
+const opencodeRegistry = (process.env.OPENCODE_NPM_REGISTRY?.trim() || "https://registry.npmjs.org").replace(/\/+$/, "");
+const opencodePackage =
+  opencodeAssetOverride ?? (resolvedTargetTriple ? opencodePackageByTarget[resolvedTargetTriple] : null);
+const opencodeAsset = opencodePackage ? `${opencodePackage}-${normalizedOpencodeVersion}.tgz` : null;
+const opencodeUrl = opencodePackage
+  ? `${opencodeRegistry}/@opencode/${opencodePackage}/-/${opencodeAsset}`
   : null;
 
 const shouldDownloadOpencode =
@@ -247,10 +255,20 @@ if (!shouldDownloadOpencode) {
   console.log(`OpenCode sidecar already present (${existingOpencodeVersion}).`);
 }
 
+/** The registry's dist.integrity of the platform package (sha512-<base64>). */
+const readOpencodeIntegrity = async () => {
+  const response = await fetch(`${opencodeRegistry}/@opencode/${opencodePackage}/${normalizedOpencodeVersion}`);
+  if (!response.ok) throw new Error(`npm registry answered ${response.status} for @opencode/${opencodePackage}@${normalizedOpencodeVersion}`);
+  const meta = await response.json();
+  const integrity = String(meta?.dist?.integrity ?? "");
+  if (!integrity.startsWith("sha512-")) throw new Error(`No sha512 integrity for @opencode/${opencodePackage}@${normalizedOpencodeVersion}`);
+  return integrity;
+};
+
 if (shouldDownloadOpencode) {
-  if (!opencodeAsset || !opencodeUrl) {
+  if (!opencodePackage || !opencodeUrl) {
     console.error(
-      `No OpenCode asset configured for target ${resolvedTargetTriple ?? "unknown"}. Set OPENCODE_ASSET to override.`
+      `No OpenCode package configured for target ${resolvedTargetTriple ?? "unknown"}. Set OPENCODE_ASSET to override.`
     );
     process.exit(1);
   }
@@ -260,52 +278,25 @@ if (shouldDownloadOpencode) {
   const stamp = Date.now();
   const archivePath = join(tmpdir(), `opencode-${stamp}-${opencodeAsset}`);
   const extractDir = join(tmpdir(), `opencode-${stamp}`);
-
   mkdirSync(extractDir, { recursive: true });
 
-  if (process.platform === "win32") {
-    const psQuote = (value) => `'${value.replace(/'/g, "''")}'`;
-    const psScript = [
-      "$ErrorActionPreference = 'Stop'",
-      `Invoke-WebRequest -Uri ${psQuote(opencodeUrl)} -OutFile ${psQuote(archivePath)}`,
-      `Expand-Archive -Path ${psQuote(archivePath)} -DestinationPath ${psQuote(extractDir)} -Force`,
-    ].join("; ");
+  try {
+    const integrity = await readOpencodeIntegrity();
+    const response = await fetch(opencodeUrl);
+    if (!response.ok) throw new Error(`Download of ${opencodeUrl} failed: ${response.status}`);
+    const archive = Buffer.from(await response.arrayBuffer());
+    const actual = `sha512-${createHash("sha512").update(archive).digest("base64")}`;
+    if (actual !== integrity) throw new Error(`Integrity mismatch for ${opencodeUrl}: expected ${integrity}, got ${actual}`);
+    writeFileSync(archivePath, archive);
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exit(1);
+  }
 
-    const result = spawnSync("powershell", ["-NoProfile", "-Command", psScript], {
-      stdio: "inherit",
-    });
-
-    if (result.status !== 0) {
-      process.exit(result.status ?? 1);
-    }
-  } else {
-    const downloadResult = spawnSync("curl", ["-fsSL", "-o", archivePath, opencodeUrl], {
-      stdio: "inherit",
-    });
-    if (downloadResult.status !== 0) {
-      process.exit(downloadResult.status ?? 1);
-    }
-
-    mkdirSync(extractDir, { recursive: true });
-
-    if (opencodeAsset.endsWith(".zip")) {
-      const unzipResult = spawnSync("unzip", ["-q", archivePath, "-d", extractDir], {
-        stdio: "inherit",
-      });
-      if (unzipResult.status !== 0) {
-        process.exit(unzipResult.status ?? 1);
-      }
-    } else if (opencodeAsset.endsWith(".tar.gz")) {
-      const tarResult = spawnSync("tar", ["-xzf", archivePath, "-C", extractDir], {
-        stdio: "inherit",
-      });
-      if (tarResult.status !== 0) {
-        process.exit(tarResult.status ?? 1);
-      }
-    } else {
-      console.error(`Unknown OpenCode archive type: ${opencodeAsset}`);
-      process.exit(1);
-    }
+  // bsdtar (Windows 10+ tar.exe) and GNU tar both read gzip tarballs.
+  const tarResult = spawnSync("tar", ["-xzf", archivePath, "-C", extractDir], { stdio: "inherit" });
+  if (tarResult.status !== 0) {
+    process.exit(tarResult.status ?? 1);
   }
 
   const extractedBinary = findOpencodeBinary(extractDir);
