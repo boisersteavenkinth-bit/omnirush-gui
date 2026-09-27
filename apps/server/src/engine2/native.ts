@@ -28,7 +28,7 @@
  *     says `sameAs:<where>` instead of repeating the bytes.
  */
 import type { V1Message } from "./shapes.js";
-import { isRecord, type JsonRecord } from "./util.js";
+import { isRecord, promptFileUrl, type JsonRecord } from "./util.js";
 
 /** Where a 2.x value goes when its name is taken on the 1.x record by another value. */
 export const NATIVE_COLLISIONS = "v2";
@@ -143,14 +143,25 @@ export function enrichPrompt(message: V1Message, native: JsonRecord): void {
   message.parts.forEach((part, index) => {
     if (part.type === "file" && typeof part.url === "string") known.set(part.url, `parts[${index}].url`);
   });
+  // Inline file bytes the file part already holds as its `data:` URL are not repeated.
+  const files = (Array.isArray(native.files) ? native.files : []).map((file) => {
+    if (!isRecord(file) || typeof file.data !== "string" || typeof file.uri === "string") return file;
+    const url = promptFileUrl(file);
+    const where = url ? known.get(url) : undefined;
+    return where ? { ...file, data: `sameAs:${where}` } : file;
+  });
+  if (Array.isArray(native.files)) native = { ...native, files };
   message.info = mergeNative({ ...message.info }, elideKnownDataUris(native, known) as JsonRecord, INFO_NESTED);
-  const files = Array.isArray(native.files) ? native.files : [];
   const fileParts = message.parts.filter((part) => part.type === "file");
   files.forEach((file, index) => {
     const part = fileParts[index];
     if (!part || !isRecord(file)) return;
-    const { uri, ...rest } = file;
-    mergeNative(part, rest);
+    // Inline bytes stay on the message's `files` (the part's `data:` URL holds them), and the
+    // engine's `source: {type: "inline"}` is not a 1.x file source (a path the UI shows as a
+    // document), so neither goes on the part.
+    const { uri, data: _data, source, ...rest } = file;
+    const v1Source = isRecord(source) && ["file", "symbol", "resource"].includes(String(source.type));
+    mergeNative(part, v1Source ? { ...rest, source } : rest);
     if (uri !== part.url) mergeNative(part, { uri });
   });
 }

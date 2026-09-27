@@ -25,7 +25,7 @@
  * (engine2/events.ts) agree.
  */
 import { withNativeFields } from "./native.js";
-import { arr, isRecord, num, omitUndefined, record, str, unwrap, type JsonRecord } from "./util.js";
+import { arr, isRecord, num, omitUndefined, promptFileUrl, record, str, unwrap, type JsonRecord } from "./util.js";
 
 export type V1Message = { info: JsonRecord; parts: JsonRecord[] };
 
@@ -418,7 +418,7 @@ function userFileParts(files: unknown[], ids: { messageID: string; sessionID: st
   const parts: JsonRecord[] = [];
   files.forEach((file, index) => {
     if (!isRecord(file)) return;
-    const url = str(file, "uri");
+    const url = promptFileUrl(file);
     if (!url) return;
     parts.push(omitUndefined({
       id: partId(ids.messageID, `f${index}`),
@@ -578,6 +578,46 @@ export function v1AssistantMessage(message: JsonRecord, ctx: MessageContext, par
   return { info, parts };
 }
 
+/** The separator the facade joins a prompt's 1.x text parts with into the one 2.x text. */
+const PROMPT_TEXT_SEPARATOR = "\n\n";
+
+/**
+ * A prompt's 1.x text parts. The facade records the layout of the text parts
+ * it joined (`metadata.omnirush.textParts`: length, synthetic flag, metadata
+ * per part); when the stored text still matches that layout it is split back,
+ * so a synthetic note stays its own synthetic part. Otherwise one text part.
+ */
+export function v1UserTextParts(
+  ids: { messageID: string; sessionID: string },
+  text: string,
+  layout: unknown,
+  synthetic: boolean,
+): JsonRecord[] {
+  const base = { sessionID: ids.sessionID, messageID: ids.messageID, type: "text" };
+  const single = [omitUndefined({ id: partId(ids.messageID, "u0"), ...base, text, synthetic: synthetic || undefined })];
+  if (!Array.isArray(layout) || layout.length === 0) return single;
+  const parts: JsonRecord[] = [];
+  let offset = 0;
+  for (const [index, entry] of layout.entries()) {
+    const length = isRecord(entry) ? num(entry, "length") : undefined;
+    if (!isRecord(entry) || length === undefined || !Number.isInteger(length) || length < 0) return single;
+    if (index > 0) {
+      if (text.slice(offset, offset + PROMPT_TEXT_SEPARATOR.length) !== PROMPT_TEXT_SEPARATOR) return single;
+      offset += PROMPT_TEXT_SEPARATOR.length;
+    }
+    if (offset + length > text.length) return single;
+    parts.push(omitUndefined({
+      id: partId(ids.messageID, `u${index}`),
+      ...base,
+      text: text.slice(offset, offset + length),
+      synthetic: synthetic || entry.synthetic === true || undefined,
+      metadata: isRecord(entry.metadata) ? entry.metadata : undefined,
+    }));
+    offset += length;
+  }
+  return offset === text.length ? parts : single;
+}
+
 function v1UserMessage(
   message: JsonRecord,
   ctx: MessageContext,
@@ -586,14 +626,14 @@ function v1UserMessage(
   synthetic: boolean,
   agent: string,
   model: ModelRef | undefined,
-  extra: { system?: string; tools?: JsonRecord } = {},
+  extra: { system?: string; tools?: JsonRecord; textParts?: unknown } = {},
 ): V1Message {
   const id = str(message, "id") ?? "";
   const created = num(record(message, "time"), "created") ?? 0;
   const ids = { messageID: id, sessionID: ctx.sessionID };
   const parts: JsonRecord[] = [];
   if (text || files.length === 0) {
-    parts.push(omitUndefined({ id: partId(id, "u0"), sessionID: ctx.sessionID, messageID: id, type: "text", text, synthetic: synthetic || undefined }));
+    parts.push(...v1UserTextParts(ids, text, extra.textParts, synthetic));
   }
   parts.push(...userFileParts(files, ids));
   const info = omitUndefined({
@@ -746,7 +786,7 @@ export function v1Messages(messages: unknown[], ctx: MessageContext): V1Message[
           sentModel && str(sentModel, "providerID") && str(sentModel, "modelID")
             ? { providerID: str(sentModel, "providerID")!, modelID: str(sentModel, "modelID")!, ...(str(sentModel, "variant") ? { variant: str(sentModel, "variant")! } : {}) }
             : replyModel ?? model,
-          { system: str(sent, "system"), tools: record(sent, "tools") },
+          { system: str(sent, "system"), tools: record(sent, "tools"), textParts: sent?.textParts },
         );
         lastUserId = String(mapped.info.id);
         emit(message, [mapped]);

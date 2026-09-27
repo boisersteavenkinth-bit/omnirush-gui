@@ -178,6 +178,28 @@ describe("1.x engine adapter over the 2.x engine", () => {
     expect(recorded.map((call) => call.path)).toEqual([`/api/session/${SESSION}/prompt`]);
   });
 
+  test("a synthetic attachment note reaches the model and its text-part layout is kept", async () => {
+    recorded.length = 0;
+    const note = "Attached files were copied into this worker workspace for tool access:\n- image.png: .opencode/omnirush/inbox/chat-attachments/s/1-image.png (file:///home/u/p/.opencode/omnirush/inbox/chat-attachments/s/1-image.png)";
+    const metadata = { omnirushAttachments: [] };
+    await post(`/session/${SESSION}/prompt_async`, {
+      model: { providerID: "omnirush", modelID: "gpt-6-astra" },
+      variant: "high",
+      agent: "omnirush",
+      system: "Extra system",
+      parts: [
+        { type: "text", text: note, synthetic: true, metadata },
+        { type: "text", text: "hi" },
+        { type: "file", mime: "image/png", filename: "image.png", url: "data:image/png;base64,AAAA" },
+      ],
+    });
+    const prompt = recorded.find((call) => call.path === `/api/session/${SESSION}/prompt`)!;
+    expect(prompt.body).toMatchObject({
+      text: `${note}\n\nhi`,
+      metadata: { omnirush: { textParts: [{ length: note.length, synthetic: true, metadata }, { length: 2 }] } },
+    });
+  });
+
   test("permissions list and reply in 1.x form", async () => {
     const list = (await (await get("/permission")).json()) as Array<Record<string, unknown>>;
     expect(list).toEqual([{ id: "per_1", sessionID: SESSION, permission: "bash", patterns: ["rm -rf build"], metadata: {}, always: ["rm -rf build"] }]);
