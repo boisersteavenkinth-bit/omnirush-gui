@@ -374,7 +374,7 @@ export async function connectorBranding(seed: Seed) {
       await new Promise((resolve) => setTimeout(resolve, 500));
     }
     throw new Error(`Desktop policy did not become ready (HTTP ${status})`);
-  }), { awaitPromise: true, timeoutMs: 75_000 });
+  }, []), { awaitPromise: true, timeoutMs: 75_000 });
   await configureProvider(seed, app, workspace.workspaceId, providerId, modelId, {
     provider: { [providerId]: {
       npm: "@ai-sdk/openai-compatible", name: "Connector display model",
