@@ -13,9 +13,9 @@ import { manifestOf, openArchive } from "./session-archive/test-helpers.js";
 import type { ServerConfig } from "./types.js";
 
 /**
- * Server-level collector behaviour: every session on every provider is
+ * Server-level session uploader behaviour: every session on every provider is
  * captured the same way (start / trace / end, prompt and turn triggers,
- * subagents), the sign-in gate refuses uncollected local sessions, and the
+ * subagents), the sign-in gate refuses uncaptured local sessions, and the
  * browser, attachment and artifact events are redacted and capped.
  */
 
@@ -50,7 +50,7 @@ afterEach(async () => {
 const previousDataDir = process.env.OMNIRUSH_DATA_DIR;
 let dataDir = "";
 beforeAll(async () => {
-  dataDir = await mkdtemp(join(tmpdir(), "omnirush-collector-server-data-"));
+  dataDir = await mkdtemp(join(tmpdir(), "omnirush-upload-server-data-"));
   process.env.OMNIRUSH_DATA_DIR = dataDir;
 });
 afterAll(async () => {
@@ -66,7 +66,7 @@ async function git(root: string, ...args: string[]): Promise<void> {
 }
 
 async function createWorkspace(): Promise<{ root: string; stateDir: string }> {
-  const base = await mkdtemp(join(tmpdir(), "omnirush-collector-server-"));
+  const base = await mkdtemp(join(tmpdir(), "omnirush-upload-server-"));
   cleanups.push(() => rm(base, { recursive: true, force: true }));
   const root = join(base, "workspace");
   const stateDir = join(base, "state");
@@ -209,7 +209,7 @@ function startMockEngine(input: { provider: string; model: string; history?: Eng
 /**
  * A fake engine v2 daemon: the routes the v2 mount touches before admitting a
  * prompt (session ownership, MCP and skill catalogs, the managed instruction
- * entry) plus the prompt, activity and context routes the collector observes.
+ * entry) plus the prompt, activity and context routes the session uploader observes.
  */
 function startMockV2Engine(input: { provider: string; model: string }) {
   let turn = 0;
@@ -304,7 +304,7 @@ async function settledRun(base: string, runId: string): Promise<{ status: string
 }
 
 /**
- * The omnirush.ai collector endpoint, recording every decompressed envelope.
+ * The omnirush.ai session upload endpoint (/omnirush/collect), recording every decompressed envelope.
  * With `archive`, it also serves the project archive routes from that fake,
  * with the presigned S3 part URLs pointing back here.
  */
@@ -397,7 +397,7 @@ async function waitFor<T>(probe: () => T | undefined, timeoutMs = 20_000): Promi
     if (value !== undefined) return value;
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
-  throw new Error("timed out waiting for collector uploads");
+  throw new Error("timed out waiting for session uploads");
 }
 
 function traces(uploads: Upload[]): Envelope[] {
@@ -411,13 +411,13 @@ function events(envelope: Envelope | undefined): Array<{ type: string; data?: Re
 function setGateEnv(devMode: string | undefined, optional: string | undefined) {
   if (devMode === undefined) delete process.env.OMNIRUSH_DEV_MODE;
   else process.env.OMNIRUSH_DEV_MODE = devMode;
-  if (optional === undefined) delete process.env.OMNIRUSH_COLLECTION_OPTIONAL;
-  else process.env.OMNIRUSH_COLLECTION_OPTIONAL = optional;
+  if (optional === undefined) delete process.env.OMNIRUSH_SESSION_UPLOAD_OPTIONAL;
+  else process.env.OMNIRUSH_SESSION_UPLOAD_OPTIONAL = optional;
 }
 
 /** Restores the process environment after the test, whatever the test set. */
 function preserveGateEnv() {
-  const previous = { devMode: process.env.OMNIRUSH_DEV_MODE, optional: process.env.OMNIRUSH_COLLECTION_OPTIONAL };
+  const previous = { devMode: process.env.OMNIRUSH_DEV_MODE, optional: process.env.OMNIRUSH_SESSION_UPLOAD_OPTIONAL };
   cleanups.push(() => setGateEnv(previous.devMode, previous.optional));
 }
 
@@ -444,7 +444,7 @@ function shape(uploads: Upload[]) {
   }));
 }
 
-describe("workspace collector server integration", () => {
+describe("session uploader server integration", () => {
   test("captures an external-provider session exactly like an omnirush.ai session, subagents included", async () => {
     const anthropic = await runTurn({ provider: "anthropic", model: "claude-sonnet-4-5" });
     const omnirush = await runTurn({ provider: "omnirush", model: "gpt-5.6-sol" });
@@ -576,7 +576,7 @@ describe("workspace collector server integration", () => {
     expect(engine.prompts).toHaveLength(1);
   }, 30_000);
 
-  test("collects a dispatch sent through an encoded path exactly like a plain one, and refuses a malformed session id", async () => {
+  test("captures a dispatch sent through an encoded path exactly like a plain one, and refuses a malformed session id", async () => {
     const { root, stateDir } = await createWorkspace();
     const engine = startMockEngine({ provider: "anthropic", model: "claude-sonnet-4-5" });
     const gateway = startMockGateway();
@@ -600,7 +600,7 @@ describe("workspace collector server integration", () => {
     expect(events(trace).map((event) => event.type)).toContain("session.model");
 
     // A dispatch whose session identifier the engine cannot decode is never
-    // started uncollected: the route refuses it before it reaches the engine.
+    // started uncaptured: the route refuses it before it reaches the engine.
     const malformed = await send("session/ses%E0/prompt_async");
     expect(malformed.ok).toBe(false);
     expect(engine.prompts).toHaveLength(1);
@@ -610,7 +610,7 @@ describe("workspace collector server integration", () => {
 
   test("the proxy itself refuses a dispatch with a session identifier the engine cannot decode", async () => {
     // Even with the development bypass, a dispatch is either refused or
-    // collected: an identifier the engine would not read as the client meant
+    // captured: an identifier the engine would not read as the client meant
     // is rejected before the request is forwarded.
     preserveGateEnv();
     setGateEnv("1", "1");
@@ -647,9 +647,9 @@ describe("workspace collector server integration", () => {
     expect(response.status).toBe(204);
 
     // The browser tools report visits for the subagent that made them; the
-    // event lands on the root session the collector tracks.
+    // event lands on the root session the session uploader tracks.
     const pageText = `Contact jane@example.com ${"visible page text ".repeat(8_000)}`;
-    const report = await fetch(`${omnirush.base}/collector/events`, {
+    const report = await fetch(`${omnirush.base}/session-upload/events`, {
       method: "POST",
       headers: { Authorization: "Bearer owt_test_token", "content-type": "application/json" },
       body: JSON.stringify({
@@ -666,6 +666,7 @@ describe("workspace collector server integration", () => {
     });
     expect(response.status).toBe(204);
     expect(await report.json()).toEqual({ ok: true, recorded: 1 });
+    // The route's pre-2.2.2 path still answers (an unknown session records nothing).
     const unknown = await fetch(`${omnirush.base}/collector/events`, {
       method: "POST",
       headers: { Authorization: "Bearer owt_test_token", "content-type": "application/json" },
@@ -759,7 +760,7 @@ describe("collection gaps: the v2 mount and local workflow steps", () => {
     expect(v2.prompts).toHaveLength(1);
   }, 30_000);
 
-  test("collects a v2 prompt dispatch exactly like a v1 one: session start, prompt milestone, request/response trace and the settled turn", async () => {
+  test("captures a v2 prompt dispatch exactly like a v1 one: session start, prompt milestone, request/response trace and the settled turn", async () => {
     const { root, stateDir } = await createWorkspace();
     const engine = startMockEngine(provider);
     const v2 = startMockV2Engine(provider);
@@ -832,7 +833,7 @@ describe("collection gaps: the v2 mount and local workflow steps", () => {
     expect(engine.workflowPrompts).toEqual([{ model: { providerID: "anthropic", modelID: "claude-sonnet-4-5" }, parts: [{ type: "text", text: "Summarise the repository" }] }]);
   }, 30_000);
 
-  test("collects a workflow step exactly like a prompt sent from the app", async () => {
+  test("captures a workflow step exactly like a prompt sent from the app", async () => {
     const { root, stateDir } = await createWorkspace();
     const engine = startMockEngine(provider);
     const gateway = startMockGateway();

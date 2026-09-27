@@ -1,6 +1,6 @@
 /**
  * Everything the embedded server captures about sessions, under one owner:
- * the workspace collector, the project archive and the turn observers. The
+ * the session uploader, the project archive and the turn observers. The
  * server runs it on a worker thread (capture-worker.ts, driven through
  * capture-client.ts), so reading, hashing and scrubbing files, building JSON
  * and tar streams, compressing and sealing never hold the main event loop
@@ -8,31 +8,31 @@
  * same behaviour. Every call takes and returns plain data, so the same calls
  * cross the thread boundary unchanged.
  */
-import { collectPromptAttachments, promptBodyForTrace, v2PromptBodyForTrace } from "./collector-attachments.js";
+import { readPromptAttachments, promptBodyForTrace, v2PromptBodyForTrace } from "./session-upload-attachments.js";
 import {
   createSessionObservers,
   currentEngineTarget,
   engineReplaced,
-  observeCollectedSession,
+  observeUploadedSession,
   projectArchiveEngineReads,
   promptDispatched,
   type EngineReplacement,
   type EngineTarget,
   type SessionObservers,
-} from "./collector-observer.js";
+} from "./session-upload-observer.js";
 import type { CaptureStopOptions } from "./capture-protocol.js";
 import { SessionArchiver, type SessionArchiverOptions } from "./session-archive/index.js";
 import { ProjectArchiveLifecycle, type ArchiveLifecycleLog } from "./session-archive/lifecycle.js";
-import { WorkspaceCollector, type CollectorMetrics, type CollectorWebVisit } from "./workspace-collector.js";
+import { SessionUploader, type UploadMetrics, type UploadWebVisit } from "./session-uploader.js";
 
-export type { EngineReplacement, EngineTarget } from "./collector-observer.js";
+export type { EngineReplacement, EngineTarget } from "./session-upload-observer.js";
 
 export type CaptureLog = ArchiveLifecycleLog;
 
 /** Prompt bodies larger than this are not parsed for the trace (nor for attachments). */
 const MAX_TRACED_REQUEST_BYTES = 4 * 1024 * 1024;
 
-/** A collected engine request, as the "engine.request" trace event and the prompt's attachments are built from it. */
+/** A captured engine request, as the "engine.request" trace event and the prompt's attachments are built from it. */
 export type PromptRecord = {
   method: string;
   path: string;
@@ -51,12 +51,12 @@ export type PromptRecord = {
 };
 
 export type CaptureHostOptions = {
-  /** The collector state dir (the archive keeps its files under it too). */
+  /** The session uploader state dir (the archive keeps its files under it too). */
   stateDir: string;
   appVersion: string;
   engineVersion: string;
   log: CaptureLog;
-  collector: {
+  sessionUploader: {
     upload?: (sessionId: string, compressed: Uint8Array, signal?: AbortSignal) => Promise<Response>;
     refreshAccessToken?: () => Promise<string | null>;
     fetch?: (input: string, init?: RequestInit) => Promise<Response>;
@@ -76,7 +76,7 @@ export type CaptureHostOptions = {
 };
 
 export type CaptureDiagnostics = {
-  metrics: CollectorMetrics;
+  metrics: UploadMetrics;
   cache: { roots: number; entries: number };
 };
 
@@ -90,13 +90,13 @@ function requestPayload(body: Uint8Array | null): unknown {
 }
 
 export class CaptureHost {
-  readonly collector: WorkspaceCollector;
+  readonly sessionUploader: SessionUploader;
   readonly archive: ProjectArchiveLifecycle;
   private readonly observers: SessionObservers = createSessionObservers();
 
   constructor(options: CaptureHostOptions) {
-    this.collector = new WorkspaceCollector({
-      ...options.collector,
+    this.sessionUploader = new SessionUploader({
+      ...options.sessionUploader,
       stateDir: options.stateDir,
       appVersion: options.appVersion,
       engineVersion: options.engineVersion,
@@ -108,7 +108,7 @@ export class CaptureHost {
     const { enabled, excludedDirs, folderGate, baseIdleMs, baseMaxDeferMs, ...auth } = options.archive;
     this.archive = new ProjectArchiveLifecycle({
       archiver: new SessionArchiver({ stateDir: options.stateDir, excludedDirs, folderGate, log: options.log, ...auth }),
-      enabled: enabled && this.collector.enabled,
+      enabled: enabled && this.sessionUploader.enabled,
       log: options.log,
       ...(baseIdleMs !== undefined ? { baseIdleMs } : {}),
       ...(baseMaxDeferMs !== undefined ? { baseMaxDeferMs } : {}),
@@ -117,35 +117,35 @@ export class CaptureHost {
   }
 
   startSession(sessionId: string, workspaceId: string, root: string): void {
-    this.collector.startSession(sessionId, workspaceId, root);
+    this.sessionUploader.startSession(sessionId, workspaceId, root);
   }
 
   recordTrace(sessionId: string, type: string, data?: unknown): void {
-    this.collector.recordTrace(sessionId, type, data);
+    this.sessionUploader.recordTrace(sessionId, type, data);
   }
 
-  /** The "engine.request" event of a collected request and, for a prompt dispatch, one "attachment" event per attached file. */
+  /** The "engine.request" event of a captured request and, for a prompt dispatch, one "attachment" event per attached file. */
   recordPrompt(sessionId: string, prompt: PromptRecord): void {
     // The turn this prompt follows takes its end snapshot first, ahead of this prompt's own.
-    if (prompt.dispatchedAt !== undefined) promptDispatched(this.observers, this.collector, sessionId, prompt.dispatchedAt);
+    if (prompt.dispatchedAt !== undefined) promptDispatched(this.observers, this.sessionUploader, sessionId, prompt.dispatchedAt);
     const payload = requestPayload(prompt.body);
-    this.collector.recordTrace(sessionId, "engine.request", {
+    this.sessionUploader.recordTrace(sessionId, "engine.request", {
       method: prompt.method,
       path: prompt.path,
       body: prompt.engine === "v2" ? v2PromptBodyForTrace(payload) : promptBodyForTrace(payload),
     });
     if (!prompt.attachments) return;
-    void collectPromptAttachments(payload, prompt.root).then((attachments) => {
-      for (const attachment of attachments) this.collector.recordAttachment(sessionId, attachment);
+    void readPromptAttachments(payload, prompt.root).then((attachments) => {
+      for (const attachment of attachments) this.sessionUploader.recordAttachment(sessionId, attachment);
     }).catch(() => undefined);
   }
 
   captureSnapshot(sessionId: string, trigger: "prompt" | "turn_completed"): void {
-    this.collector.captureSnapshot(sessionId, trigger);
+    this.sessionUploader.captureSnapshot(sessionId, trigger);
   }
 
-  recordWebVisit(sessionId: string, visit: CollectorWebVisit): boolean {
-    return this.collector.recordWebVisit(sessionId, visit);
+  recordWebVisit(sessionId: string, visit: UploadWebVisit): boolean {
+    return this.sessionUploader.recordWebVisit(sessionId, visit);
   }
 
   /** A prompt was dispatched: the project archive's session start (a base once per session, see lifecycle.ts). */
@@ -158,15 +158,15 @@ export class CaptureHost {
     engineReplaced(this.observers, closedBaseUrl, replacement);
   }
 
-  /** The engine accepted a collected request: follow the session until its turn settles. */
+  /** The engine accepted a captured request: follow the session until its turn settles. */
   observeSession(sessionId: string, target: EngineTarget): void {
-    void observeCollectedSession({ collector: this.collector, archive: this.archive, observers: this.observers, sessionId, target });
+    void observeUploadedSession({ sessionUploader: this.sessionUploader, archive: this.archive, observers: this.observers, sessionId, target });
   }
 
   /** The session was deleted in the engine. */
   sessionDeleted(sessionId: string): void {
-    this.collector.recordTrace(sessionId, "session.deleted");
-    this.collector.finishSession(sessionId);
+    this.sessionUploader.recordTrace(sessionId, "session.deleted");
+    this.sessionUploader.finishSession(sessionId);
     this.archive.sessionEnded(sessionId);
     this.observers.lastMessageIds.delete(sessionId);
   }
@@ -174,7 +174,7 @@ export class CaptureHost {
   /** The account is gone: queued archives and spooled uploads are deleted, nothing more is archived. */
   async signOut(): Promise<void> {
     await this.archive.signOut();
-    await this.collector.clearSpool().catch(() => undefined);
+    await this.sessionUploader.clearSpool().catch(() => undefined);
   }
 
   /**
@@ -185,17 +185,17 @@ export class CaptureHost {
   async stop(options: CaptureStopOptions = { archiveFinals: true }): Promise<void> {
     const archiveStopped = this.archive.stop({ finals: options.archiveFinals });
     this.observers.controller.abort();
-    await this.collector.stop().catch(() => undefined);
+    await this.sessionUploader.stop().catch(() => undefined);
     await archiveStopped;
   }
 
   /** Resolves once every queued capture, upload and archive step has settled (tests, profiling). */
   async idle(): Promise<void> {
-    await this.collector.idleAll();
+    await this.sessionUploader.idleAll();
     await this.archive.settled();
   }
 
   diagnostics(): CaptureDiagnostics {
-    return { metrics: { ...this.collector.metrics }, cache: this.collector.cacheStatus() };
+    return { metrics: { ...this.sessionUploader.metrics }, cache: this.sessionUploader.cacheStatus() };
   }
 }

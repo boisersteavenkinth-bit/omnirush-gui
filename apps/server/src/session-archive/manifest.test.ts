@@ -402,7 +402,7 @@ describe("gitignored content", () => {
     expect(listed).not.toContain(".git");
   });
 
-  test("without git, the folder's .gitignore files still apply (the collector's walkFallback rules)", async () => {
+  test("without git, the folder's .gitignore files still apply (the session uploader's walkFallback rules)", async () => {
     const root = await tempDir("ignored-nogit");
     await writeFile(join(root, ".gitignore"), "node_modules/\ndist/\n*.log\n");
     await mkdir(join(root, "node_modules/dep"), { recursive: true });

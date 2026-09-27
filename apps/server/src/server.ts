@@ -189,9 +189,9 @@ import { findManagedEngineWorkspace } from "./workspaces.js";
 import { startThreadApprovalReplayer, type ThreadApprovalReplayer } from "./thread-approvals.js";
 import { CloudProviderSync, parseCloudProviderDenSession } from "./cloud-provider-sync.js";
 import { createEngineV2Preview, type EngineV2Preview } from "./engine-v2-preview.js";
-import { workspaceCollectorEnabled } from "./workspace-collector.js";
+import { sessionUploaderEnabled } from "./session-uploader.js";
 import { startCaptureService, type CaptureService } from "./capture-client.js";
-import { buildOpencodeProxyUrl, engineTarget } from "./collector-observer.js";
+import { buildOpencodeProxyUrl, engineTarget } from "./session-upload-observer.js";
 import { OmniRushGatewayBroker } from "./omnirush-gateway-broker.js";
 import { startOmniRushModelCatalogSync } from "./omnirush-model-catalog-sync.js";
 import { OmniRushVoiceService, voiceProjectContext } from "./omnirush-voice.js";
@@ -224,8 +224,8 @@ const subagentGatewayFallbacks = new WeakMap<ServerConfig, Map<string, Array<Rec
 
 /**
  * Records a sub-agent model fallback: a "subagent.model_fallback" trace event
- * on the main session the collector tracks (a gateway fallback also makes the
- * collector record the model those sub-agent messages really ran on), and,
+ * on the main session the session uploader tracks (a gateway fallback also makes the
+ * session uploader record the model those sub-agent messages really ran on), and,
  * for a gateway fallback, the per-session note the swarm plugin reads back.
  */
 function recordSubagentModelFallback(config: ServerConfig, rootSessionId: string | null, data: Record<string, unknown>): void {
@@ -243,7 +243,7 @@ function recordSubagentModelFallback(config: ServerConfig, rootSessionId: string
     while (byChild.size > 512) byChild.delete(byChild.keys().next().value as string);
   }
   const capture = captureServicesByServer.get(config);
-  if (!rootSessionId || !capture?.collectorEnabled || !capture.hasSession(rootSessionId)) return;
+  if (!rootSessionId || !capture?.uploadEnabled || !capture.hasSession(rootSessionId)) return;
   capture.recordTrace(rootSessionId, SUBAGENT_MODEL_FALLBACK_TRACE, data);
 }
 
@@ -261,7 +261,11 @@ const AGENT_DIAGNOSTICS_MAX_REQUEST_BYTES = 256 * 1024;
 const AGENT_DIAGNOSTICS_DEFAULT_BODY_DEADLINE_MS = 2_000;
 const AGENT_DIAGNOSTICS_ERROR_FLUSH_MS = 25;
 const COMMAND_ADMISSION_CAPACITY = 10_000;
-const COLLECTOR_EVENTS_MAX_REQUEST_BYTES = 1024 * 1024;
+const UPLOAD_EVENTS_MAX_REQUEST_BYTES = 1024 * 1024;
+/** Where engine plugins report browser visits (opencode-plugins/omnirush-session-upload-client.ts). */
+const SESSION_UPLOAD_EVENTS_ROUTE = "/session-upload/events";
+/** The same route under its pre-2.2.2 name. */
+const LEGACY_SESSION_UPLOAD_EVENTS_ROUTE = "/collector/events";
 const COMMAND_ADMISSION_TTL_MS = 24 * 60 * 60 * 1_000;
 
 function rethrowMcpAppHostError(error: unknown): never {
@@ -810,58 +814,59 @@ function isPromptAsyncProxyRequest(method: string, proxyPath: string) {
 }
 
 // A prompt dispatch (v1 prompt_async, v2 prompt, or a slash command) is the
-// collector's "prompt" milestone: the workspace is captured as the turn begins.
-function isCollectorPromptDispatch(method: string, proxyPath: string): boolean {
+// session uploader's "prompt" milestone: the workspace is captured as the turn begins.
+function isUploadPromptDispatch(method: string, proxyPath: string): boolean {
   return method === "POST" && /^\/session\/[^/]+\/(?:prompt_async|prompt|command)$/.test(normalizeOpencodeProxyPath(proxyPath));
 }
 
 /**
  * Sign-in gate. A local workspace only runs sessions the omnirush.ai
- * collector can capture; without a connected account the engine prompt
- * dispatch is refused so no uncollected turn ever starts. The bypass exists
+ * session uploader can capture; without a connected account the engine prompt
+ * dispatch is refused so no uncaptured turn ever starts. The bypass exists
  * for development and tests, and requires both flags on purpose.
  */
 export const OMNIRUSH_ACCOUNT_REQUIRED_MESSAGE = "Sign in to omnirush.ai from Settings to start a session.";
 
-export function collectorGateBypassed(env: NodeJS.ProcessEnv = process.env): boolean {
-  return env.OMNIRUSH_DEV_MODE === "1" && env.OMNIRUSH_COLLECTION_OPTIONAL === "1";
+export function uploadGateBypassed(env: NodeJS.ProcessEnv = process.env): boolean {
+  // OMNIRUSH_COLLECTION_OPTIONAL is the pre-2.2.2 name of the second flag, still honoured.
+  return env.OMNIRUSH_DEV_MODE === "1" && (env.OMNIRUSH_SESSION_UPLOAD_OPTIONAL === "1" || env.OMNIRUSH_COLLECTION_OPTIONAL === "1");
 }
 
-function collectorAccountRequiredResponse(): Response {
+function uploadAccountRequiredResponse(): Response {
   return jsonResponse({ error: "omnirush_account_required", message: OMNIRUSH_ACCOUNT_REQUIRED_MESSAGE }, 403);
 }
 
 /**
  * Whether the gate refuses a prompt dispatch on this workspace: a local
- * workspace whose collector cannot capture the turn, without the development
+ * workspace whose session uploader cannot capture the turn, without the development
  * bypass. A remote workspace is gated by the server that owns it. Every
  * dispatch path (v1 mount, v2 mount, workflow steps) asks this one predicate.
  */
-function collectorDispatchRefused(config: ServerConfig, workspace: WorkspaceInfo | undefined): boolean {
+function uploadDispatchRefused(config: ServerConfig, workspace: WorkspaceInfo | undefined): boolean {
   if (!workspace || workspace.workspaceType === "remote") return false;
-  return !captureServicesByServer.get(config)?.collectorEnabled && !collectorGateBypassed();
+  return !captureServicesByServer.get(config)?.uploadEnabled && !uploadGateBypassed();
 }
 
 /** The gate as an ApiError, for dispatches that are not proxied HTTP requests. */
-export function assertCollectorDispatchAllowed(config: ServerConfig, workspace: WorkspaceInfo | undefined): void {
-  if (collectorDispatchRefused(config, workspace)) {
+export function assertUploadDispatchAllowed(config: ServerConfig, workspace: WorkspaceInfo | undefined): void {
+  if (uploadDispatchRefused(config, workspace)) {
     throw new ApiError(403, "omnirush_account_required", OMNIRUSH_ACCOUNT_REQUIRED_MESSAGE);
   }
 }
 
 // The v2 daemon's dispatch routes, matched on the decoded path like the v1 classifier.
-function isCollectorV2PromptDispatch(method: string, routePath: string): boolean {
+function isUploadV2PromptDispatch(method: string, routePath: string): boolean {
   return method === "POST" && /^\/api\/session\/[^/]+\/(?:prompt|prompt_async|command|generate)$/.test(routePath.replace(/\/+$/, ""));
 }
 
 /**
  * Workflow steps are prompt dispatches like any other: they enter the same
- * engine proxy as the app's requests, so the gate, the collector's session
+ * engine proxy as the app's requests, so the gate, the session uploader's session
  * start, prompt snapshot, request/response trace and turn observer all apply.
  */
 export function createLocalWorkflowPromptDispatcher(config: ServerConfig): LocalWorkflowPromptDispatcher {
   return {
-    assertAllowed: (workspace) => assertCollectorDispatchAllowed(config, workspace),
+    assertAllowed: (workspace) => assertUploadDispatchAllowed(config, workspace),
     prompt: (workspace, sessionId, body, signal) => {
       const proxyPath = `/opencode/session/${encodeURIComponent(sessionId)}/prompt`;
       const url = new URL(`http://127.0.0.1${proxyPath}`);
@@ -876,15 +881,15 @@ export function createLocalWorkflowPromptDispatcher(config: ServerConfig): Local
   };
 }
 
-// The session a collected engine request belongs to, read from the decoded
+// The session a captured engine request belongs to, read from the decoded
 // route path exactly as the engine reads its `:id` parameter. Null when the
 // path is not a session request or its identifier is malformed.
-function collectorSessionId(proxyPath: string): string | null {
+function uploadSessionId(proxyPath: string): string | null {
   const match = normalizeOpencodeProxyPath(proxyPath).match(/^\/session\/([^/]+)\/(?:prompt_async|prompt|command|abort|interrupt)$/);
   return match?.[1] ? decodeEngineRouteParam(match[1]) : null;
 }
 
-function collectorDeletedSessionId(method: string, proxyPath: string): string | null {
+function uploadDeletedSessionId(method: string, proxyPath: string): string | null {
   if (method !== "DELETE") return null;
   const match = normalizeOpencodeProxyPath(proxyPath).match(/^\/session\/([^/]+)$/);
   return match?.[1] ? decodeEngineRouteParam(match[1]) : null;
@@ -965,7 +970,7 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
       ? {
           ...gatewayCredentials,
           // Revoked or expired omnirush.ai credentials also discard spooled
-          // collector uploads and queued project archives: a signed-out
+          // session uploads and queued project archives: a signed-out
           // account leaves nothing queued.
           invalidate: async () => {
             await capture.signOut();
@@ -975,7 +980,7 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
       : undefined,
     engineToken: config.omnirushEngineToken,
     // A sub-agent request moved to the main model: new sub-agent prompts skip
-    // the refused model for a while, and the collector records the model the
+    // the refused model for a while, and the session uploader records the model the
     // sub-agent's messages really ran on.
     subagentModelRefused: (model) => subagentModelRefusals(config).isRefused(model),
     onSubagentFallback: (event) => {
@@ -1002,22 +1007,22 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
   const appVersion = config.appVersion?.trim()
     || process.env.OMNIRUSH_APP_VERSION?.trim()
     || SERVER_VERSION;
-  // The workspace collector, and whole-folder archives of git projects beside
+  // The session uploader, and whole-folder archives of git projects beside
   // it (session-archive/README.md), run on the capture worker: their file
   // work never holds this event loop (capture-client.ts).
   const archiveSettings = projectArchiveSettings({
     config,
     gatewayBroker,
-    collectorEnabled: workspaceCollectorEnabled({ upload: gatewayBroker.enabled }),
+    uploadEnabled: sessionUploaderEnabled({ upload: gatewayBroker.enabled }),
   });
   const capture = startCaptureService({
     stateDir: runtimeStorageDir(config),
     appVersion,
     engineVersion: OPENCODE_VERSION,
     log: (level, message, attributes) => logger.log(level, message, attributes),
-    collector: gatewayBroker.enabled
+    sessionUploader: gatewayBroker.enabled
       ? {
-          upload: (sessionId, compressed, signal) => gatewayBroker.collect(sessionId, compressed, signal),
+          upload: (sessionId, compressed, signal) => gatewayBroker.uploadSession(sessionId, compressed, signal),
           refreshAccessToken: () => gatewayBroker.refreshAccessToken(),
         }
       : {},
@@ -1496,9 +1501,9 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
 }
 
 /**
- * The engine v2 preview mount. A prompt dispatch here is gated and collected
+ * The engine v2 preview mount. A prompt dispatch here is gated and captured
  * exactly like one on the v1 mount: refused without a connected account
- * (unless both development flags are set), otherwise the collector starts the
+ * (unless both development flags are set), otherwise the session uploader starts the
  * session, captures the prompt snapshot, traces the request and response and
  * observes the turn until it settles. Exported for the mount's tests.
  */
@@ -1517,7 +1522,7 @@ export async function proxyOpencodeV2Request(input: {
   const withoutPrefix = input.proxyPath.slice("/opencode2".length);
   const forwardedPath = withoutPrefix || "/";
   // Classify on the path as the daemon's router matches it (see engine-route-path),
-  // so an encoded spelling of a dispatch route cannot skip the gate or the collector.
+  // so an encoded spelling of a dispatch route cannot skip the gate or the session uploader.
   const routePath = decodeEngineRoutePath(forwardedPath);
   // The private-route checks match the fully decoded spelling as before; a
   // malformed escape (which the daemon leaves in place) falls back to the
@@ -1534,17 +1539,17 @@ export async function proxyOpencodeV2Request(input: {
   }
   const sessionMatch = routePath.match(/^\/api\/session\/([^/]+)(?:\/|$)/);
   const sessionId = sessionMatch?.[1] ? decodeEngineRouteParam(sessionMatch[1]) : null;
-  const promptDispatch = isCollectorV2PromptDispatch(method, routePath);
+  const promptDispatch = isUploadV2PromptDispatch(method, routePath);
   const collectible = input.workspace.workspaceType !== "remote";
   if (promptDispatch && collectible) {
-    if (collectorDispatchRefused(input.config, input.workspace)) {
+    if (uploadDispatchRefused(input.config, input.workspace)) {
       // Drain the unread body so the client's keep-alive connection stays usable.
       await input.request.arrayBuffer().catch(() => undefined);
-      return collectorAccountRequiredResponse();
+      return uploadAccountRequiredResponse();
     }
     if (sessionId === null) {
-      // A dispatch is either refused or collected: a session identifier the
-      // daemon cannot decode would start a turn the collector cannot attribute.
+      // A dispatch is either refused or captured: a session identifier the
+      // daemon cannot decode would start a turn the session uploader cannot attribute.
       await input.request.arrayBuffer().catch(() => undefined);
       return jsonResponse({ error: "invalid_session_id", message: "The session identifier is not valid." }, 400);
     }
@@ -1651,23 +1656,23 @@ export async function proxyOpencodeV2Request(input: {
   // its first dispatch, the prompt milestone is snapshotted, the request and
   // response are traced and the turn is observed until it settles.
   const capture = collectible ? captureServicesByServer.get(input.config) : undefined;
-  const collectedSessionId = capture?.collectorEnabled && promptDispatch && sessionId ? sessionId : null;
-  const deletedCollectedSessionId = capture?.collectorEnabled && method === "DELETE" && sessionId && /^\/api\/session\/[^/]+$/.test(routePath)
+  const uploadedSessionId = capture?.uploadEnabled && promptDispatch && sessionId ? sessionId : null;
+  const deletedUploadedSessionId = capture?.uploadEnabled && method === "DELETE" && sessionId && /^\/api\/session\/[^/]+$/.test(routePath)
     ? sessionId
     : null;
-  const engine = capture && collectedSessionId ? engineTarget(input.connection.url, headers, target.search, "v2") : null;
-  if (capture && collectedSessionId && engine) {
-    capture.startSession(collectedSessionId, input.workspace.id, input.workspace.path);
-    capture.recordPrompt(collectedSessionId, { method, path: routePath, body: requestBody, engine: "v2", root: input.workspace.path, attachments: true, dispatchedAt: Date.now() });
-    capture.captureSnapshot(collectedSessionId, "prompt");
-    capture.archiveSessionStarted(collectedSessionId, input.workspace.path, engine);
+  const engine = capture && uploadedSessionId ? engineTarget(input.connection.url, headers, target.search, "v2") : null;
+  if (capture && uploadedSessionId && engine) {
+    capture.startSession(uploadedSessionId, input.workspace.id, input.workspace.path);
+    capture.recordPrompt(uploadedSessionId, { method, path: routePath, body: requestBody, engine: "v2", root: input.workspace.path, attachments: true, dispatchedAt: Date.now() });
+    capture.captureSnapshot(uploadedSessionId, "prompt");
+    capture.archiveSessionStarted(uploadedSessionId, input.workspace.path, engine);
   }
   const response = await loopbackFetch(target.toString(), { method, headers, body, signal: input.recoverySignal });
-  if (capture && collectedSessionId && engine) {
-    capture.recordTrace(collectedSessionId, "engine.response", { method, path: routePath, status: response.status });
-    if (response.ok) capture.observeSession(collectedSessionId, engine);
+  if (capture && uploadedSessionId && engine) {
+    capture.recordTrace(uploadedSessionId, "engine.response", { method, path: routePath, status: response.status });
+    if (response.ok) capture.observeSession(uploadedSessionId, engine);
   }
-  if (capture && deletedCollectedSessionId && response.ok) capture.sessionDeleted(deletedCollectedSessionId);
+  if (capture && deletedUploadedSessionId && response.ok) capture.sessionDeleted(deletedUploadedSessionId);
   if (method === "GET" && /^\/api\/provider(?:\/|$)/.test(decodedPath) && response.ok) {
     // Provider.Info includes request settings/headers, which may contain the
     // mirrored server-owned key. Clients only need public catalog metadata.
@@ -1947,15 +1952,15 @@ export async function proxyOpencodeRequest(input: {
   if (method !== "GET" && method !== "HEAD") {
     ensureWritable(input.config);
   }
-  if (workspace && workspace.workspaceType !== "remote" && isCollectorPromptDispatch(method, proxyPath)) {
-    if (collectorDispatchRefused(input.config, workspace)) {
+  if (workspace && workspace.workspaceType !== "remote" && isUploadPromptDispatch(method, proxyPath)) {
+    if (uploadDispatchRefused(input.config, workspace)) {
       // Drain the unread body so the client's keep-alive connection stays usable.
       await input.request.arrayBuffer().catch(() => undefined);
-      return collectorAccountRequiredResponse();
+      return uploadAccountRequiredResponse();
     }
-    if (collectorSessionId(proxyPath) === null) {
-      // A dispatch is either refused or collected: a session identifier the
-      // engine cannot decode would start a turn the collector cannot attribute.
+    if (uploadSessionId(proxyPath) === null) {
+      // A dispatch is either refused or captured: a session identifier the
+      // engine cannot decode would start a turn the session uploader cannot attribute.
       await input.request.arrayBuffer().catch(() => undefined);
       return jsonResponse({ error: "invalid_session_id", message: "The session identifier is not valid." }, 400);
     }
@@ -1999,12 +2004,12 @@ export async function proxyOpencodeRequest(input: {
     ? undefined
     : await input.request.arrayBuffer().then((buf) => (buf.byteLength > 0 ? buf : undefined));
   const capture = workspace ? captureServicesByServer.get(input.config) : undefined;
-  const collectedSessionId = collectorSessionId(proxyPath);
-  const deletedCollectedSessionId = collectorDeletedSessionId(method, proxyPath);
-  if (capture?.collectorEnabled && collectedSessionId && workspace && workspace.workspaceType !== "remote") {
-    const promptDispatch = isCollectorPromptDispatch(method, proxyPath);
-    capture.startSession(collectedSessionId, workspace.id, workspace.path);
-    capture.recordPrompt(collectedSessionId, {
+  const uploadedSessionId = uploadSessionId(proxyPath);
+  const deletedUploadedSessionId = uploadDeletedSessionId(method, proxyPath);
+  if (capture?.uploadEnabled && uploadedSessionId && workspace && workspace.workspaceType !== "remote") {
+    const promptDispatch = isUploadPromptDispatch(method, proxyPath);
+    capture.startSession(uploadedSessionId, workspace.id, workspace.path);
+    capture.recordPrompt(uploadedSessionId, {
       method,
       path: normalizeOpencodeProxyPath(proxyPath),
       body,
@@ -2015,8 +2020,8 @@ export async function proxyOpencodeRequest(input: {
       ...(promptDispatch ? { dispatchedAt: Date.now() } : {}),
     });
     if (promptDispatch) {
-      capture.captureSnapshot(collectedSessionId, "prompt");
-      capture.archiveSessionStarted(collectedSessionId, workspace.path, engineTarget(baseUrl, headers, search));
+      capture.captureSnapshot(uploadedSessionId, "prompt");
+      capture.archiveSessionStarted(uploadedSessionId, workspace.path, engineTarget(baseUrl, headers, search));
     }
   }
   if (pool && method === "GET" && isEngineEventPath(proxyPath)) {
@@ -2098,18 +2103,18 @@ export async function proxyOpencodeRequest(input: {
       body,
     }).finally(() => release?.()).then((response) => {
       enginePoolForConfig(input.config)?.reportRequestSuccess(baseUrl);
-      if (capture?.collectorEnabled && collectedSessionId) {
-        capture.recordTrace(collectedSessionId, "engine.response", {
+      if (capture?.uploadEnabled && uploadedSessionId) {
+        capture.recordTrace(uploadedSessionId, "engine.response", {
           method,
           path: normalizeOpencodeProxyPath(proxyPath),
           status: response.status,
         });
-        if (workspace && response.ok) capture.observeSession(collectedSessionId, engineTarget(baseUrl, headers, search));
+        if (workspace && response.ok) capture.observeSession(uploadedSessionId, engineTarget(baseUrl, headers, search));
       }
     }).catch((error: unknown) => {
       if (workspace) enginePoolForConfig(input.config)?.reportRequestFailure(baseUrl, error, workspace);
-      if (capture?.collectorEnabled && collectedSessionId) {
-        capture.recordTrace(collectedSessionId, "engine.error", {
+      if (capture?.uploadEnabled && uploadedSessionId) {
+        capture.recordTrace(uploadedSessionId, "engine.error", {
           method,
           path: normalizeOpencodeProxyPath(proxyPath),
           error: error instanceof Error ? error.message : "unknown",
@@ -2169,36 +2174,36 @@ export async function proxyOpencodeRequest(input: {
     return sanitizeProxyResponse(response);
   };
 
-  const forwardAndCollect = async () => {
+  const forwardAndUpload = async () => {
     const response = await forward();
-    if (capture?.collectorEnabled && collectedSessionId) {
-      capture.recordTrace(collectedSessionId, "engine.response", {
+    if (capture?.uploadEnabled && uploadedSessionId) {
+      capture.recordTrace(uploadedSessionId, "engine.response", {
         method,
         path: normalizeOpencodeProxyPath(proxyPath),
         status: response.status,
       });
-      if (workspace && response.ok) capture.observeSession(collectedSessionId, engineTarget(served.baseUrl, served.headers, search));
+      if (workspace && response.ok) capture.observeSession(uploadedSessionId, engineTarget(served.baseUrl, served.headers, search));
     }
-    if (capture?.collectorEnabled && deletedCollectedSessionId && response.ok) capture.sessionDeleted(deletedCollectedSessionId);
+    if (capture?.uploadEnabled && deletedUploadedSessionId && response.ok) capture.sessionDeleted(deletedUploadedSessionId);
     return response;
   };
 
-  if (deletedCollectedSessionId && workspace && workspace.workspaceType !== "remote") {
+  if (deletedUploadedSessionId && workspace && workspace.workspaceType !== "remote") {
     await stopSessionTreeBeforeDelete(
       pool
         ? pool.connections().map((connection) => ({ baseUrl: connection.baseUrl, headers: headersForEngineConnection(headers, connection) }))
         : [{ baseUrl, headers }],
-      deletedCollectedSessionId,
+      deletedUploadedSessionId,
       directory,
     );
   }
   if (workspace && workspace.workspaceType !== "remote" && isPromptAsyncProxyRequest(method, proxyPath)) {
-    return withEngineDirectoryFence(input.config, workspace, forwardAndCollect);
+    return withEngineDirectoryFence(input.config, workspace, forwardAndUpload);
   }
   if (pool && workspace && workspace.workspaceType !== "remote" && isSessionListRequest(method, normalizeOpencodeProxyPath(proxyPath))) {
-    return serveLocalSessionList(input.config, workspace, search, forwardAndCollect());
+    return serveLocalSessionList(input.config, workspace, search, forwardAndUpload());
   }
-  return forwardAndCollect();
+  return forwardAndUpload();
 }
 
 const emptySessionDirectoriesByServer = new WeakMap<ServerConfig, EmptySessionDirectoryCache>();
@@ -3580,14 +3585,14 @@ function createRoutes(
   // Engine plugins (the browser tools) report what they saw for the owning
   // session. The evaluation token the managed-policy plugin already holds
   // authenticates the call; a client token works too.
-  addRoute(routes, "POST", "/collector/events", "policy", async (ctx) => {
+  const sessionUploadEvents = async (ctx: RequestContext) => {
     const declared = Number(ctx.request.headers.get("content-length") ?? "0");
-    if (Number.isFinite(declared) && declared > COLLECTOR_EVENTS_MAX_REQUEST_BYTES) {
-      throw new ApiError(413, "collector_events_too_large", "Collector event payload is too large");
+    if (Number.isFinite(declared) && declared > UPLOAD_EVENTS_MAX_REQUEST_BYTES) {
+      throw new ApiError(413, "session_upload_events_too_large", "Session upload event payload is too large");
     }
     const raw = await ctx.request.text();
-    if (raw.length > COLLECTOR_EVENTS_MAX_REQUEST_BYTES) {
-      throw new ApiError(413, "collector_events_too_large", "Collector event payload is too large");
+    if (raw.length > UPLOAD_EVENTS_MAX_REQUEST_BYTES) {
+      throw new ApiError(413, "session_upload_events_too_large", "Session upload event payload is too large");
     }
     let body: unknown;
     try {
@@ -3602,8 +3607,8 @@ function createRoutes(
       ? body.ancestry.filter((id): id is string => typeof id === "string" && id.length > 0).slice(0, 8)
       : [];
     const capture = captureServicesByServer.get(config);
-    if (!capture?.collectorEnabled) return jsonResponse({ ok: true, recorded: 0 });
-    // A subagent's tool call belongs to the root session the collector tracks.
+    if (!capture?.uploadEnabled) return jsonResponse({ ok: true, recorded: 0 });
+    // A subagent's tool call belongs to the root session the session uploader tracks.
     const target = [body.sessionId, ...ancestry].find((id) => capture.hasSession(id));
     if (!target) return jsonResponse({ ok: true, recorded: 0 });
     let recorded = 0;
@@ -3617,7 +3622,10 @@ function createRoutes(
       if (capture.recordWebVisit(target, visit)) recorded += 1;
     }
     return jsonResponse({ ok: true, recorded });
-  });
+  };
+  addRoute(routes, "POST", SESSION_UPLOAD_EVENTS_ROUTE, "policy", sessionUploadEvents);
+  // The route's pre-2.2.2 path, kept so an engine plugin built before the rename still reports.
+  addRoute(routes, "POST", LEGACY_SESSION_UPLOAD_EVENTS_ROUTE, "policy", sessionUploadEvents);
 
   // Sub-agent model and effort (omnirush-subagent-model.ts). The app reads
   // and writes the setting; the swarm engine plugin resolves every sub-agent

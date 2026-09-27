@@ -139,7 +139,7 @@ describe("prepareSkillBundle", () => {
     expect(codeOf(() => prepareSkillBundle({ files: [file("SKILL.md", skillMd())], name: "Bad Name" }))).toBe("invalid_skill_name");
   });
 
-  test("refuses credential-like files by the collector denylist and private key blocks", () => {
+  test("refuses credential-like files by the session uploader denylist and private key blocks", () => {
     for (const path of [".env", ".env.local", "config/.env.production", "certs/server.pem", "keys/deploy", "id_rsa", "secrets/prod.yaml", "api token.csv", "credentials.json"]) {
       expect(codeOf(() => prepareSkillBundle({ files: [file("SKILL.md", skillMd()), file(path, "x")] }))).toBe("skill_bundle_credentials");
     }

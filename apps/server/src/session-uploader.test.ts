@@ -8,35 +8,35 @@ import { promisify } from "node:util";
 import { zstdDecompressSync } from "node:zlib";
 
 import {
-  COLLECTOR_SCHEMA_VERSION,
-  MAX_COLLECTOR_ATTACHMENT_TEXT_BYTES,
-  MAX_COLLECTOR_DIFF_BYTES,
-  MAX_COLLECTOR_FILE_BYTES,
-  MAX_COLLECTOR_FILES,
-  MAX_COLLECTOR_TRACE_BYTES,
-  MAX_COLLECTOR_TRACE_EVENTS,
-  MAX_COLLECTOR_WEB_VISIT_TEXT_BYTES,
-  WorkspaceCollector,
+  UPLOAD_SCHEMA_VERSION,
+  MAX_UPLOAD_ATTACHMENT_TEXT_BYTES,
+  MAX_UPLOAD_DIFF_BYTES,
+  MAX_UPLOAD_FILE_BYTES,
+  MAX_UPLOAD_FILES,
+  MAX_UPLOAD_TRACE_BYTES,
+  MAX_UPLOAD_TRACE_EVENTS,
+  MAX_UPLOAD_WEB_VISIT_TEXT_BYTES,
+  SessionUploader,
   mapBounded,
-  clampCollectorBytes,
-  clampCollectorText,
+  clampUploadBytes,
+  clampUploadText,
   collectGitBlock,
   diffHeaderPath,
-  filterCollectorDiff,
-  isCollectableWebUrl,
-  isCollectorPathDenied,
+  filterUploadDiff,
+  isUploadableWebUrl,
+  isUploadPathDenied,
   isPathLikeKey,
   isSecretAssignmentKey,
   isSecretAssignmentValue,
-  redactCollectorContent,
-  redactCollectorJson,
-  redactCollectorJsonText,
-  redactCollectorText,
+  redactUploadContent,
+  redactUploadJson,
+  redactUploadJsonText,
+  redactUploadText,
   redactModeForPath,
   stripRemoteUserinfo,
   workspaceRelativePath,
-} from "./workspace-collector.js";
-import { COLLECT_UPLOAD_BUDGET, collectUploadTimeoutMs, type CollectUploadBudget } from "./collect-upload-budget.js";
+} from "./session-uploader.js";
+import { SESSION_UPLOAD_BUDGET, sessionUploadTimeoutMs, type SessionUploadBudget } from "./session-upload-budget.js";
 
 const execFileAsync = promisify(execFile);
 const roots: string[] = [];
@@ -45,16 +45,16 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
-describe("workspace collector privacy", () => {
+describe("session uploader privacy", () => {
   test("denies repository internals and credential files", () => {
     for (const path of [".git/config", ".env.local", "node_modules/pkg/index.js", ".ssh/config", "keys/service.json", "cert.pem"]) {
-      expect(isCollectorPathDenied(path)).toBe(true);
+      expect(isUploadPathDenied(path)).toBe(true);
     }
-    expect(isCollectorPathDenied("src/app.ts")).toBe(false);
+    expect(isUploadPathDenied("src/app.ts")).toBe(false);
   });
 
   test("redacts private keys and provider-style secrets before upload", () => {
-    const result = redactCollectorText([
+    const result = redactUploadText([
       "AWS_ACCESS_KEY_ID=AKIA1234567890123456",
       "OPENAI_API_KEY=sk-1234567890abcdefghijklmnop",
       "-----BEGIN PRIVATE KEY-----\nprivate\n-----END PRIVATE KEY-----",
@@ -66,7 +66,7 @@ describe("workspace collector privacy", () => {
   });
 
   test("scrubs common personal identifiers before upload", () => {
-    const result = redactCollectorText("jane@example.com +1 (415) 555-0132 192.0.2.25");
+    const result = redactUploadText("jane@example.com +1 (415) 555-0132 192.0.2.25");
     expect(result.text).not.toContain("jane@example.com");
     expect(result.text).not.toContain("415");
     expect(result.text).not.toContain("192.0.2.25");
@@ -74,7 +74,7 @@ describe("workspace collector privacy", () => {
   });
 
   test("uploads correlated start, trace, and end artifacts without ignored or binary files", async () => {
-    const root = await mkdtemp(join(tmpdir(), "omnirush-collector-"));
+    const root = await mkdtemp(join(tmpdir(), "omnirush-upload-"));
     roots.push(root);
     await execFileAsync("git", ["init", "-q", root]);
     await writeFile(join(root, ".gitignore"), "ignored.txt\n");
@@ -87,7 +87,7 @@ describe("workspace collector privacy", () => {
     await writeFile(join(root, "nested", "ignored-nested.txt"), "do not upload\n");
 
     const uploads: Array<{ sessionId: string; envelope: Record<string, unknown> }> = [];
-    const collector = new WorkspaceCollector({
+    const sessionUploader = new SessionUploader({
       upload: async (sessionId, compressed) => {
         uploads.push({
           sessionId,
@@ -99,10 +99,10 @@ describe("workspace collector privacy", () => {
       fallbackScanMs: 60_000,
     });
     const sessionId = "session-test-1234";
-    collector.startSession(sessionId, "workspace-test", root);
-    collector.recordTrace(sessionId, "tool.call", { token: "sk-1234567890abcdefghijklmnop" });
-    collector.flushTrace(sessionId);
-    await collector.stop();
+    sessionUploader.startSession(sessionId, "workspace-test", root);
+    sessionUploader.recordTrace(sessionId, "tool.call", { token: "sk-1234567890abcdefghijklmnop" });
+    sessionUploader.flushTrace(sessionId);
+    await sessionUploader.stop();
 
     expect(uploads.map((upload) => upload.envelope.snapshot_type)).toEqual(["start", "trace", "end"]);
     expect(uploads.every((upload) => upload.sessionId === sessionId)).toBe(true);
@@ -116,14 +116,14 @@ describe("workspace collector privacy", () => {
   });
 
   test("does not drop trace events recorded while an upload is in flight", async () => {
-    const root = await mkdtemp(join(tmpdir(), "omnirush-collector-race-"));
+    const root = await mkdtemp(join(tmpdir(), "omnirush-upload-race-"));
     roots.push(root);
     let release!: () => void;
     const blocked = new Promise<void>((resolve) => { release = resolve; });
     let traceStarted!: () => void;
     const traceObserved = new Promise<void>((resolve) => { traceStarted = resolve; });
     const uploads: Array<Record<string, unknown>> = [];
-    const collector = new WorkspaceCollector({
+    const sessionUploader = new SessionUploader({
       upload: async (_sessionId, compressed) => {
         const envelope = JSON.parse(zstdDecompressSync(compressed).toString("utf8")) as Record<string, unknown>;
         uploads.push(envelope);
@@ -136,15 +136,15 @@ describe("workspace collector privacy", () => {
       fallbackScanMs: 60_000,
     });
     const sessionId = "session-race-1234";
-    collector.startSession(sessionId, "workspace-race", root);
+    sessionUploader.startSession(sessionId, "workspace-race", root);
     await new Promise((resolve) => setTimeout(resolve, 40));
-    collector.recordTrace(sessionId, "first.event");
-    collector.flushTrace(sessionId);
+    sessionUploader.recordTrace(sessionId, "first.event");
+    sessionUploader.flushTrace(sessionId);
     await traceObserved;
-    collector.recordTrace(sessionId, "second.event");
-    collector.flushTrace(sessionId);
+    sessionUploader.recordTrace(sessionId, "second.event");
+    sessionUploader.flushTrace(sessionId);
     release();
-    await collector.stop();
+    await sessionUploader.stop();
 
     const traceEvents = uploads
       .filter((item) => item.snapshot_type === "trace")
@@ -154,10 +154,10 @@ describe("workspace collector privacy", () => {
   });
 
   test("keeps oversized traces valid JSON and marks dropped events", async () => {
-    const root = await mkdtemp(join(tmpdir(), "omnirush-collector-truncate-"));
+    const root = await mkdtemp(join(tmpdir(), "omnirush-upload-truncate-"));
     roots.push(root);
     const uploads: Array<Record<string, unknown>> = [];
-    const collector = new WorkspaceCollector({
+    const sessionUploader = new SessionUploader({
       upload: async (_sessionId, compressed) => {
         uploads.push(JSON.parse(zstdDecompressSync(compressed).toString("utf8")) as Record<string, unknown>);
         return Response.json({ ok: true }, { status: 201 });
@@ -165,10 +165,10 @@ describe("workspace collector privacy", () => {
       fallbackScanMs: 60_000,
     });
     const sessionId = "session-truncate-1234";
-    collector.startSession(sessionId, "workspace-truncate", root);
-    collector.recordTrace(sessionId, "huge.event", { text: "x".repeat(MAX_COLLECTOR_TRACE_BYTES + 1024 * 1024) });
-    collector.flushTrace(sessionId);
-    await collector.stop();
+    sessionUploader.startSession(sessionId, "workspace-truncate", root);
+    sessionUploader.recordTrace(sessionId, "huge.event", { text: "x".repeat(MAX_UPLOAD_TRACE_BYTES + 1024 * 1024) });
+    sessionUploader.flushTrace(sessionId);
+    await sessionUploader.stop();
 
     const trace = uploads.find((item) => item.snapshot_type === "trace");
     expect(trace).toBeDefined();
@@ -179,11 +179,11 @@ describe("workspace collector privacy", () => {
   });
 
   test("persists session segments and message checkpoints across a resume", async () => {
-    const root = await mkdtemp(join(tmpdir(), "omnirush-collector-resume-"));
-    const stateDir = await mkdtemp(join(tmpdir(), "omnirush-collector-state-"));
+    const root = await mkdtemp(join(tmpdir(), "omnirush-upload-resume-"));
+    const stateDir = await mkdtemp(join(tmpdir(), "omnirush-upload-state-"));
     roots.push(root, stateDir);
     const uploads: Array<Record<string, unknown>> = [];
-    const makeCollector = () => new WorkspaceCollector({
+    const makeUploader = () => new SessionUploader({
       stateDir,
       upload: async (_sessionId, compressed) => {
         uploads.push(JSON.parse(zstdDecompressSync(compressed).toString("utf8")) as Record<string, unknown>);
@@ -192,13 +192,13 @@ describe("workspace collector privacy", () => {
       fallbackScanMs: 60_000,
     });
     const sessionId = "session-resume-1234";
-    const first = makeCollector();
+    const first = makeUploader();
     first.startSession(sessionId, "workspace-resume", root);
     await new Promise((resolve) => setTimeout(resolve, 30));
     await first.setSessionCheckpoint(sessionId, "message-1");
     await first.stop();
 
-    const second = makeCollector();
+    const second = makeUploader();
     second.startSession(sessionId, "workspace-resume", root);
     await new Promise((resolve) => setTimeout(resolve, 30));
     expect(await second.sessionCheckpoint(sessionId)).toMatchObject({ resumed: true, segment: 2, lastMessageId: "message-1" });
@@ -214,10 +214,10 @@ describe("workspace collector privacy", () => {
   });
 
   test("captures changed files in a bounded journal before the next snapshot", async () => {
-    const root = await mkdtemp(join(tmpdir(), "omnirush-collector-changes-"));
+    const root = await mkdtemp(join(tmpdir(), "omnirush-upload-changes-"));
     roots.push(root);
     const uploads: Array<Record<string, unknown>> = [];
-    const collector = new WorkspaceCollector({
+    const sessionUploader = new SessionUploader({
       upload: async (_sessionId, compressed) => {
         uploads.push(JSON.parse(zstdDecompressSync(compressed).toString("utf8")) as Record<string, unknown>);
         return Response.json({ ok: true }, { status: 201 });
@@ -226,13 +226,13 @@ describe("workspace collector privacy", () => {
       fallbackScanMs: 60_000,
     });
     const sessionId = "session-changes-1234";
-    collector.startSession(sessionId, "workspace-changes", root);
-    await collector.idle(sessionId);
+    sessionUploader.startSession(sessionId, "workspace-changes", root);
+    await sessionUploader.idle(sessionId);
     await writeFile(join(root, "created.txt"), "contact jane@example.com");
-    collector.recordTrace(sessionId, "file.read", { path: "created.txt" });
-    collector.flushTrace(sessionId);
+    sessionUploader.recordTrace(sessionId, "file.read", { path: "created.txt" });
+    sessionUploader.flushTrace(sessionId);
     await new Promise((resolve) => setTimeout(resolve, 40));
-    await collector.stop();
+    await sessionUploader.stop();
 
     const change = uploads.find((item) => item.snapshot_type === "change");
     expect(change).toBeDefined();
@@ -243,12 +243,12 @@ describe("workspace collector privacy", () => {
   });
 
   test("records a privacy manifest and touched paths without uploading denied files", async () => {
-    const root = await mkdtemp(join(tmpdir(), "omnirush-collector-manifest-"));
+    const root = await mkdtemp(join(tmpdir(), "omnirush-upload-manifest-"));
     roots.push(root);
     await writeFile(join(root, "touched.ts"), "export const ok = true;");
     await writeFile(join(root, ".env.local"), "SECRET=do-not-upload");
     const uploads: Array<Record<string, unknown>> = [];
-    const collector = new WorkspaceCollector({
+    const sessionUploader = new SessionUploader({
       upload: async (_sessionId, compressed) => {
         uploads.push(JSON.parse(zstdDecompressSync(compressed).toString("utf8")) as Record<string, unknown>);
         return Response.json({ ok: true }, { status: 201 });
@@ -256,10 +256,10 @@ describe("workspace collector privacy", () => {
       fallbackScanMs: 60_000,
     });
     const sessionId = "session-manifest-1234";
-    collector.startSession(sessionId, "workspace-manifest", root);
-    collector.recordTrace(sessionId, "file.read", { path: "touched.ts" });
-    collector.flushTrace(sessionId);
-    await collector.stop();
+    sessionUploader.startSession(sessionId, "workspace-manifest", root);
+    sessionUploader.recordTrace(sessionId, "file.read", { path: "touched.ts" });
+    sessionUploader.flushTrace(sessionId);
+    await sessionUploader.stop();
     const start = uploads.find((item) => item.snapshot_type === "start");
     const workspaceFile = (start?.files as Array<{ path: string; content: string }>).find((file) => file.path === "__omnirush__/workspace.json");
     expect(workspaceFile?.content).toContain('"capture_policy":"consented_workspace_session"');
@@ -294,24 +294,24 @@ describe("workspace collector privacy", () => {
     expect(workspaceRelativePath("/home/dev/ws", "/home/dev/ws/..notes.md", posix)).toBe("..notes.md");
     expect(workspaceRelativePath("/home/dev/ws", "src/app.ts", posix)).toBe("src/app.ts");
 
-    // Through the collector: a tool naming a file outside the root reads nothing of it.
-    const base = await mkdtemp(join(tmpdir(), "omnirush-collector-outside-"));
+    // Through the session uploader: a tool naming a file outside the root reads nothing of it.
+    const base = await mkdtemp(join(tmpdir(), "omnirush-upload-outside-"));
     roots.push(base);
     const root = join(base, "workspace");
     await mkdir(root);
     await writeFile(join(base, "outside.csv"), "OUTSIDE_FILE_MARKER");
     await writeFile(join(root, "inside.txt"), "inside");
     const { uploads, upload } = makeUploads();
-    const collector = new WorkspaceCollector({ upload, changeDebounceMs: 10, fallbackScanMs: 60_000 });
+    const sessionUploader = new SessionUploader({ upload, changeDebounceMs: 10, fallbackScanMs: 60_000 });
     const sessionId = "session-outside-1234";
-    collector.startSession(sessionId, "workspace-outside", root);
-    await collector.idle(sessionId);
-    collector.recordTrace(sessionId, "file.read", { path: join(base, "outside.csv") });
-    collector.recordTrace(sessionId, "file.read", { path: "../outside.csv" });
-    collector.recordTrace(sessionId, "file.read", { path: "inside.txt" });
-    collector.flushTrace(sessionId);
+    sessionUploader.startSession(sessionId, "workspace-outside", root);
+    await sessionUploader.idle(sessionId);
+    sessionUploader.recordTrace(sessionId, "file.read", { path: join(base, "outside.csv") });
+    sessionUploader.recordTrace(sessionId, "file.read", { path: "../outside.csv" });
+    sessionUploader.recordTrace(sessionId, "file.read", { path: "inside.txt" });
+    sessionUploader.flushTrace(sessionId);
     await new Promise((resolve) => setTimeout(resolve, 40));
-    await collector.stop();
+    await sessionUploader.stop();
     expect(uploads.at(-1)?.touched_paths).toEqual(["inside.txt"]);
     const files = uploads.flatMap((envelope) => envelope.files);
     expect(files.some((file) => file.content.includes("OUTSIDE_FILE_MARKER"))).toBe(false);
@@ -319,7 +319,7 @@ describe("workspace collector privacy", () => {
   });
 
   test("reports every path the session touches inside the root to the project archive, denied names too, and none outside", async () => {
-    const base = await mkdtemp(join(tmpdir(), "omnirush-collector-touched-"));
+    const base = await mkdtemp(join(tmpdir(), "omnirush-upload-touched-"));
     roots.push(base);
     const root = join(base, "workspace");
     await mkdir(join(root, "docs"), { recursive: true });
@@ -327,20 +327,20 @@ describe("workspace collector privacy", () => {
     await writeFile(join(root, "docs/brief.pdf"), Buffer.from([0x25, 0x50, 0x44, 0x46, 0, 1, 2]));
     const touched: Array<[string, string]> = [];
     const { upload } = makeUploads();
-    const collector = new WorkspaceCollector({ upload, changeDebounceMs: 10, fallbackScanMs: 60_000, onPathTouched: (sessionId, path) => touched.push([sessionId, path]) });
+    const sessionUploader = new SessionUploader({ upload, changeDebounceMs: 10, fallbackScanMs: 60_000, onPathTouched: (sessionId, path) => touched.push([sessionId, path]) });
     const sessionId = "session-touched-1234";
-    collector.startSession(sessionId, "workspace-touched", root);
-    await collector.idle(sessionId);
+    sessionUploader.startSession(sessionId, "workspace-touched", root);
+    await sessionUploader.idle(sessionId);
     // The agent reads a PDF (absolute path, in a tool input), names a file outside, and a credential file.
-    collector.recordTrace(sessionId, "tool.read", { input: { filePath: join(root, "docs/brief.pdf") } });
-    collector.recordTrace(sessionId, "tool.read", { path: join(base, "outside.csv") });
-    collector.recordTrace(sessionId, "tool.read", { path: "../outside.csv" });
-    collector.recordTrace(sessionId, "tool.read", { path: ".env" });
+    sessionUploader.recordTrace(sessionId, "tool.read", { input: { filePath: join(root, "docs/brief.pdf") } });
+    sessionUploader.recordTrace(sessionId, "tool.read", { path: join(base, "outside.csv") });
+    sessionUploader.recordTrace(sessionId, "tool.read", { path: "../outside.csv" });
+    sessionUploader.recordTrace(sessionId, "tool.read", { path: ".env" });
     // A command writes a binary: the watcher sees it land.
     await writeFile(join(root, "render.png"), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 0, 1]));
     const deadline = Date.now() + 10_000;
     while (!touched.some(([, path]) => path === "render.png") && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20));
-    await collector.stop();
+    await sessionUploader.stop();
     const paths = new Set(touched.map(([, path]) => path));
     expect(touched.every(([id]) => id === sessionId)).toBe(true);
     for (const path of ["docs/brief.pdf", ".env", "render.png"]) expect(paths.has(path)).toBe(true);
@@ -348,7 +348,7 @@ describe("workspace collector privacy", () => {
   });
 
   test("reports only what the session touches when its start snapshot was refused", async () => {
-    const root = await mkdtemp(join(tmpdir(), "omnirush-collector-touched-refused-"));
+    const root = await mkdtemp(join(tmpdir(), "omnirush-upload-touched-refused-"));
     roots.push(root);
     await mkdir(join(root, "private"));
     await writeFile(join(root, "private/ledger.csv"), "untouched\n");
@@ -364,17 +364,17 @@ describe("workspace collector privacy", () => {
       types.push(type);
       return type === "start" ? Response.json({ error: "bad_request" }, { status: 400 }) : Response.json({ ok: true }, { status: 201 });
     };
-    const collector = new WorkspaceCollector({ upload, changeDebounceMs: 10, fallbackScanMs: 60_000, onPathTouched: (_sessionId, path) => touched.push(path) });
+    const sessionUploader = new SessionUploader({ upload, changeDebounceMs: 10, fallbackScanMs: 60_000, onPathTouched: (_sessionId, path) => touched.push(path) });
     const sessionId = "session-touched-refused-1";
-    collector.startSession(sessionId, "workspace-touched-refused", root);
-    await collector.idle(sessionId);
-    collector.captureSnapshot(sessionId, "prompt");
+    sessionUploader.startSession(sessionId, "workspace-touched-refused", root);
+    await sessionUploader.idle(sessionId);
+    sessionUploader.captureSnapshot(sessionId, "prompt");
     await writeFile(join(root, "result.txt"), "the agent's output\n");
     const deadline = Date.now() + 10_000;
     while (!touched.includes("result.txt") && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 20));
-    collector.captureSnapshot(sessionId, "turn_completed");
-    await collector.idle(sessionId);
-    await collector.stop();
+    sessionUploader.captureSnapshot(sessionId, "turn_completed");
+    await sessionUploader.idle(sessionId);
+    await sessionUploader.stop();
     expect(types[0]).toBe("start");
     // Later captures scanned the whole tree with no accepted baseline.
     expect(types).toContain("end");
@@ -383,7 +383,7 @@ describe("workspace collector privacy", () => {
   });
 });
 
-// --- collector envelope v2 ---------------------------------------------------
+// --- session uploader envelope v2 ---------------------------------------------------
 
 type Envelope = Record<string, unknown> & {
   files: Array<{ path: string; content: string; sha256: string }>;
@@ -411,21 +411,21 @@ async function git(root: string, ...args: string[]): Promise<string> {
   return String(stdout).trim();
 }
 
-describe("workspace collector envelope v2", () => {
+describe("session uploader envelope v2", () => {
   test("uploads a v2 envelope with trigger, environment, manifest, hashed files and privacy fields", async () => {
-    const root = await mkdtemp(join(tmpdir(), "omnirush-collector-v2-"));
+    const root = await mkdtemp(join(tmpdir(), "omnirush-upload-v2-"));
     roots.push(root);
     await writeFile(join(root, "app.ts"), "export const answer = 42;\n");
     await mkdir(join(root, "nested"));
     await writeFile(join(root, "nested", "note.md"), "call me at +1 (415) 555-0132\n");
     await writeFile(join(root, ".env"), "TOKEN=nope\n");
     const { uploads, upload } = makeUploads();
-    const collector = new WorkspaceCollector({ upload, fallbackScanMs: 60_000, appVersion: "1.2.3", engineVersion: "9.9.9" });
+    const sessionUploader = new SessionUploader({ upload, fallbackScanMs: 60_000, appVersion: "1.2.3", engineVersion: "9.9.9" });
     const sessionId = "session-v2-envelope-1";
-    collector.startSession(sessionId, "workspace-v2", root);
-    collector.recordTrace(sessionId, "file.read", { path: "app.ts" });
-    collector.flushTrace(sessionId);
-    await collector.stop();
+    sessionUploader.startSession(sessionId, "workspace-v2", root);
+    sessionUploader.recordTrace(sessionId, "file.read", { path: "app.ts" });
+    sessionUploader.flushTrace(sessionId);
+    await sessionUploader.stop();
 
     expect(uploads.map((item) => [item.snapshot_type, item.trigger])).toEqual([
       ["start", "session_start"],
@@ -433,7 +433,7 @@ describe("workspace collector envelope v2", () => {
       ["end", "session_end"],
     ]);
     for (const envelope of uploads) {
-      expect(envelope.schema_version).toBe(COLLECTOR_SCHEMA_VERSION);
+      expect(envelope.schema_version).toBe(UPLOAD_SCHEMA_VERSION);
       expect(typeof envelope.captured_at).toBe("string");
       expect(Number.isNaN(Date.parse(envelope.captured_at as string))).toBe(false);
       expect(envelope.workspace.root_name).toBe(basename(root));
@@ -470,7 +470,7 @@ describe("workspace collector envelope v2", () => {
   });
 
   test("summarises a git repository without shipping internals or remote credentials", async () => {
-    const root = await mkdtemp(join(tmpdir(), "omnirush-collector-git-"));
+    const root = await mkdtemp(join(tmpdir(), "omnirush-upload-git-"));
     roots.push(root);
     await git(root, "init", "-q");
     await git(root, "remote", "add", "origin", "https://oauth2:ghp_secrettoken123456@github.com/acme/widgets.git");
@@ -490,10 +490,10 @@ describe("workspace collector envelope v2", () => {
     const branch = await git(root, "branch", "--show-current");
 
     const { uploads, upload } = makeUploads();
-    const collector = new WorkspaceCollector({ upload, fallbackScanMs: 60_000 });
+    const sessionUploader = new SessionUploader({ upload, fallbackScanMs: 60_000 });
     const sessionId = "session-v2-git-1";
-    collector.startSession(sessionId, "workspace-git", root);
-    await collector.stop();
+    sessionUploader.startSession(sessionId, "workspace-git", root);
+    await sessionUploader.stop();
 
     const start = uploads.find((item) => item.snapshot_type === "start")!;
     const gitBlock = start.workspace.git as {
@@ -533,7 +533,7 @@ describe("workspace collector envelope v2", () => {
   });
 
   test("caps the git diff and flags truncation", async () => {
-    const root = await mkdtemp(join(tmpdir(), "omnirush-collector-bigdiff-"));
+    const root = await mkdtemp(join(tmpdir(), "omnirush-upload-bigdiff-"));
     roots.push(root);
     await git(root, "init", "-q");
     await writeFile(join(root, "big.txt"), "seed\n");
@@ -544,18 +544,18 @@ describe("workspace collector envelope v2", () => {
     await writeFile(join(root, "big.txt"), `${lines.join("\n")}\n`);
 
     const { uploads, upload } = makeUploads();
-    const collector = new WorkspaceCollector({ upload, fallbackScanMs: 60_000 });
-    collector.startSession("session-v2-bigdiff-1", "workspace-bigdiff", root);
-    await collector.stop();
+    const sessionUploader = new SessionUploader({ upload, fallbackScanMs: 60_000 });
+    sessionUploader.startSession("session-v2-bigdiff-1", "workspace-bigdiff", root);
+    await sessionUploader.stop();
 
     const gitBlock = uploads[0]!.workspace.git as { diff: string; diff_truncated: boolean };
     expect(gitBlock.diff_truncated).toBe(true);
-    expect(Buffer.byteLength(gitBlock.diff)).toBeLessThanOrEqual(MAX_COLLECTOR_DIFF_BYTES);
+    expect(Buffer.byteLength(gitBlock.diff)).toBeLessThanOrEqual(MAX_UPLOAD_DIFF_BYTES);
     expect(gitBlock.diff).toContain("+line 0 ");
   });
 
   test("scopes the git block to a workspace nested inside a larger repository", async () => {
-    const repo = await mkdtemp(join(tmpdir(), "omnirush-collector-nested-"));
+    const repo = await mkdtemp(join(tmpdir(), "omnirush-upload-nested-"));
     roots.push(repo);
     await git(repo, "init", "-q");
     await mkdir(join(repo, "pkg-a"));
@@ -612,8 +612,8 @@ describe("workspace collector envelope v2", () => {
     }
   });
 
-  test("clamps git metadata to the collector's field limits after redaction", async () => {
-    const root = await mkdtemp(join(tmpdir(), "omnirush-collector-limits-"));
+  test("clamps git metadata to the session uploader's field limits after redaction", async () => {
+    const root = await mkdtemp(join(tmpdir(), "omnirush-upload-limits-"));
     roots.push(root);
     await git(root, "init", "-q");
     await git(root, "checkout", "-q", "-b", `feature/${Array.from({ length: 6 }, () => "x".repeat(100)).join("/")}`);
@@ -639,21 +639,21 @@ describe("workspace collector envelope v2", () => {
   });
 
   test("captures prompt and turn_completed snapshots only when the workspace changed", async () => {
-    const root = await mkdtemp(join(tmpdir(), "omnirush-collector-triggers-"));
+    const root = await mkdtemp(join(tmpdir(), "omnirush-upload-triggers-"));
     roots.push(root);
     await writeFile(join(root, "a.txt"), "alpha\n");
     await writeFile(join(root, "b.txt"), "beta\n");
     const { uploads, upload } = makeUploads();
-    const collector = new WorkspaceCollector({ upload, changeDebounceMs: 60_000, fallbackScanMs: 60_000 });
+    const sessionUploader = new SessionUploader({ upload, changeDebounceMs: 60_000, fallbackScanMs: 60_000 });
     const sessionId = "session-v2-triggers-1";
-    collector.startSession(sessionId, "workspace-triggers", root);
-    collector.captureSnapshot(sessionId, "prompt");
-    await collector.idle(sessionId);
+    sessionUploader.startSession(sessionId, "workspace-triggers", root);
+    sessionUploader.captureSnapshot(sessionId, "prompt");
+    await sessionUploader.idle(sessionId);
     expect(uploads.map((item) => item.snapshot_type)).toEqual(["start"]);
 
     await writeFile(join(root, "a.txt"), "alpha changed\n");
-    collector.captureSnapshot(sessionId, "turn_completed");
-    await collector.idle(sessionId);
+    sessionUploader.captureSnapshot(sessionId, "turn_completed");
+    await sessionUploader.idle(sessionId);
     expect(uploads.map((item) => [item.snapshot_type, item.trigger])).toEqual([["start", "session_start"], ["change", "turn_completed"]]);
     const change = uploads[1]!;
     const changedPaths = change.files.map((file) => file.path).filter((path) => !path.startsWith("__omnirush__/"));
@@ -663,10 +663,10 @@ describe("workspace collector envelope v2", () => {
     expect(change.manifest.find((entry) => entry.path === "a.txt")?.sha256).toBe(sha256("alpha changed\n"));
     expect(change.manifest.find((entry) => entry.path === "b.txt")?.sha256).toBe(sha256("beta\n"));
 
-    collector.captureSnapshot(sessionId, "prompt");
-    await collector.idle(sessionId);
-    collector.flushTrace(sessionId);
-    await collector.stop();
+    sessionUploader.captureSnapshot(sessionId, "prompt");
+    await sessionUploader.idle(sessionId);
+    sessionUploader.flushTrace(sessionId);
+    await sessionUploader.stop();
     const triggers = uploads
       .filter((item) => item.snapshot_type === "trace")
       .flatMap((item) => item.trace ?? [])
@@ -682,16 +682,16 @@ describe("workspace collector envelope v2", () => {
   });
 });
 
-describe("workspace collector durable retry", () => {
+describe("session uploader durable retry", () => {
   test("spools failed uploads to disk with a failure ledger and delivers them once the gateway recovers", async () => {
-    const root = await mkdtemp(join(tmpdir(), "omnirush-collector-spool-"));
-    const stateDir = await mkdtemp(join(tmpdir(), "omnirush-collector-spool-state-"));
+    const root = await mkdtemp(join(tmpdir(), "omnirush-upload-spool-"));
+    const stateDir = await mkdtemp(join(tmpdir(), "omnirush-upload-spool-state-"));
     roots.push(root, stateDir);
     await writeFile(join(root, "app.txt"), "hello\n");
     const uploads: Envelope[] = [];
     let healthy = false;
     const warnings: string[] = [];
-    const collector = new WorkspaceCollector({
+    const sessionUploader = new SessionUploader({
       stateDir,
       upload: async (_sessionId, compressed) => {
         if (!healthy) return Response.json({ error: "unavailable" }, { status: 503 });
@@ -704,13 +704,13 @@ describe("workspace collector durable retry", () => {
       retryBaseMs: 60_000,
     });
     const sessionId = "session-spool-1234";
-    collector.startSession(sessionId, "workspace-spool", root);
-    await collector.idle(sessionId);
+    sessionUploader.startSession(sessionId, "workspace-spool", root);
+    await sessionUploader.idle(sessionId);
 
     expect(uploads).toHaveLength(0);
-    expect(await collector.spoolStatus()).toMatchObject({ entries: 1 });
-    expect(warnings).toContain("OmniRush collection artifact spooled for retry");
-    const spoolDir = join(stateDir, "omnirush-collector-spool");
+    expect(await sessionUploader.spoolStatus()).toMatchObject({ entries: 1 });
+    expect(warnings).toContain("OmniRush session upload artifact spooled for retry");
+    const spoolDir = join(stateDir, "omnirush-upload-spool");
     const names = (await readdir(spoolDir)).sort();
     expect(names.some((name) => name.endsWith(".json"))).toBe(true);
     expect(names.some((name) => name.endsWith(".zst"))).toBe(true);
@@ -718,30 +718,30 @@ describe("workspace collector durable retry", () => {
       for (const name of names) expect((await stat(join(spoolDir, name))).mode & 0o777).toBe(0o600);
       expect((await stat(spoolDir)).mode & 0o777).toBe(0o700);
     }
-    const ledger = JSON.parse(await readFile(join(stateDir, "omnirush-collector-sessions.json"), "utf8")) as { sessions: Record<string, Record<string, unknown>> };
+    const ledger = JSON.parse(await readFile(join(stateDir, "omnirush-upload-sessions.json"), "utf8")) as { sessions: Record<string, Record<string, unknown>> };
     expect(ledger.sessions[sessionId]).toMatchObject({ failureCount: 1, nextSequence: 1 });
     expect(typeof ledger.sessions[sessionId]?.lastFailureAt).toBe("string");
-    expect(await collector.sessionDeliveryStatus(sessionId)).toMatchObject({ failureCount: 1, lastSuccessAt: null });
+    expect(await sessionUploader.sessionDeliveryStatus(sessionId)).toMatchObject({ failureCount: 1, lastSuccessAt: null });
 
     healthy = true;
-    expect(await collector.drainSpool()).toEqual({ delivered: 1, pending: 0 });
+    expect(await sessionUploader.drainSpool()).toEqual({ delivered: 1, pending: 0 });
     expect(uploads.map((item) => [item.snapshot_type, item.trigger, item.sequence])).toEqual([["start", "session_start", 1]]);
-    expect(await collector.spoolStatus()).toEqual({ entries: 0, bytes: 0 });
-    await collector.stop();
+    expect(await sessionUploader.spoolStatus()).toEqual({ entries: 0, bytes: 0 });
+    await sessionUploader.stop();
     expect(uploads.map((item) => [item.snapshot_type, item.sequence])).toEqual([["start", 1], ["end", 2]]);
-    expect(await collector.spoolStatus()).toEqual({ entries: 0, bytes: 0 });
-    const settled = JSON.parse(await readFile(join(stateDir, "omnirush-collector-sessions.json"), "utf8")) as { sessions: Record<string, Record<string, unknown>> };
+    expect(await sessionUploader.spoolStatus()).toEqual({ entries: 0, bytes: 0 });
+    const settled = JSON.parse(await readFile(join(stateDir, "omnirush-upload-sessions.json"), "utf8")) as { sessions: Record<string, Record<string, unknown>> };
     expect(typeof settled.sessions[sessionId]?.lastSuccessAt).toBe("string");
     expect(settled.sessions[sessionId]).toMatchObject({ failureCount: 1 });
   });
 
-  test("retries spooled uploads with backoff on the next collector start", async () => {
-    const root = await mkdtemp(join(tmpdir(), "omnirush-collector-respool-"));
-    const stateDir = await mkdtemp(join(tmpdir(), "omnirush-collector-respool-state-"));
+  test("retries spooled uploads with backoff on the next session uploader start", async () => {
+    const root = await mkdtemp(join(tmpdir(), "omnirush-upload-respool-"));
+    const stateDir = await mkdtemp(join(tmpdir(), "omnirush-upload-respool-state-"));
     roots.push(root, stateDir);
     await writeFile(join(root, "app.txt"), "hello\n");
     const sessionId = "session-respool-1234";
-    const first = new WorkspaceCollector({
+    const first = new SessionUploader({
       stateDir,
       upload: async () => { throw new Error("network down"); },
       fallbackScanMs: 60_000,
@@ -753,7 +753,7 @@ describe("workspace collector durable retry", () => {
     expect(await first.spoolStatus()).toMatchObject({ entries: 2 });
 
     const { uploads, upload } = makeUploads();
-    const second = new WorkspaceCollector({ stateDir, upload, fallbackScanMs: 60_000, retryBaseMs: 10, retryMaxMs: 20 });
+    const second = new SessionUploader({ stateDir, upload, fallbackScanMs: 60_000, retryBaseMs: 10, retryMaxMs: 20 });
     for (let attempt = 0; attempt < 100 && uploads.length < 2; attempt += 1) {
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
@@ -763,12 +763,12 @@ describe("workspace collector durable retry", () => {
   });
 
   test("bounds the spool, drops permanently rejected uploads and clears on request", async () => {
-    const root = await mkdtemp(join(tmpdir(), "omnirush-collector-spoolcap-"));
-    const stateDir = await mkdtemp(join(tmpdir(), "omnirush-collector-spoolcap-state-"));
+    const root = await mkdtemp(join(tmpdir(), "omnirush-upload-spoolcap-"));
+    const stateDir = await mkdtemp(join(tmpdir(), "omnirush-upload-spoolcap-state-"));
     roots.push(root, stateDir);
     await writeFile(join(root, "app.txt"), "v0\n");
     let status = 503;
-    const collector = new WorkspaceCollector({
+    const sessionUploader = new SessionUploader({
       stateDir,
       upload: async () => Response.json({ error: "nope" }, { status }),
       fallbackScanMs: 60_000,
@@ -778,39 +778,39 @@ describe("workspace collector durable retry", () => {
       spoolMaxEntries: 2,
     });
     const sessionId = "session-spoolcap-1234";
-    collector.startSession(sessionId, "workspace-spoolcap", root);
-    await collector.idle(sessionId);
+    sessionUploader.startSession(sessionId, "workspace-spoolcap", root);
+    await sessionUploader.idle(sessionId);
     for (let version = 1; version <= 3; version += 1) {
       await writeFile(join(root, "app.txt"), `v${version}\n`);
-      collector.captureSnapshot(sessionId, "turn_completed");
-      await collector.idle(sessionId);
+      sessionUploader.captureSnapshot(sessionId, "turn_completed");
+      await sessionUploader.idle(sessionId);
     }
-    expect(await collector.spoolStatus()).toMatchObject({ entries: 2 });
-    const spoolDir = join(stateDir, "omnirush-collector-spool");
+    expect(await sessionUploader.spoolStatus()).toMatchObject({ entries: 2 });
+    const spoolDir = join(stateDir, "omnirush-upload-spool");
     const sequences = (await Promise.all((await readdir(spoolDir)).filter((name) => name.endsWith(".json"))
       .map(async (name) => (JSON.parse(await readFile(join(spoolDir, name), "utf8")) as { sequence: number }).sequence))).sort();
     expect(sequences).toEqual([3, 4]);
 
     status = 400;
     await writeFile(join(root, "app.txt"), "v4\n");
-    collector.captureSnapshot(sessionId, "turn_completed");
-    await collector.idle(sessionId);
-    expect(await collector.spoolStatus()).toMatchObject({ entries: 2 });
-    expect(await collector.sessionDeliveryStatus(sessionId)).toMatchObject({ failureCount: 5 });
+    sessionUploader.captureSnapshot(sessionId, "turn_completed");
+    await sessionUploader.idle(sessionId);
+    expect(await sessionUploader.spoolStatus()).toMatchObject({ entries: 2 });
+    expect(await sessionUploader.sessionDeliveryStatus(sessionId)).toMatchObject({ failureCount: 5 });
 
-    await collector.clearSpool();
-    expect(await collector.spoolStatus()).toEqual({ entries: 0, bytes: 0 });
-    await collector.stop();
+    await sessionUploader.clearSpool();
+    expect(await sessionUploader.spoolStatus()).toEqual({ entries: 0, bytes: 0 });
+    await sessionUploader.stop();
   });
 });
 
-describe("workspace collector upload deadline and spool drain", () => {
+describe("session upload deadline and spool drain", () => {
   // Upload deadlines at 1/100 of real time: one simulated second is 10 ms.
-  const hundredth: CollectUploadBudget = {
-    baseMs: COLLECT_UPLOAD_BUDGET.baseMs / 100,
-    bytesPerSecond: COLLECT_UPLOAD_BUDGET.bytesPerSecond * 100,
-    maxSendMs: COLLECT_UPLOAD_BUDGET.maxSendMs / 100,
-    responseMs: COLLECT_UPLOAD_BUDGET.responseMs / 100,
+  const hundredth: SessionUploadBudget = {
+    baseMs: SESSION_UPLOAD_BUDGET.baseMs / 100,
+    bytesPerSecond: SESSION_UPLOAD_BUDGET.bytesPerSecond * 100,
+    maxSendMs: SESSION_UPLOAD_BUDGET.maxSendMs / 100,
+    responseMs: SESSION_UPLOAD_BUDGET.responseMs / 100,
   };
   const simulatedSeconds = (seconds: number) => seconds * 10;
   const sleep = (ms: number, signal?: AbortSignal) => new Promise<void>((resolvePromise, reject) => {
@@ -823,7 +823,7 @@ describe("workspace collector upload deadline and spool drain", () => {
 
   /** Writes one spool entry as a failed upload leaves it; ids sort in `index` order. */
   async function spoolEntry(stateDir: string, index: number, bytes: number, extra: Record<string, unknown> = {}): Promise<string> {
-    const spoolDir = join(stateDir, "omnirush-collector-spool");
+    const spoolDir = join(stateDir, "omnirush-upload-spool");
     await mkdir(spoolDir, { recursive: true, mode: 0o700 });
     const id = `${index.toString(16).padStart(12, "0")}-${index.toString(16).padStart(6, "0")}-0000000${index}`;
     const body = Buffer.alloc(bytes, index);
@@ -843,29 +843,29 @@ describe("workspace collector upload deadline and spool drain", () => {
   }
 
   async function spoolMeta(stateDir: string, id: string): Promise<{ attempts: number; last_attempt_at?: string }> {
-    return JSON.parse(await readFile(join(stateDir, "omnirush-collector-spool", `${id}.json`), "utf8")) as { attempts: number; last_attempt_at?: string };
+    return JSON.parse(await readFile(join(stateDir, "omnirush-upload-spool", `${id}.json`), "utf8")) as { attempts: number; last_attempt_at?: string };
   }
 
   async function drainState(): Promise<string> {
-    const stateDir = await mkdtemp(join(tmpdir(), "omnirush-collector-drain-state-"));
+    const stateDir = await mkdtemp(join(tmpdir(), "omnirush-upload-drain-state-"));
     roots.push(stateDir);
     return stateDir;
   }
 
   test("scales the deadline with the envelope and adds the wait for the gateway's answer", () => {
-    expect(collectUploadTimeoutMs(0)).toBe(150_000);
+    expect(sessionUploadTimeoutMs(0)).toBe(150_000);
     // A 10 MiB start snapshot: 30 s, 80 s of body at 128 KiB/s, 120 s for the answer.
-    expect(collectUploadTimeoutMs(10 * 1024 * 1024)).toBe(230_000);
-    expect(collectUploadTimeoutMs(10 * 1024 * 1024)).toBeGreaterThan(60_000 + 90_000);
-    expect(collectUploadTimeoutMs(1024 * 1024 * 1024)).toBe(15 * 60_000 + 120_000);
-    expect(collectUploadTimeoutMs(10 * 1024 * 1024, hundredth)).toBe(2_300);
+    expect(sessionUploadTimeoutMs(10 * 1024 * 1024)).toBe(230_000);
+    expect(sessionUploadTimeoutMs(10 * 1024 * 1024)).toBeGreaterThan(60_000 + 90_000);
+    expect(sessionUploadTimeoutMs(1024 * 1024 * 1024)).toBe(15 * 60_000 + 120_000);
+    expect(sessionUploadTimeoutMs(10 * 1024 * 1024, hundredth)).toBe(2_300);
   });
 
   test("delivers a 10 MB envelope over an uplink that needs 60 s for it on the first attempt", async () => {
     const stateDir = await drainState();
     await spoolEntry(stateDir, 1, 10 * 1024 * 1024);
     const calls: { bytes: number; aborted: boolean }[] = [];
-    const collector = new WorkspaceCollector({
+    const sessionUploader = new SessionUploader({
       stateDir,
       upload: async (_sessionId, compressed, signal) => {
         // Throttled: the body trickles out over 60 s (about 170 KiB/s).
@@ -876,17 +876,17 @@ describe("workspace collector upload deadline and spool drain", () => {
       uploadBudget: hundredth,
       retryBaseMs: 60_000,
     });
-    expect(await collector.drainSpool()).toEqual({ delivered: 1, pending: 0 });
+    expect(await sessionUploader.drainSpool()).toEqual({ delivered: 1, pending: 0 });
     expect(calls).toEqual([{ bytes: 10 * 1024 * 1024, aborted: false }]);
-    expect(await collector.spoolStatus()).toEqual({ entries: 0, bytes: 0 });
-    await collector.stop();
+    expect(await sessionUploader.spoolStatus()).toEqual({ entries: 0, bytes: 0 });
+    await sessionUploader.stop();
   });
 
   test("waits for an answer that comes 90 s after the body is sent", async () => {
     const stateDir = await drainState();
     await spoolEntry(stateDir, 1, 6 * 1024 * 1024);
     const answered: boolean[] = [];
-    const collector = new WorkspaceCollector({
+    const sessionUploader = new SessionUploader({
       stateDir,
       gatewayUrl: "https://gateway.example.test/v1",
       accessToken: "device-token",
@@ -901,9 +901,9 @@ describe("workspace collector upload deadline and spool drain", () => {
       uploadBudget: hundredth,
       retryBaseMs: 60_000,
     });
-    expect(await collector.drainSpool()).toEqual({ delivered: 1, pending: 0 });
+    expect(await sessionUploader.drainSpool()).toEqual({ delivered: 1, pending: 0 });
     expect(answered).toEqual([false]);
-    await collector.stop();
+    await sessionUploader.stop();
   });
 
   test("delivers the entries behind a spooled upload that keeps failing, and backs that one off", async () => {
@@ -913,7 +913,7 @@ describe("workspace collector upload deadline and spool drain", () => {
     await spoolEntry(stateDir, 3, 1_024);
     const attempts: number[] = [];
     const delivered: number[] = [];
-    const collector = new WorkspaceCollector({
+    const sessionUploader = new SessionUploader({
       stateDir,
       upload: async (sessionId) => {
         const index = Number(sessionId.split("-").at(-1));
@@ -927,7 +927,7 @@ describe("workspace collector upload deadline and spool drain", () => {
       retryBaseMs: 60_000,
     });
 
-    expect(await collector.drainSpool()).toEqual({ delivered: 2, pending: 1 });
+    expect(await sessionUploader.drainSpool()).toEqual({ delivered: 2, pending: 1 });
     expect(attempts).toEqual([1, 2, 3]);
     expect(delivered).toEqual([2, 3]);
     const failed = await spoolMeta(stateDir, stuck);
@@ -935,29 +935,29 @@ describe("workspace collector upload deadline and spool drain", () => {
     expect(typeof failed.last_attempt_at).toBe("string");
 
     // Within its backoff the failed entry is left alone.
-    expect(await collector.drainSpool()).toEqual({ delivered: 0, pending: 1 });
+    expect(await sessionUploader.drainSpool()).toEqual({ delivered: 0, pending: 1 });
     expect(attempts).toEqual([1, 2, 3]);
 
     // Once the backoff (the retry base after one failed drain) has passed, it is tried again...
-    const spoolDir = join(stateDir, "omnirush-collector-spool");
+    const spoolDir = join(stateDir, "omnirush-upload-spool");
     await writeFile(join(spoolDir, `${stuck}.json`), JSON.stringify({ ...failed, last_attempt_at: new Date(Date.now() - 61_000).toISOString() }));
-    expect(await collector.drainSpool()).toEqual({ delivered: 0, pending: 1 });
+    expect(await sessionUploader.drainSpool()).toEqual({ delivered: 0, pending: 1 });
     expect(attempts).toEqual([1, 2, 3, 1]);
     const again = await spoolMeta(stateDir, stuck);
     expect(again.attempts).toBe(3);
 
     // ...and the next backoff is twice as long.
     await writeFile(join(spoolDir, `${stuck}.json`), JSON.stringify({ ...again, last_attempt_at: new Date(Date.now() - 90_000).toISOString() }));
-    expect(await collector.drainSpool()).toEqual({ delivered: 0, pending: 1 });
+    expect(await sessionUploader.drainSpool()).toEqual({ delivered: 0, pending: 1 });
     expect(attempts).toEqual([1, 2, 3, 1]);
-    await collector.stop();
+    await sessionUploader.stop();
   });
 
   test("stops a drain after three failures and leaves the rest to the next one", async () => {
     const stateDir = await drainState();
     for (let index = 1; index <= 5; index += 1) await spoolEntry(stateDir, index, 512);
     const attempts: string[] = [];
-    const collector = new WorkspaceCollector({
+    const sessionUploader = new SessionUploader({
       stateDir,
       upload: async (sessionId) => {
         attempts.push(sessionId);
@@ -965,9 +965,9 @@ describe("workspace collector upload deadline and spool drain", () => {
       },
       retryBaseMs: 60_000,
     });
-    expect(await collector.drainSpool()).toEqual({ delivered: 0, pending: 5 });
+    expect(await sessionUploader.drainSpool()).toEqual({ delivered: 0, pending: 5 });
     expect(attempts).toEqual(["session-drain-1", "session-drain-2", "session-drain-3"]);
-    await collector.stop();
+    await sessionUploader.stop();
   });
 
   test("drops an entry once it reaches the attempt limit", async () => {
@@ -975,16 +975,16 @@ describe("workspace collector upload deadline and spool drain", () => {
     await spoolEntry(stateDir, 1, 512, { attempts: 23 });
     await spoolEntry(stateDir, 2, 512);
     const warnings: string[] = [];
-    const collector = new WorkspaceCollector({
+    const sessionUploader = new SessionUploader({
       stateDir,
       upload: async () => Response.json({ error: "unavailable" }, { status: 503 }),
       log: (level, message) => { if (level === "warn") warnings.push(message); },
       retryBaseMs: 60_000,
     });
-    expect(await collector.drainSpool()).toEqual({ delivered: 0, pending: 1 });
-    expect(warnings).toEqual(["OmniRush collection artifact dropped from spool"]);
-    expect(await collector.spoolStatus()).toEqual({ entries: 1, bytes: 512 });
-    await collector.stop();
+    expect(await sessionUploader.drainSpool()).toEqual({ delivered: 0, pending: 1 });
+    expect(warnings).toEqual(["OmniRush session upload artifact dropped from spool"]);
+    expect(await sessionUploader.spoolStatus()).toEqual({ entries: 1, bytes: 512 });
+    await sessionUploader.stop();
   });
 
   test("a sign-out aborts the spooled upload in flight and empties the spool", async () => {
@@ -993,7 +993,7 @@ describe("workspace collector upload deadline and spool drain", () => {
     let started!: () => void;
     const inFlight = new Promise<void>((resolvePromise) => { started = resolvePromise; });
     let aborted = false;
-    const collector = new WorkspaceCollector({
+    const sessionUploader = new SessionUploader({
       stateDir,
       upload: (_sessionId, _compressed, signal) => new Promise<Response>((_resolvePromise, reject) => {
         signal?.addEventListener("abort", () => {
@@ -1004,17 +1004,17 @@ describe("workspace collector upload deadline and spool drain", () => {
       }),
       retryBaseMs: 60_000,
     });
-    const drain = collector.drainSpool();
+    const drain = sessionUploader.drainSpool();
     await inFlight;
-    await collector.clearSpool();
+    await sessionUploader.clearSpool();
     expect(aborted).toBe(true);
     expect(await drain).toEqual({ delivered: 0, pending: 1 });
-    expect(await collector.spoolStatus()).toEqual({ entries: 0, bytes: 0 });
-    await collector.stop();
+    expect(await sessionUploader.spoolStatus()).toEqual({ entries: 0, bytes: 0 });
+    await sessionUploader.stop();
   });
 
   test("a sign-out aborts the live upload in flight and spools nothing it carried", async () => {
-    const root = await mkdtemp(join(tmpdir(), "omnirush-collector-signout-"));
+    const root = await mkdtemp(join(tmpdir(), "omnirush-upload-signout-"));
     roots.push(root);
     const stateDir = await drainState();
     await writeFile(join(root, "app.txt"), "hello\n");
@@ -1022,7 +1022,7 @@ describe("workspace collector upload deadline and spool drain", () => {
     const inFlight = new Promise<void>((resolvePromise) => { started = resolvePromise; });
     const signals: AbortSignal[] = [];
     const infos: string[] = [];
-    const collector = new WorkspaceCollector({
+    const sessionUploader = new SessionUploader({
       stateDir,
       upload: async (_sessionId, _compressed, signal) => {
         signals.push(signal!);
@@ -1037,30 +1037,30 @@ describe("workspace collector upload deadline and spool drain", () => {
       retryBaseMs: 60_000,
     });
     const sessionId = "session-signout-1234";
-    collector.startSession(sessionId, "workspace-signout", root);
+    sessionUploader.startSession(sessionId, "workspace-signout", root);
     await inFlight;
-    await collector.clearSpool();
-    await collector.idle(sessionId);
+    await sessionUploader.clearSpool();
+    await sessionUploader.idle(sessionId);
 
     expect(signals).toHaveLength(1);
     expect(signals[0]!.aborted).toBe(true);
-    expect(infos).toContain("OmniRush collection artifact discarded at sign-out");
-    expect(await collector.spoolStatus()).toEqual({ entries: 0, bytes: 0 });
-    expect(await readdir(join(stateDir, "omnirush-collector-spool")).catch(() => [])).toEqual([]);
+    expect(infos).toContain("OmniRush session upload artifact discarded at sign-out");
+    expect(await sessionUploader.spoolStatus()).toEqual({ entries: 0, bytes: 0 });
+    expect(await readdir(join(stateDir, "omnirush-upload-spool")).catch(() => [])).toEqual([]);
 
     // The next account's uploads are not cancelled by the earlier sign-out.
     const next = "session-signout-5678";
-    collector.startSession(next, "workspace-signout-next", root);
-    await collector.idle(next);
+    sessionUploader.startSession(next, "workspace-signout-next", root);
+    await sessionUploader.idle(next);
     expect(signals.length).toBeGreaterThan(1);
     expect(signals.slice(1).every((signal) => !signal.aborted)).toBe(true);
-    expect(await collector.spoolStatus()).toMatchObject({ entries: 1 });
-    await collector.clearSpool();
-    await collector.stop();
+    expect(await sessionUploader.spoolStatus()).toMatchObject({ entries: 1 });
+    await sessionUploader.clearSpool();
+    await sessionUploader.stop();
   });
 
   test("spools a live upload once an attempt runs out its deadline, and still retries quick failures in band", async () => {
-    const root = await mkdtemp(join(tmpdir(), "omnirush-collector-deadline-live-"));
+    const root = await mkdtemp(join(tmpdir(), "omnirush-upload-deadline-live-"));
     roots.push(root);
     const stateDir = await drainState();
     await writeFile(join(root, "app.txt"), "v0\n");
@@ -1068,7 +1068,7 @@ describe("workspace collector upload deadline and spool drain", () => {
     const plan: Array<"hang" | "drop" | "timeout"> = [];
     const calls: string[] = [];
     const spooled: unknown[] = [];
-    const collector = new WorkspaceCollector({
+    const sessionUploader = new SessionUploader({
       stateDir,
       upload: async () => {
         const step = plan.shift() ?? "drop";
@@ -1080,7 +1080,7 @@ describe("workspace collector upload deadline and spool drain", () => {
         throw new Error("network down");
       },
       log: (level, message, attributes) => {
-        if (level === "warn" && message === "OmniRush collection artifact spooled for retry") spooled.push(attributes?.reason);
+        if (level === "warn" && message === "OmniRush session upload artifact spooled for retry") spooled.push(attributes?.reason);
       },
       uploadBudget: { baseMs: 50, bytesPerSecond: 128 * 1024 * 1000, maxSendMs: 900, responseMs: 100 },
       fallbackScanMs: 60_000,
@@ -1092,30 +1092,30 @@ describe("workspace collector upload deadline and spool drain", () => {
 
     // The start snapshot's first attempt runs out its deadline: spooled, not tried twice more in band.
     plan.push("hang");
-    collector.startSession(sessionId, "workspace-deadline-live", root);
-    await collector.idle(sessionId);
+    sessionUploader.startSession(sessionId, "workspace-deadline-live", root);
+    await sessionUploader.idle(sessionId);
     expect(calls).toEqual(["hang"]);
     expect(spooled).toHaveLength(1);
-    expect(await collector.spoolStatus()).toMatchObject({ entries: 1 });
+    expect(await sessionUploader.spoolStatus()).toMatchObject({ entries: 1 });
 
     // The session's queue moved on to its next snapshot, whose quick failures keep their in-band retries.
     plan.push("drop", "drop", "drop");
     await writeFile(join(root, "app.txt"), "v1\n");
-    collector.captureSnapshot(sessionId, "turn_completed");
-    await collector.idle(sessionId);
+    sessionUploader.captureSnapshot(sessionId, "turn_completed");
+    await sessionUploader.idle(sessionId);
     expect(calls).toEqual(["hang", "drop", "drop", "drop"]);
-    expect(await collector.spoolStatus()).toMatchObject({ entries: 2 });
+    expect(await sessionUploader.spoolStatus()).toMatchObject({ entries: 2 });
 
     // A quick failure, then an attempt out of time: no third attempt.
     plan.push("drop", "timeout");
     await writeFile(join(root, "app.txt"), "v2\n");
-    collector.captureSnapshot(sessionId, "turn_completed");
-    await collector.idle(sessionId);
+    sessionUploader.captureSnapshot(sessionId, "turn_completed");
+    await sessionUploader.idle(sessionId);
     expect(calls).toEqual(["hang", "drop", "drop", "drop", "drop", "timeout"]);
     expect(spooled.slice(1)).toEqual(["network down", "The operation timed out."]);
-    expect(await collector.spoolStatus()).toMatchObject({ entries: 3 });
-    await collector.clearSpool();
-    await collector.stop();
+    expect(await sessionUploader.spoolStatus()).toMatchObject({ entries: 3 });
+    await sessionUploader.clearSpool();
+    await sessionUploader.stop();
   });
 
   test("a stop mid-drain leaves the spooled entry in flight as it was", async () => {
@@ -1124,7 +1124,7 @@ describe("workspace collector upload deadline and spool drain", () => {
     const before = await spoolMeta(stateDir, id);
     let started!: () => void;
     const inFlight = new Promise<void>((resolvePromise) => { started = resolvePromise; });
-    const collector = new WorkspaceCollector({
+    const sessionUploader = new SessionUploader({
       stateDir,
       // Never answers and ignores its signal: the stop ends it all the same.
       upload: () => {
@@ -1133,20 +1133,20 @@ describe("workspace collector upload deadline and spool drain", () => {
       },
       retryBaseMs: 60_000,
     });
-    const drain = collector.drainSpool();
+    const drain = sessionUploader.drainSpool();
     await inFlight;
-    await collector.stop();
+    await sessionUploader.stop();
     expect(await drain).toEqual({ delivered: 0, pending: 1 });
     expect(await spoolMeta(stateDir, id)).toEqual(before);
     expect(before).toMatchObject({ attempts: 3, last_attempt_at: expect.any(String) });
-    expect(await collector.spoolStatus()).toEqual({ entries: 1, bytes: 1_024 });
+    expect(await sessionUploader.spoolStatus()).toEqual({ entries: 1, bytes: 1_024 });
   });
 
   test("an entry dated in the future (the clock went back) waits one backoff, not until then", async () => {
     const stateDir = await drainState();
     await spoolEntry(stateDir, 1, 256, { attempts: 2, last_attempt_at: new Date(Date.now() + 30 * 24 * 60 * 60_000).toISOString() });
     let calls = 0;
-    const collector = new WorkspaceCollector({
+    const sessionUploader = new SessionUploader({
       stateDir,
       upload: async () => {
         calls += 1;
@@ -1156,16 +1156,16 @@ describe("workspace collector upload deadline and spool drain", () => {
       retryMaxMs: 80,
     });
     // Due at once: the first try fails and records a sane last attempt.
-    expect(await collector.drainSpool()).toEqual({ delivered: 0, pending: 1 });
+    expect(await sessionUploader.drainSpool()).toEqual({ delivered: 0, pending: 1 });
     const deadline = Date.now() + 2_000;
-    while ((await collector.spoolStatus()).entries > 0 && Date.now() < deadline) {
+    while ((await sessionUploader.spoolStatus()).entries > 0 && Date.now() < deadline) {
       await new Promise((resolvePromise) => setTimeout(resolvePromise, 20));
     }
-    expect(await collector.spoolStatus()).toEqual({ entries: 0, bytes: 0 });
+    expect(await sessionUploader.spoolStatus()).toEqual({ entries: 0, bytes: 0 });
     // Retried on the capped schedule: a handful of calls, no 1 ms loop.
     expect(calls).toBeGreaterThanOrEqual(1);
     expect(calls).toBeLessThanOrEqual(4);
-    await collector.stop();
+    await sessionUploader.stop();
   });
 
   test("a drain asked for while one runs picks up the entries spooled meanwhile", async () => {
@@ -1176,7 +1176,7 @@ describe("workspace collector upload deadline and spool drain", () => {
     let started!: () => void;
     const inFlight = new Promise<void>((resolvePromise) => { started = resolvePromise; });
     const delivered: string[] = [];
-    const collector = new WorkspaceCollector({
+    const sessionUploader = new SessionUploader({
       stateDir,
       upload: async (sessionId) => {
         if (sessionId === "session-drain-1") {
@@ -1188,30 +1188,30 @@ describe("workspace collector upload deadline and spool drain", () => {
       },
       retryBaseMs: 60_000,
     });
-    const running = collector.drainSpool();
+    const running = sessionUploader.drainSpool();
     await inFlight;
     // Spooled after the running drain listed the spool.
     await spoolEntry(stateDir, 2, 512);
-    const next = collector.drainSpool();
+    const next = sessionUploader.drainSpool();
     // Every call during the run shares the one drain after it.
-    expect(collector.drainSpool()).toBe(next);
+    expect(sessionUploader.drainSpool()).toBe(next);
     release();
     expect(await running).toEqual({ delivered: 1, pending: 0 });
     expect(await next).toEqual({ delivered: 1, pending: 0 });
     expect(delivered).toEqual(["session-drain-1", "session-drain-2"]);
-    expect(await collector.spoolStatus()).toEqual({ entries: 0, bytes: 0 });
-    await collector.stop();
+    expect(await sessionUploader.spoolStatus()).toEqual({ entries: 0, bytes: 0 });
+    await sessionUploader.stop();
   });
 });
 
-describe("workspace collector git helpers", () => {
+describe("session uploader git helpers", () => {
   test("clamps text by code points without splitting surrogate pairs", () => {
-    expect(clampCollectorText("abc", 5)).toBe("abc");
-    expect(clampCollectorText("abcdef", 3)).toBe("abc");
+    expect(clampUploadText("abc", 5)).toBe("abc");
+    expect(clampUploadText("abcdef", 3)).toBe("abc");
     const faces = "\u{1F600}".repeat(4);
-    expect(clampCollectorText(faces, 4)).toBe(faces);
-    expect(clampCollectorText(faces, 3)).toBe("\u{1F600}".repeat(3));
-    expect(Array.from(clampCollectorText("y".repeat(2_000), 1_024))).toHaveLength(1_024);
+    expect(clampUploadText(faces, 4)).toBe(faces);
+    expect(clampUploadText(faces, 3)).toBe("\u{1F600}".repeat(3));
+    expect(Array.from(clampUploadText("y".repeat(2_000), 1_024))).toHaveLength(1_024);
   });
 
   test("strips userinfo from scheme and scp-like remotes", () => {
@@ -1249,7 +1249,7 @@ describe("workspace collector git helpers", () => {
       "+{\"private\":true}",
       "",
     ].join("\n");
-    const result = filterCollectorDiff(raw);
+    const result = filterUploadDiff(raw);
     expect(result.truncated).toBe(false);
     expect(result.diff).toContain("diff --git a/app.ts b/app.ts");
     expect(result.diff).toContain("[REDACTED]");
@@ -1258,50 +1258,50 @@ describe("workspace collector git helpers", () => {
     expect(result.diff).not.toContain("super-secret-value");
     expect(result.diff).not.toContain("blob.bin");
     expect(result.diff).not.toContain("keys/service.json");
-    expect(filterCollectorDiff("")).toEqual({ diff: null, truncated: false });
-    expect(filterCollectorDiff("diff --git a/x b/x\n+ok\n", true).truncated).toBe(true);
+    expect(filterUploadDiff("")).toEqual({ diff: null, truncated: false });
+    expect(filterUploadDiff("diff --git a/x b/x\n+ok\n", true).truncated).toBe(true);
   });
 });
 
-// --- collector trace additions (contract v2) --------------------------------
+// --- session uploader trace additions (contract v2) --------------------------------
 
 function traceEvents(uploads: Envelope[]): Array<{ type: string; data?: Record<string, unknown> }> {
   return uploads.filter((item) => item.snapshot_type === "trace").flatMap((item) => item.trace ?? []);
 }
 
-describe("workspace collector trace additions", () => {
+describe("session uploader trace additions", () => {
   test("raises the caps to the contract values", () => {
-    expect(MAX_COLLECTOR_FILE_BYTES).toBe(4 * 1024 * 1024);
-    expect(MAX_COLLECTOR_DIFF_BYTES).toBe(2 * 1024 * 1024);
-    expect(MAX_COLLECTOR_FILES).toBe(50_000);
-    expect(MAX_COLLECTOR_WEB_VISIT_TEXT_BYTES).toBe(64 * 1024);
-    expect(MAX_COLLECTOR_ATTACHMENT_TEXT_BYTES).toBe(256 * 1024);
+    expect(MAX_UPLOAD_FILE_BYTES).toBe(4 * 1024 * 1024);
+    expect(MAX_UPLOAD_DIFF_BYTES).toBe(2 * 1024 * 1024);
+    expect(MAX_UPLOAD_FILES).toBe(50_000);
+    expect(MAX_UPLOAD_WEB_VISIT_TEXT_BYTES).toBe(64 * 1024);
+    expect(MAX_UPLOAD_ATTACHMENT_TEXT_BYTES).toBe(256 * 1024);
   });
 
   test("keeps uploading every snapshot of a session that has already sent more than 512 MiB", async () => {
-    const root = await mkdtemp(join(tmpdir(), "omnirush-collector-nocap-"));
-    const stateDir = await mkdtemp(join(tmpdir(), "omnirush-collector-nocap-state-"));
+    const root = await mkdtemp(join(tmpdir(), "omnirush-upload-nocap-"));
+    const stateDir = await mkdtemp(join(tmpdir(), "omnirush-upload-nocap-state-"));
     roots.push(root, stateDir);
     await writeFile(join(root, "app.txt"), "v0\n");
     const sessionId = "session-nocap-1234";
     // The session ledger stands in for the running total of a long session:
     // it says 600 MiB were already accepted (past the 512 MiB per-session cap
-    // the collector used to stop at) without any of that data being written.
+    // the session uploader used to stop at) without any of that data being written.
     const sentBefore = 600 * 1024 * 1024;
-    await writeFile(join(stateDir, "omnirush-collector-sessions.json"), JSON.stringify({
+    await writeFile(join(stateDir, "omnirush-upload-sessions.json"), JSON.stringify({
       version: 1,
       sessions: { [sessionId]: { segment: 1, nextSequence: 40, sentBytes: sentBefore, lastSeenAt: new Date().toISOString() } },
     }));
     const { uploads, upload } = makeUploads();
-    const collector = new WorkspaceCollector({ stateDir, upload, changeDebounceMs: 60_000, fallbackScanMs: 60_000 });
-    collector.startSession(sessionId, "workspace-nocap", root);
-    await collector.idle(sessionId);
+    const sessionUploader = new SessionUploader({ stateDir, upload, changeDebounceMs: 60_000, fallbackScanMs: 60_000 });
+    sessionUploader.startSession(sessionId, "workspace-nocap", root);
+    await sessionUploader.idle(sessionId);
     await writeFile(join(root, "app.txt"), "v1\n");
-    collector.captureSnapshot(sessionId, "turn_completed");
-    await collector.idle(sessionId);
-    collector.recordTrace(sessionId, "file.read", { path: "app.txt" });
-    collector.flushTrace(sessionId);
-    await collector.stop();
+    sessionUploader.captureSnapshot(sessionId, "turn_completed");
+    await sessionUploader.idle(sessionId);
+    sessionUploader.recordTrace(sessionId, "file.read", { path: "app.txt" });
+    sessionUploader.flushTrace(sessionId);
+    await sessionUploader.stop();
 
     // Sequence 41 onwards: the seeded total was loaded, and nothing was held back.
     expect(uploads.map((item) => [item.snapshot_type, item.trigger, item.sequence])).toEqual([
@@ -1317,20 +1317,20 @@ describe("workspace collector trace additions", () => {
     const metadata = JSON.parse(uploads[0]!.files.find((file) => file.path === "__omnirush__/workspace.json")!.content) as Record<string, unknown>;
     expect(metadata).not.toHaveProperty("max_session_bytes");
     // The running total is still counted, for diagnostics only.
-    const ledger = JSON.parse(await readFile(join(stateDir, "omnirush-collector-sessions.json"), "utf8")) as { sessions: Record<string, { sentBytes: number }> };
+    const ledger = JSON.parse(await readFile(join(stateDir, "omnirush-upload-sessions.json"), "utf8")) as { sessions: Record<string, { sentBytes: number }> };
     expect(ledger.sessions[sessionId]!.sentBytes).toBeGreaterThan(sentBefore);
   });
 
   test("records the turn model and child sessions with checkpoints that survive a resume", async () => {
-    const root = await mkdtemp(join(tmpdir(), "omnirush-collector-children-"));
-    const stateDir = await mkdtemp(join(tmpdir(), "omnirush-collector-children-state-"));
+    const root = await mkdtemp(join(tmpdir(), "omnirush-upload-children-"));
+    const stateDir = await mkdtemp(join(tmpdir(), "omnirush-upload-children-state-"));
     roots.push(root, stateDir);
     await writeFile(join(root, "app.txt"), "hello\n");
     const { uploads, upload } = makeUploads();
-    const makeCollector = () => new WorkspaceCollector({ stateDir, upload, fallbackScanMs: 60_000 });
+    const makeUploader = () => new SessionUploader({ stateDir, upload, fallbackScanMs: 60_000 });
     const sessionId = "session-children-1234";
 
-    const first = makeCollector();
+    const first = makeUploader();
     first.startSession(sessionId, "workspace-children", root);
     await first.idle(sessionId);
     expect(uploads.map((item) => item.snapshot_type)).toEqual(["start"]);
@@ -1377,7 +1377,7 @@ describe("workspace collector trace additions", () => {
 
     // A resumed session starts from the persisted checkpoints and reports the
     // last known model and children on its very first upload.
-    const second = makeCollector();
+    const second = makeUploader();
     second.startSession(sessionId, "workspace-children", root);
     await second.idle(sessionId);
     expect(await second.childCheckpoints(sessionId)).toEqual({ ses_child_1: "cmsg_1" });
@@ -1390,36 +1390,36 @@ describe("workspace collector trace additions", () => {
   });
 
   test("sub-agents on their own models keep them; a gateway fallback records the model that really answered", async () => {
-    const root = await mkdtemp(join(tmpdir(), "omnirush-collector-subagent-model-"));
+    const root = await mkdtemp(join(tmpdir(), "omnirush-upload-subagent-model-"));
     roots.push(root);
     await writeFile(join(root, "app.txt"), "hello\n");
     const { uploads, upload } = makeUploads();
-    const collector = new WorkspaceCollector({ upload, fallbackScanMs: 60_000 });
+    const sessionUploader = new SessionUploader({ upload, fallbackScanMs: 60_000 });
     const sessionId = "session-subagent-model-1";
-    collector.startSession(sessionId, "workspace-subagent-model", root);
-    await collector.idle(sessionId);
-    collector.recordSessionModel(sessionId, { provider_id: "omnirush", model_id: "gpt-6-astra", variant: "max", agent: "omnirush" });
+    sessionUploader.startSession(sessionId, "workspace-subagent-model", root);
+    await sessionUploader.idle(sessionId);
+    sessionUploader.recordSessionModel(sessionId, { provider_id: "omnirush", model_id: "gpt-6-astra", variant: "max", agent: "omnirush" });
     const assistant = (id: string, session: string, modelID: string, variant: string, completed: number) => ({
       info: { id, role: "assistant", sessionID: session, providerID: "omnirush", modelID, variant, agent: "general", time: { created: completed - 10, completed } },
       parts: [{ type: "text", text: `answer ${id}` }],
     });
     // The gateway refused GPT 6 Sol for ses_sol at t=2000; ses_muse ran on Muse all along.
-    collector.recordTrace(sessionId, "subagent.model_fallback", {
+    sessionUploader.recordTrace(sessionId, "subagent.model_fallback", {
       kind: "gateway", child_session_id: "ses_sol", requested_model: "gpt-6-sol", used_model: "gpt-6-astra", used_effort: "high", reason: "model_unavailable", ok: true, at: 2_000,
     });
-    collector.recordTrace(sessionId, "subagent.model_fallback", {
+    sessionUploader.recordTrace(sessionId, "subagent.model_fallback", {
       kind: "selection", child_session_id: "ses_other", requested_model: "meta-muse-spark", used_model: "gpt-6-astra", reason: "not_in_catalog", at: 2_000,
     });
-    collector.recordChildSession(sessionId, {
+    sessionUploader.recordChildSession(sessionId, {
       childSessionId: "ses_muse", parentSessionId: sessionId, depth: 1, title: "Muse task", agent: "general",
       messages: [assistant("m1", "ses_muse", "meta-muse-spark", "xhigh", 5_000)], lastMessageId: "m1",
     });
-    collector.recordChildSession(sessionId, {
+    sessionUploader.recordChildSession(sessionId, {
       childSessionId: "ses_sol", parentSessionId: sessionId, depth: 1, title: "Sol task", agent: "general",
       messages: [assistant("s1", "ses_sol", "gpt-6-sol", "high", 1_000), assistant("s2", "ses_sol", "gpt-6-sol", "high", 3_000)], lastMessageId: "s2",
     });
-    collector.flushTrace(sessionId);
-    await collector.stop();
+    sessionUploader.flushTrace(sessionId);
+    await sessionUploader.stop();
 
     const events = traceEvents(uploads);
     const child = (id: string) => events.find((event) => event.type === "session.child" && event.data?.child_session_id === id)?.data?.messages as Array<{ info: Record<string, unknown> }>;
@@ -1434,48 +1434,48 @@ describe("workspace collector trace additions", () => {
   });
 
   test("keeps only the newest 5,000 events across every push site", async () => {
-    const root = await mkdtemp(join(tmpdir(), "omnirush-collector-cap-"));
+    const root = await mkdtemp(join(tmpdir(), "omnirush-upload-cap-"));
     roots.push(root);
     await writeFile(join(root, "app.txt"), "hello\n");
     const { uploads, upload } = makeUploads();
-    const collector = new WorkspaceCollector({ upload, fallbackScanMs: 60_000 });
+    const sessionUploader = new SessionUploader({ upload, fallbackScanMs: 60_000 });
     const sessionId = "session-cap-1234";
-    collector.startSession(sessionId, "workspace-cap", root);
-    await collector.idle(sessionId);
-    expect(MAX_COLLECTOR_TRACE_EVENTS).toBe(5_000);
+    sessionUploader.startSession(sessionId, "workspace-cap", root);
+    await sessionUploader.idle(sessionId);
+    expect(MAX_UPLOAD_TRACE_EVENTS).toBe(5_000);
     // Fill the trace, then push one event through each of the newer sites:
     // every one of them displaces the oldest event instead of growing the trace.
-    for (let index = 0; index < MAX_COLLECTOR_TRACE_EVENTS; index += 1) collector.recordTrace(sessionId, "filler", { index });
-    collector.recordSessionModel(sessionId, { provider_id: "anthropic", model_id: "claude-sonnet-4-5", variant: null, agent: null });
-    collector.recordChildSession(sessionId, { childSessionId: "ses_child_cap", parentSessionId: sessionId, title: null, agent: null, messages: [], lastMessageId: null });
-    expect(collector.recordWebVisit(sessionId, { url: "https://example.com/page", title: "Page", text: "text" })).toBe(true);
-    collector.recordAttachment(sessionId, { name: "note.txt", mime: "text/plain", bytes: 4, sha256: "0".repeat(64), text: "note", textTruncated: false });
-    collector.flushTrace(sessionId);
-    await collector.stop();
+    for (let index = 0; index < MAX_UPLOAD_TRACE_EVENTS; index += 1) sessionUploader.recordTrace(sessionId, "filler", { index });
+    sessionUploader.recordSessionModel(sessionId, { provider_id: "anthropic", model_id: "claude-sonnet-4-5", variant: null, agent: null });
+    sessionUploader.recordChildSession(sessionId, { childSessionId: "ses_child_cap", parentSessionId: sessionId, title: null, agent: null, messages: [], lastMessageId: null });
+    expect(sessionUploader.recordWebVisit(sessionId, { url: "https://example.com/page", title: "Page", text: "text" })).toBe(true);
+    sessionUploader.recordAttachment(sessionId, { name: "note.txt", mime: "text/plain", bytes: 4, sha256: "0".repeat(64), text: "note", textTruncated: false });
+    sessionUploader.flushTrace(sessionId);
+    await sessionUploader.stop();
 
     const events = traceEvents(uploads);
-    expect(events).toHaveLength(MAX_COLLECTOR_TRACE_EVENTS);
+    expect(events).toHaveLength(MAX_UPLOAD_TRACE_EVENTS);
     expect(events.slice(-4).map((event) => event.type)).toEqual(["session.model", "session.child", "web.visit", "attachment"]);
     // The four oldest filler events (indices 0-3) were dropped; the newest filler survives.
     expect(events[0]?.data).toEqual({ index: 4 });
-    expect(events.filter((event) => event.type === "filler")).toHaveLength(MAX_COLLECTOR_TRACE_EVENTS - 4);
+    expect(events.filter((event) => event.type === "filler")).toHaveLength(MAX_UPLOAD_TRACE_EVENTS - 4);
   }, 20_000);
 
   test("traces browser visits with redacted, capped text and never local pages", async () => {
-    const root = await mkdtemp(join(tmpdir(), "omnirush-collector-web-"));
+    const root = await mkdtemp(join(tmpdir(), "omnirush-upload-web-"));
     roots.push(root);
     const { uploads, upload } = makeUploads();
-    const collector = new WorkspaceCollector({ upload, fallbackScanMs: 60_000 });
+    const sessionUploader = new SessionUploader({ upload, fallbackScanMs: 60_000 });
     const sessionId = "session-web-1234";
-    collector.startSession(sessionId, "workspace-web", root);
+    sessionUploader.startSession(sessionId, "workspace-web", root);
     const text = `Contact jane@example.com about AKIA1234567890123456 ${"page text ".repeat(20_000)}`;
-    expect(collector.recordWebVisit(sessionId, { url: "https://user:pw@example.com/docs?q=1#top", title: "Docs jane@example.com", text })).toBe(true);
-    expect(collector.recordWebVisit(sessionId, { url: "https://example.org/short", title: null, text: "brief" })).toBe(true);
+    expect(sessionUploader.recordWebVisit(sessionId, { url: "https://user:pw@example.com/docs?q=1#top", title: "Docs jane@example.com", text })).toBe(true);
+    expect(sessionUploader.recordWebVisit(sessionId, { url: "https://example.org/short", title: null, text: "brief" })).toBe(true);
     for (const url of ["file:///etc/passwd", "data:text/html,<p>hi</p>", "chrome://settings", "http://localhost:3000/app", "http://127.0.0.1:8080/", "https://[::1]/", "ftp://example.com/x"]) {
-      expect(collector.recordWebVisit(sessionId, { url, title: "local", text: "secret local page" })).toBe(false);
+      expect(sessionUploader.recordWebVisit(sessionId, { url, title: "local", text: "secret local page" })).toBe(false);
     }
-    collector.flushTrace(sessionId);
-    await collector.stop();
+    sessionUploader.flushTrace(sessionId);
+    await sessionUploader.stop();
 
     const visits = traceEvents(uploads).filter((event) => event.type === "web.visit");
     expect(visits).toHaveLength(2);
@@ -1483,7 +1483,7 @@ describe("workspace collector trace additions", () => {
     expect(long?.data?.url).toBe("https://example.com/docs?q=1#top");
     expect(long?.data?.title).toBe("Docs [REDACTED_PII]");
     expect(long?.data?.text_truncated).toBe(true);
-    expect(Buffer.byteLength(String(long?.data?.text))).toBeLessThanOrEqual(MAX_COLLECTOR_WEB_VISIT_TEXT_BYTES);
+    expect(Buffer.byteLength(String(long?.data?.text))).toBeLessThanOrEqual(MAX_UPLOAD_WEB_VISIT_TEXT_BYTES);
     expect(String(long?.data?.text)).not.toContain("jane@example.com");
     expect(String(long?.data?.text)).not.toContain("AKIA1234567890123456");
     expect(short?.data).toEqual({ url: "https://example.org/short", title: null, text: "brief", text_truncated: false });
@@ -1492,17 +1492,17 @@ describe("workspace collector trace additions", () => {
   });
 
   test("traces prompt attachments with redacted, capped text", async () => {
-    const root = await mkdtemp(join(tmpdir(), "omnirush-collector-attachments-"));
+    const root = await mkdtemp(join(tmpdir(), "omnirush-upload-attachments-"));
     roots.push(root);
     const { uploads, upload } = makeUploads();
-    const collector = new WorkspaceCollector({ upload, fallbackScanMs: 60_000 });
+    const sessionUploader = new SessionUploader({ upload, fallbackScanMs: 60_000 });
     const sessionId = "session-attachment-1234";
-    collector.startSession(sessionId, "workspace-attachment", root);
+    sessionUploader.startSession(sessionId, "workspace-attachment", root);
     const text = `OPENAI_API_KEY=sk-1234567890abcdefghijklmnop\n${"notes ".repeat(60_000)}`;
-    collector.recordAttachment(sessionId, { name: "../notes jane@example.com report.txt", mime: "text/plain", bytes: Buffer.byteLength(text), sha256: sha256(text), text });
-    collector.recordAttachment(sessionId, { name: "photo.png", mime: "image/png", bytes: 12, sha256: sha256("png"), text: null });
-    collector.flushTrace(sessionId);
-    await collector.stop();
+    sessionUploader.recordAttachment(sessionId, { name: "../notes jane@example.com report.txt", mime: "text/plain", bytes: Buffer.byteLength(text), sha256: sha256(text), text });
+    sessionUploader.recordAttachment(sessionId, { name: "photo.png", mime: "image/png", bytes: 12, sha256: sha256("png"), text: null });
+    sessionUploader.flushTrace(sessionId);
+    await sessionUploader.stop();
 
     const attachments = traceEvents(uploads).filter((event) => event.type === "attachment");
     expect(attachments).toHaveLength(2);
@@ -1512,14 +1512,14 @@ describe("workspace collector trace additions", () => {
     expect(note?.data?.bytes).toBe(Buffer.byteLength(text));
     expect(note?.data?.sha256).toBe(sha256(text));
     expect(note?.data?.text_truncated).toBe(true);
-    expect(Buffer.byteLength(String(note?.data?.text))).toBeLessThanOrEqual(MAX_COLLECTOR_ATTACHMENT_TEXT_BYTES);
+    expect(Buffer.byteLength(String(note?.data?.text))).toBeLessThanOrEqual(MAX_UPLOAD_ATTACHMENT_TEXT_BYTES);
     expect(String(note?.data?.text)).not.toContain("sk-1234567890abcdefghijklmnop");
     expect(String(note?.data?.text)).toContain("[REDACTED]");
     expect(photo?.data).toEqual({ name: "photo.png", mime: "image/png", bytes: 12, sha256: sha256("png"), text: null, text_truncated: false });
   });
 
   test("emits artifact events for untracked outputs a turn creates or modifies", async () => {
-    const root = await mkdtemp(join(tmpdir(), "omnirush-collector-artifacts-"));
+    const root = await mkdtemp(join(tmpdir(), "omnirush-upload-artifacts-"));
     roots.push(root);
     await git(root, "init", "-q");
     await writeFile(join(root, ".gitignore"), "ignored/\n");
@@ -1528,11 +1528,11 @@ describe("workspace collector trace additions", () => {
     await git(root, "add", ".gitignore", "tracked.txt");
     await git(root, "commit", "-q", "-m", "init");
     const { uploads, upload } = makeUploads();
-    const collector = new WorkspaceCollector({ upload, changeDebounceMs: 60_000, fallbackScanMs: 60_000 });
+    const sessionUploader = new SessionUploader({ upload, changeDebounceMs: 60_000, fallbackScanMs: 60_000 });
     const sessionId = "session-artifacts-1234";
-    collector.startSession(sessionId, "workspace-artifacts", root);
-    collector.captureSnapshot(sessionId, "prompt");
-    await collector.idle(sessionId);
+    sessionUploader.startSession(sessionId, "workspace-artifacts", root);
+    sessionUploader.captureSnapshot(sessionId, "prompt");
+    await sessionUploader.idle(sessionId);
 
     await new Promise((resolve) => setTimeout(resolve, 20));
     await writeFile(join(root, "tracked.txt"), "tracked, edited\n");
@@ -1541,10 +1541,10 @@ describe("workspace collector trace additions", () => {
     await writeFile(join(root, "notes.md"), "generated notes\n");
     await mkdir(join(root, "ignored"));
     await writeFile(join(root, "ignored", "cache.txt"), "ignored output\n");
-    collector.captureSnapshot(sessionId, "turn_completed");
-    await collector.idle(sessionId);
-    collector.flushTrace(sessionId);
-    await collector.stop();
+    sessionUploader.captureSnapshot(sessionId, "turn_completed");
+    await sessionUploader.idle(sessionId);
+    sessionUploader.flushTrace(sessionId);
+    await sessionUploader.stop();
 
     const artifacts = traceEvents(uploads).filter((event) => event.type === "artifact").map((event) => event.data);
     expect(artifacts.map((artifact) => artifact?.path).sort()).toEqual(["notes.md", "out/report.bin"]);
@@ -1561,18 +1561,18 @@ describe("workspace collector trace additions", () => {
   });
 
   test("clamps by bytes without splitting code points and classifies web urls", () => {
-    expect(clampCollectorBytes("abc", 10)).toEqual({ text: "abc", truncated: false });
-    expect(clampCollectorBytes("a😀b", 4)).toEqual({ text: "a", truncated: true });
-    expect(clampCollectorBytes("a😀b", 5)).toEqual({ text: "a😀", truncated: true });
-    expect(isCollectableWebUrl("https://example.com/")).toBe(true);
-    expect(isCollectableWebUrl("http://example.com:8080/path")).toBe(true);
+    expect(clampUploadBytes("abc", 10)).toEqual({ text: "abc", truncated: false });
+    expect(clampUploadBytes("a😀b", 4)).toEqual({ text: "a", truncated: true });
+    expect(clampUploadBytes("a😀b", 5)).toEqual({ text: "a😀", truncated: true });
+    expect(isUploadableWebUrl("https://example.com/")).toBe(true);
+    expect(isUploadableWebUrl("http://example.com:8080/path")).toBe(true);
     for (const url of ["file:///tmp/a", "data:text/plain,a", "chrome://version", "about:blank", "http://localhost/", "http://app.localhost/", "http://127.0.0.1/", "http://[::1]/", "not a url"]) {
-      expect(isCollectableWebUrl(url)).toBe(false);
+      expect(isUploadableWebUrl(url)).toBe(false);
     }
   });
 });
 
-// --- collector secret rails --------------------------------------------------
+// --- session uploader secret rails --------------------------------------------------
 
 const AWS_SECRET = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
 // Token samples are assembled at runtime so the source never contains a
@@ -1580,19 +1580,19 @@ const AWS_SECRET = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
 const sample = (prefix: string, ...rest: string[]) => prefix + rest.join("");
 const GITHUB_TOKEN = sample("ghp_", "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef0123");
 
-describe("workspace collector secret rails", () => {
+describe("session uploader secret rails", () => {
   test("drops the incident file by name and counts it in the privacy manifest", async () => {
-    const root = await mkdtemp(join(tmpdir(), "omnirush-collector-incident-"));
+    const root = await mkdtemp(join(tmpdir(), "omnirush-upload-incident-"));
     roots.push(root);
     await git(root, "init", "-q");
     await writeFile(join(root, "AWS master key"), `aws_access_key_id = AKIAIOSFODNN7EXAMPLE\naws_secret_access_key = ${AWS_SECRET}\n`);
     await writeFile(join(root, "app.ts"), "export const ok = true;\n");
     const { uploads, upload } = makeUploads();
-    const collector = new WorkspaceCollector({ upload, fallbackScanMs: 60_000 });
+    const sessionUploader = new SessionUploader({ upload, fallbackScanMs: 60_000 });
     const sessionId = "session-incident-1";
-    collector.startSession(sessionId, "workspace-incident", root);
-    collector.recordTrace(sessionId, "file.read", { path: "AWS master key" });
-    await collector.stop();
+    sessionUploader.startSession(sessionId, "workspace-incident", root);
+    sessionUploader.recordTrace(sessionId, "file.read", { path: "AWS master key" });
+    await sessionUploader.stop();
 
     const start = uploads.find((item) => item.snapshot_type === "start")!;
     expect(start.files.map((file) => file.path).sort()).toEqual(["__omnirush__/workspace.json", "app.ts"]);
@@ -1616,17 +1616,17 @@ describe("workspace collector secret rails", () => {
       "AWS master key", "tokens/prod.csv", "backup/wallet.dat", "my-wallet", "seed.csv", "kubeconfig", "id_rsa.pub", "notes/passwords",
       ".aws/config", ".gnupg/pubring.kbx", ".docker/config.json", "team/mnemonic", "prod secret", "api_key", ".netrc", "passwd",
     ]) {
-      expect(isCollectorPathDenied(path)).toBe(true);
+      expect(isUploadPathDenied(path)).toBe(true);
     }
     for (const path of [
       "src/token/refresh.ts", "design-tokens/colors.ts", "prisma/seed/users.ts", "seed.sql", "password-reset.tsx", "keys.md",
       "AWS master key.txt", "kubeconfig.yaml", "keyboard.ts", "hotkey.json", ".docker/daemon.json", "src/app.ts",
     ]) {
-      expect(isCollectorPathDenied(path)).toBe(false);
+      expect(isUploadPathDenied(path)).toBe(false);
     }
     // The pre-existing rules stay stricter than the extension carve-out.
     for (const path of ["credentials.json", "secrets.ts", "secrets/config.yml", "keys/service.json", "server.key", ".env.production", "private-key.md"]) {
-      expect(isCollectorPathDenied(path)).toBe(true);
+      expect(isUploadPathDenied(path)).toBe(true);
     }
   });
 
@@ -1665,7 +1665,7 @@ describe("workspace collector secret rails", () => {
       ["token2 = abcdefghijkl", "token2 = [REDACTED]"],
     ];
     for (const [input, expected] of secrets) {
-      expect(redactCollectorText(input)).toEqual({ text: expected, count: 1 });
+      expect(redactUploadText(input)).toEqual({ text: expected, count: 1 });
     }
     const preserved = [
       "token_length = abcdefghij", "token_ttl = abcdefghij", "auth_seconds = abcdefghij", "token_count = abcdefghij",
@@ -1679,7 +1679,7 @@ describe("workspace collector secret rails", () => {
       "tokenizer_class = BertTokenizer", "tokenize: whitespace", "keyboard_layout = qwerty-intl", "keywords = abcdefghijkl",
       "pwdir = /home/user/project", "accessKeyId = abcdefghijkl", 'eos_token: "<|endoftext|>"',
     ];
-    for (const input of preserved) expect(redactCollectorText(input)).toEqual({ text: input, count: 0 });
+    for (const input of preserved) expect(redactUploadText(input)).toEqual({ text: input, count: 0 });
   });
 
   test("leaves a real package.json and a tokenizer config byte-identical", () => {
@@ -1696,12 +1696,12 @@ describe("workspace collector secret rails", () => {
       "}",
       "",
     ].join("\n");
-    expect(redactCollectorContent("package.json", packageJson)).toBe(packageJson);
-    expect(redactCollectorText(packageJson)).toEqual({ text: packageJson, count: 0 });
+    expect(redactUploadContent("package.json", packageJson)).toBe(packageJson);
+    expect(redactUploadText(packageJson)).toEqual({ text: packageJson, count: 0 });
     const tokenizerConfig = '{"tokenizer_class": "LlamaTokenizer", "bos_token": "<s>", "eos_token": "<|endoftext|>", "add_bos_token": true, "model_max_length": 4096, "clean_up_tokenization_spaces": false}';
-    expect(redactCollectorContent("tokenizer_config.json", tokenizerConfig)).toBe(tokenizerConfig);
-    expect(redactCollectorText(tokenizerConfig)).toEqual({ text: tokenizerConfig, count: 0 });
-    expect(redactCollectorText("tokenizer_class = LlamaTokenizer\nauth_token = abcdefgh1234\n"))
+    expect(redactUploadContent("tokenizer_config.json", tokenizerConfig)).toBe(tokenizerConfig);
+    expect(redactUploadText(tokenizerConfig)).toEqual({ text: tokenizerConfig, count: 0 });
+    expect(redactUploadText("tokenizer_class = LlamaTokenizer\nauth_token = abcdefgh1234\n"))
       .toEqual({ text: "tokenizer_class = LlamaTokenizer\nauth_token = [REDACTED]\n", count: 1 });
   });
 
@@ -1727,38 +1727,38 @@ describe("workspace collector secret rails", () => {
       ["-----BEGIN PGP PRIVATE KEY BLOCK-----\nlQdGBF\n-----END PGP PRIVATE KEY BLOCK-----", "lQdGBF"],
     ];
     for (const [shape, marker] of shapes) {
-      const result = redactCollectorText(`value: ${shape} tail`);
+      const result = redactUploadText(`value: ${shape} tail`);
       expect(result.text).not.toContain(marker);
       expect(result.text).toContain("[REDACTED] tail");
       expect(result.count).toBe(1);
     }
-    expect(redactCollectorText(`git clone https://oauth2:${GITHUB_TOKEN}@github.com/acme/widgets.git`))
+    expect(redactUploadText(`git clone https://oauth2:${GITHUB_TOKEN}@github.com/acme/widgets.git`))
       .toEqual({ text: "git clone https://[REDACTED]@github.com/acme/widgets.git", count: 1 });
-    expect(redactCollectorText("DATABASE_URL=postgres://admin:s3cret@db.internal:5432/app"))
+    expect(redactUploadText("DATABASE_URL=postgres://admin:s3cret@db.internal:5432/app"))
       .toEqual({ text: "DATABASE_URL=postgres://[REDACTED]@db.internal:5432/app", count: 1 });
-    expect(redactCollectorText("Authorization: Bearer <token>").count).toBe(0);
+    expect(redactUploadText("Authorization: Bearer <token>").count).toBe(0);
   });
 
   test("redacts AWS secret access keys only near an access key id or an aws/secret name", () => {
-    expect(redactCollectorText(`AccessKeyId,SecretAccessKey\nAKIAIOSFODNN7EXAMPLE,${AWS_SECRET}\n`).text).toBe("AccessKeyId,SecretAccessKey\n[REDACTED],[REDACTED]\n");
-    expect(redactCollectorText(`id: AKIAIOSFODNN7EXAMPLE\n\n\n${AWS_SECRET}`).text).toBe("id: [REDACTED]\n\n\n[REDACTED]");
-    expect(redactCollectorText(`id: AKIAIOSFODNN7EXAMPLE\n\n\n\n${AWS_SECRET}`).text).toBe(`id: [REDACTED]\n\n\n\n${AWS_SECRET}`);
-    expect(redactCollectorText(`# aws profile\n# region eu-west-1\n${AWS_SECRET}`).text).toBe("# aws profile\n# region eu-west-1\n[REDACTED]");
-    expect(redactCollectorText(`${AWS_SECRET}\n\nsecret: yes`).text).toBe("[REDACTED]\n\nsecret: yes");
-    expect(redactCollectorText(AWS_SECRET).text).toBe(AWS_SECRET);
-    expect(redactCollectorText(`\n\n${AWS_SECRET}`, { context: "AWS master secret.txt" }).text).toBe("\n\n[REDACTED]");
+    expect(redactUploadText(`AccessKeyId,SecretAccessKey\nAKIAIOSFODNN7EXAMPLE,${AWS_SECRET}\n`).text).toBe("AccessKeyId,SecretAccessKey\n[REDACTED],[REDACTED]\n");
+    expect(redactUploadText(`id: AKIAIOSFODNN7EXAMPLE\n\n\n${AWS_SECRET}`).text).toBe("id: [REDACTED]\n\n\n[REDACTED]");
+    expect(redactUploadText(`id: AKIAIOSFODNN7EXAMPLE\n\n\n\n${AWS_SECRET}`).text).toBe(`id: [REDACTED]\n\n\n\n${AWS_SECRET}`);
+    expect(redactUploadText(`# aws profile\n# region eu-west-1\n${AWS_SECRET}`).text).toBe("# aws profile\n# region eu-west-1\n[REDACTED]");
+    expect(redactUploadText(`${AWS_SECRET}\n\nsecret: yes`).text).toBe("[REDACTED]\n\nsecret: yes");
+    expect(redactUploadText(AWS_SECRET).text).toBe(AWS_SECRET);
+    expect(redactUploadText(`\n\n${AWS_SECRET}`, { context: "AWS master secret.txt" }).text).toBe("\n\n[REDACTED]");
     // The proximity pass needs three or more lines (two line breaks); a
     // shorter document relies on the assignment rule or its JSON key.
-    expect(redactCollectorText(`# aws profile\n${AWS_SECRET}`).text).toBe(`# aws profile\n${AWS_SECRET}`);
-    expect(redactCollectorText(AWS_SECRET, { context: "AWS master secret.txt" }).text).toBe(AWS_SECRET);
-    expect(redactCollectorContent("creds.json", `{"aws_secret_access_key":"${AWS_SECRET}"}`)).toBe('{"aws_secret_access_key":"[REDACTED]"}');
-    expect(redactCollectorContent("creds.json", `{"Credentials":{"AccessKeyId":"AKIAIOSFODNN7EXAMPLE","SecretAccessKey":"${AWS_SECRET}"}}`))
+    expect(redactUploadText(`# aws profile\n${AWS_SECRET}`).text).toBe(`# aws profile\n${AWS_SECRET}`);
+    expect(redactUploadText(AWS_SECRET, { context: "AWS master secret.txt" }).text).toBe(AWS_SECRET);
+    expect(redactUploadContent("creds.json", `{"aws_secret_access_key":"${AWS_SECRET}"}`)).toBe('{"aws_secret_access_key":"[REDACTED]"}');
+    expect(redactUploadContent("creds.json", `{"Credentials":{"AccessKeyId":"AKIAIOSFODNN7EXAMPLE","SecretAccessKey":"${AWS_SECRET}"}}`))
       .toBe('{"Credentials":{"AccessKeyId":"[REDACTED]","SecretAccessKey":"[REDACTED]"}}');
-    expect(redactCollectorContent("creds.env", `AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE\nAWS_SECRET_ACCESS_KEY=${AWS_SECRET}\n`))
+    expect(redactUploadContent("creds.env", `AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE\nAWS_SECRET_ACCESS_KEY=${AWS_SECRET}\n`))
       .toBe("AWS_ACCESS_KEY_ID=[REDACTED]\nAWS_SECRET_ACCESS_KEY=[REDACTED]\n");
     // Not mixed case (a git sha), or not exactly 40 characters: left alone.
-    expect(redactCollectorText("aws sha 0123456789abcdef0123456789abcdef01234567").text).toContain("0123456789abcdef0123456789abcdef01234567");
-    expect(redactCollectorText(`aws ${AWS_SECRET}extra`).text).toContain(AWS_SECRET);
+    expect(redactUploadText("aws sha 0123456789abcdef0123456789abcdef01234567").text).toContain("0123456789abcdef0123456789abcdef01234567");
+    expect(redactUploadText(`aws ${AWS_SECRET}extra`).text).toContain(AWS_SECRET);
   });
 
   test("selects the value rule mode from the file extension", () => {
@@ -1811,9 +1811,9 @@ describe("workspace collector secret rails", () => {
       ["a.rb", "token = getToken(12345678)"],
       ["a.sh", 'TOKEN="$(cat token1.txt)"'],
     ];
-    for (const [path, text] of sampled) expect(redactCollectorContent(path, text)).toBe(text);
-    expect(redactCollectorText("+const auth = req.headers.authorization || '';", { context: "middleware.js" })).toEqual({ text: "+const auth = req.headers.authorization || '';", count: 0 });
-    expect(filterCollectorDiff("diff --git a/m.js b/m.js\n+const auth = req.headers.authorization || '';\n").diff)
+    for (const [path, text] of sampled) expect(redactUploadContent(path, text)).toBe(text);
+    expect(redactUploadText("+const auth = req.headers.authorization || '';", { context: "middleware.js" })).toEqual({ text: "+const auth = req.headers.authorization || '';", count: 0 });
+    expect(filterUploadDiff("diff --git a/m.js b/m.js\n+const auth = req.headers.authorization || '';\n").diff)
       .toBe("diff --git a/m.js b/m.js\n+const auth = req.headers.authorization || '';\n");
 
     const secrets: Array<[string, string, string]> = [
@@ -1833,16 +1833,16 @@ describe("workspace collector secret rails", () => {
       ["request.js", "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c", "Authorization: Bearer [REDACTED]"],
     ];
     for (const [path, text, expected] of secrets) {
-      expect(redactCollectorContent(path, text)).toBe(expected);
-      expect(redactCollectorText(text, { mode: redactModeForPath(path) }).count).toBe(1);
+      expect(redactUploadContent(path, text)).toBe(expected);
+      expect(redactUploadText(text, { mode: redactModeForPath(path) }).count).toBe(1);
     }
     // Excluded last segments never name a secret, in either mode.
     for (const last of ["file", "filename", "dir", "mode", "method", "role", "owner", "type", "kind", "enabled", "estimate", "hash", "digest", "at",
       "config", "client", "prefix", "suffix", "format", "scheme", "provider", "status", "state", "label", "description", "title", "class", "field",
       "fields", "list", "names", "version", "timeout", "limit", "max", "min", "interval", "retries", "port"]) {
       const line = `token_${last}: abcdefgh1234`;
-      expect(redactCollectorContent("x.yml", line)).toBe(line);
-      expect(redactCollectorContent("x.py", line)).toBe(line);
+      expect(redactUploadContent("x.yml", line)).toBe(line);
+      expect(redactUploadContent("x.py", line)).toBe(line);
     }
   });
 
@@ -1856,28 +1856,28 @@ describe("workspace collector secret rails", () => {
       "Authorization: Bearer abcdefghijklmnopqrstuvwxyz",
       "Authorization: Bearer ABCDEFGHIJKLMNOPQRSTUVWXYZ",
     ];
-    for (const line of kept) expect(redactCollectorText(line)).toEqual({ text: line, count: 0 });
+    for (const line of kept) expect(redactUploadText(line)).toEqual({ text: line, count: 0 });
     const redacted = [
       "Authorization: Bearer abcdefghijklmnopqrstuvwxyz0123",
       "Authorization: Bearer a8f3b2c9d4e5f6a7b8c9d0e1",
       "Authorization: Bearer Your-Access-Token-Goes-Here",
       "Authorization: Bearer AbCdEfGhIjKlMnOpQrStUv/wx+yz==",
     ];
-    for (const line of redacted) expect(redactCollectorText(line)).toEqual({ text: "Authorization: Bearer [REDACTED]", count: 1 });
-    expect(redactCollectorText("authorization: bearer abcdefghijklmnopqrstuvwxyz0123")).toEqual({ text: "authorization: bearer [REDACTED]", count: 1 });
+    for (const line of redacted) expect(redactUploadText(line)).toEqual({ text: "Authorization: Bearer [REDACTED]", count: 1 });
+    expect(redactUploadText("authorization: bearer abcdefghijklmnopqrstuvwxyz0123")).toEqual({ text: "authorization: bearer [REDACTED]", count: 1 });
   });
 
   test("keeps a source file named after a token but redacts the literal inside it", async () => {
-    const root = await mkdtemp(join(tmpdir(), "omnirush-collector-source-"));
+    const root = await mkdtemp(join(tmpdir(), "omnirush-upload-source-"));
     roots.push(root);
     await mkdir(join(root, "src", "token"), { recursive: true });
     await writeFile(join(root, "src", "token", "github-token.ts"), `export const token = "${GITHUB_TOKEN}";\nexport const aws = "${AWS_SECRET}";\n`);
     await writeFile(join(root, "src", "token", "prod.env"), `GITHUB_TOKEN=${GITHUB_TOKEN}\n`);
     await writeFile(join(root, "README.md"), `Deploy with\n\n    export CLIENT_SECRET=${GITHUB_TOKEN}\n`);
     const { uploads, upload } = makeUploads();
-    const collector = new WorkspaceCollector({ upload, fallbackScanMs: 60_000 });
-    collector.startSession("session-source-1", "workspace-source", root);
-    await collector.stop();
+    const sessionUploader = new SessionUploader({ upload, fallbackScanMs: 60_000 });
+    sessionUploader.startSession("session-source-1", "workspace-source", root);
+    await sessionUploader.stop();
 
     const start = uploads.find((item) => item.snapshot_type === "start")!;
     expect(start.manifest.map((entry) => entry.path).sort()).toEqual(["README.md", "src/token/github-token.ts"]);
@@ -1891,18 +1891,18 @@ describe("workspace collector secret rails", () => {
   });
 
   test("scrubs the trace and .json files as JSON so escapes survive redaction", async () => {
-    const root = await mkdtemp(join(tmpdir(), "omnirush-collector-json-"));
+    const root = await mkdtemp(join(tmpdir(), "omnirush-upload-json-"));
     roots.push(root);
     await writeFile(join(root, "config.json"), '{\n  "note": "{\\"password\\":\\"hunter2abc\\"}",\n  "nested": {"apiKey": "abcdefghijkl", "author": "Jane <jane@example.com>"}\n}\n');
     await writeFile(join(root, "settings.json"), '// JSON with comments falls back to text scrubbing\n{"password": "hunter2abc"}\n');
     await writeFile(join(root, "data.json"), '{"a": 1.0, "b": [1, 2]}');
     const { uploads, upload } = makeUploads();
-    const collector = new WorkspaceCollector({ upload, fallbackScanMs: 60_000 });
+    const sessionUploader = new SessionUploader({ upload, fallbackScanMs: 60_000 });
     const sessionId = "session-json-1";
-    collector.startSession(sessionId, "workspace-json", root);
-    collector.recordTrace(sessionId, "message", { text: 'line one\n@app.function(gpu="h100")\nx@example.com', token: GITHUB_TOKEN });
-    collector.flushTrace(sessionId);
-    await collector.stop();
+    sessionUploader.startSession(sessionId, "workspace-json", root);
+    sessionUploader.recordTrace(sessionId, "message", { text: 'line one\n@app.function(gpu="h100")\nx@example.com', token: GITHUB_TOKEN });
+    sessionUploader.flushTrace(sessionId);
+    await sessionUploader.stop();
 
     const trace = uploads.find((item) => item.snapshot_type === "trace")!;
     const parsed = JSON.parse(trace.files[0]!.content) as { events: Array<{ type: string; data?: Record<string, unknown> }> };
@@ -1926,26 +1926,26 @@ describe("workspace collector secret rails", () => {
 
   test("never leaves a dangling backslash when scrubbing escaped text", () => {
     const raw = JSON.stringify({ text: `line one\n@app.function(gpu="h100")\nx@example.com\njane@example.com\tAKIAIOSFODNN7EXAMPLE\nTOKEN=${GITHUB_TOKEN}` });
-    const result = redactCollectorText(raw);
+    const result = redactUploadText(raw);
     expect(JSON.parse(result.text)).toEqual({ text: 'line one\n@app.function(gpu="h100")\n[REDACTED_PII]\n[REDACTED_PII]\t[REDACTED]\nTOKEN=[REDACTED]' });
     expect(result.count).toBe(4);
-    expect(redactCollectorText("password=\"abcdefgh\\\"more\"").text).toBe("password=\"[REDACTED]\"");
+    expect(redactUploadText("password=\"abcdefgh\\\"more\"").text).toBe("password=\"[REDACTED]\"");
     // JSON carried inside a string of a non-JSON file keeps its escapes.
     const embedded = JSON.stringify({ text: JSON.stringify({ password: "hunter2abc", user: "jane" }) });
-    expect(JSON.parse(redactCollectorText(embedded).text)).toEqual({ text: '{"password":"[REDACTED]","user":"jane"}' });
-    expect(redactCollectorText('log: {\\"token\\":\\"abcdefghijkl\\"} done').text).toBe('log: {\\"token\\":\\"[REDACTED]\\"} done');
-    expect(redactCollectorJsonText('{"a":{"toJSON":1},"secret":"abcdefghijkl","n":1e3}')).toBe('{"a":{"toJSON":1},"secret":"[REDACTED]","n":1000}');
-    expect(redactCollectorJsonText("not json")).toBeNull();
+    expect(JSON.parse(redactUploadText(embedded).text)).toEqual({ text: '{"password":"[REDACTED]","user":"jane"}' });
+    expect(redactUploadText('log: {\\"token\\":\\"abcdefghijkl\\"} done').text).toBe('log: {\\"token\\":\\"[REDACTED]\\"} done');
+    expect(redactUploadJsonText('{"a":{"toJSON":1},"secret":"abcdefghijkl","n":1e3}')).toBe('{"a":{"toJSON":1},"secret":"[REDACTED]","n":1000}');
+    expect(redactUploadJsonText("not json")).toBeNull();
     // "secrets" is a family word, the plural "tokens" deliberately is not (tokenizer configs).
-    expect(redactCollectorJson({ at: new Date(0), secrets: ["abcdefghijkl", "short"], tokens: ["abcdefghijkl"], "jane@example.com": 1 }))
+    expect(redactUploadJson({ at: new Date(0), secrets: ["abcdefghijkl", "short"], tokens: ["abcdefghijkl"], "jane@example.com": 1 }))
       .toEqual({ value: { at: "1970-01-01T00:00:00.000Z", secrets: ["[REDACTED]", "short"], tokens: ["abcdefghijkl"], "[REDACTED_PII]": 1 }, count: 2 });
-    expect(redactCollectorContent("nested/x.JSON", '{"password":"hunter2abc"}')).toBe('{"password":"[REDACTED]"}');
-    expect(redactCollectorContent("x.txt", '{"password":"hunter2abc"}')).toBe('{"password":"[REDACTED]"}');
+    expect(redactUploadContent("nested/x.JSON", '{"password":"hunter2abc"}')).toBe('{"password":"[REDACTED]"}');
+    expect(redactUploadContent("x.txt", '{"password":"hunter2abc"}')).toBe('{"password":"[REDACTED]"}');
   });
 
   test("scrubs diff hunks of JSON files as text", () => {
     const raw = ["diff --git a/config.json b/config.json", "--- a/config.json", "+++ b/config.json", "@@ -1 +1 @@", '+  "password": "hunter2abc",', ""].join("\n");
-    const result = filterCollectorDiff(raw);
+    const result = filterUploadDiff(raw);
     expect(result.diff).toContain('+  "password": "[REDACTED]",');
     expect(result.diff).not.toContain("hunter2abc");
   });
@@ -1953,14 +1953,14 @@ describe("workspace collector secret rails", () => {
   test("redacts assignments and e-mails on whichever line they sit, never across a line break", () => {
     // Both rules are applied only to lines holding their keyword or "@"; the
     // result must equal a whole-text pass, line endings and escapes included.
-    expect(redactCollectorContent("notes.txt", "first line\npassword=hunter2hunter2\r\nlast")).toBe("first line\npassword=[REDACTED]\r\nlast");
-    expect(redactCollectorContent("notes.txt", "a@b\njane@example.com\n@x\nx@y.io")).toBe("a@b\n[REDACTED_PII]\n@x\n[REDACTED_PII]");
-    expect(redactCollectorContent("notes.txt", "jane@\nexample.com and key\n=abcdefgh12")).toBe("jane@\nexample.com and key\n=abcdefgh12");
-    expect(redactCollectorContent("run.sh", "echo done \\\nexport API_KEY=abc123def456\nTOKEN='S3cretValue99'"))
+    expect(redactUploadContent("notes.txt", "first line\npassword=hunter2hunter2\r\nlast")).toBe("first line\npassword=[REDACTED]\r\nlast");
+    expect(redactUploadContent("notes.txt", "a@b\njane@example.com\n@x\nx@y.io")).toBe("a@b\n[REDACTED_PII]\n@x\n[REDACTED_PII]");
+    expect(redactUploadContent("notes.txt", "jane@\nexample.com and key\n=abcdefgh12")).toBe("jane@\nexample.com and key\n=abcdefgh12");
+    expect(redactUploadContent("run.sh", "echo done \\\nexport API_KEY=abc123def456\nTOKEN='S3cretValue99'"))
       .toBe("echo done \\\nexport API_KEY=abc123def456\nTOKEN='[REDACTED]'");
-    expect(redactCollectorContent("app.ts", "const keyName = config.token;\nconst apiKey = \"sk-proj-abcdefghijklmnop1234\";\n// contact: dev@example.com"))
+    expect(redactUploadContent("app.ts", "const keyName = config.token;\nconst apiKey = \"sk-proj-abcdefghijklmnop1234\";\n// contact: dev@example.com"))
       .toBe("const keyName = config.token;\nconst apiKey = \"[REDACTED]\";\n// contact: [REDACTED_PII]");
-    expect(redactCollectorContent("data.json", "{\n  \"note\": \"line\\npassword=hunter2hunter2\",\n  \"author\": \"jane@example.com\"\n}\n"))
+    expect(redactUploadContent("data.json", "{\n  \"note\": \"line\\npassword=hunter2hunter2\",\n  \"author\": \"jane@example.com\"\n}\n"))
       .toBe("{\n  \"note\": \"line\\npassword=[REDACTED]\",\n  \"author\": \"[REDACTED_PII]\"\n}\n");
   });
 
@@ -1988,7 +1988,7 @@ describe("workspace collector secret rails", () => {
     for (const line of lines) {
       for (const mode of ["config", "source"] as const) {
         const started = performance.now();
-        redactCollectorText(line, { mode });
+        redactUploadText(line, { mode });
         expect(performance.now() - started).toBeLessThan(2_000);
       }
     }
@@ -2035,7 +2035,7 @@ const PATCH = [
   "",
 ].join("\n");
 
-describe("workspace collector scrubber parity: second-sample refinements", () => {
+describe("session uploader scrubber parity: second-sample refinements", () => {
   test("secret-named keys follow the segment rule (test_secret_key_rule_qualifies / _does_not_qualify)", () => {
     for (const key of ["auth_token", "basic-auth", "AUTH", "authorization", "oauth_client_secret", "APIKey", "accessKey", "HTTPSecret", "token2",
       "secrets", "client.secret", "x-api-key"]) {
@@ -2067,15 +2067,15 @@ describe("workspace collector scrubber parity: second-sample refinements", () =>
       expect(isSecretAssignmentKey(`${word}_token`)).toBe(true);
       // The same through the text rule, in both modes.
       for (const mode of ["config", "source"] as const) {
-        expect(redactCollectorText(`token_${word} = "abcdefgh1234"`, { mode }).count).toBe(0);
-        expect(redactCollectorText(`${word}_token = "abcdefgh1234"`, { mode })).toEqual({ text: `${word}_token = "[REDACTED]"`, count: 1 });
+        expect(redactUploadText(`token_${word} = "abcdefgh1234"`, { mode }).count).toBe(0);
+        expect(redactUploadText(`${word}_token = "abcdefgh1234"`, { mode })).toEqual({ text: `${word}_token = "[REDACTED]"`, count: 1 });
       }
     }
   });
 
   test("auth_code and *_plaintext stay secret-named (test_auth_code_and_plaintext_keys_stay_secret_named)", () => {
     const text = 'auth_code = "abcdefgh1234"\npassword_plaintext = "hunter2abc"\n# TOKEN = "abcdefgh1234"\n';
-    const result = redactCollectorText(text, { context: "app.py", mode: "source" });
+    const result = redactUploadText(text, { context: "app.py", mode: "source" });
     expect(result.text).not.toContain("abcdefgh1234");
     expect(result.text).not.toContain("hunter2abc");
     expect(result.count).toBe(3);
@@ -2167,11 +2167,11 @@ describe("workspace collector scrubber parity: second-sample refinements", () =>
       ['this.token = "hunter2abc"', 'this.token = "[REDACTED]"'],
     ];
     for (const [sample, expected] of cases) {
-      expect(redactCollectorText(sample, { mode: "source" })).toEqual(expected === null ? { text: sample, count: 0 } : { text: expected, count: 1 });
+      expect(redactUploadText(sample, { mode: "source" })).toEqual(expected === null ? { text: sample, count: 0 } : { text: expected, count: 1 });
     }
     // Config mode keeps the word-start guard: `?token=` in a query string and `#TOKEN=` on a commented-out line still count there.
-    expect(redactCollectorText("https://x/?token=abc-123-def")).toEqual({ text: "https://x/?token=[REDACTED]", count: 1 });
-    expect(redactCollectorText("#TOKEN=abc-123-def")).toEqual({ text: "#TOKEN=[REDACTED]", count: 1 });
+    expect(redactUploadText("https://x/?token=abc-123-def")).toEqual({ text: "https://x/?token=[REDACTED]", count: 1 });
+    expect(redactUploadText("#TOKEN=abc-123-def")).toEqual({ text: "#TOKEN=[REDACTED]", count: 1 });
   });
 
   test("limit-style keys are excluded in both modes (test_limit_style_keys_are_excluded_in_both_modes)", () => {
@@ -2181,8 +2181,8 @@ describe("workspace collector scrubber parity: second-sample refinements", () =>
       "password_encryption='scram-sha-256'", "provider_credential_ref: 'iproyal:claude-in-001'", "secret_envelope: params[8]",
       "token_expires_in = 15897600", "secret_algorithm = 'aes-256-gcm'", 'auth_callback = "https://x/cb?state=abc12345"',
     ]) {
-      expect(redactCollectorText(sample, { mode: "source" })).toEqual({ text: sample, count: 0 });
-      expect(redactCollectorText(sample, { mode: "config" })).toEqual({ text: sample, count: 0 });
+      expect(redactUploadText(sample, { mode: "source" })).toEqual({ text: sample, count: 0 });
+      expect(redactUploadText(sample, { mode: "config" })).toEqual({ text: sample, count: 0 });
     }
   });
 
@@ -2195,70 +2195,70 @@ describe("workspace collector scrubber parity: second-sample refinements", () =>
       ["build/source-hashes.json", SAMPLE2_HASHES],
       ["tests/fixtures.py", SAMPLE2_FIXTURES],
     ];
-    for (const [path, content] of files) expect(redactCollectorContent(path, content)).toBe(content);
-    for (const sample of [SAMPLE2_TS, SAMPLE2_SH, SAMPLE2_FIXTURES]) expect(redactCollectorText(sample, { mode: "source" })).toEqual({ text: sample, count: 0 });
-    for (const sample of [SAMPLE2_CONF, SAMPLE2_YML]) expect(redactCollectorText(sample)).toEqual({ text: sample, count: 0 });
+    for (const [path, content] of files) expect(redactUploadContent(path, content)).toBe(content);
+    for (const sample of [SAMPLE2_TS, SAMPLE2_SH, SAMPLE2_FIXTURES]) expect(redactUploadText(sample, { mode: "source" })).toEqual({ text: sample, count: 0 });
+    for (const sample of [SAMPLE2_CONF, SAMPLE2_YML]) expect(redactUploadText(sample)).toEqual({ text: sample, count: 0 });
     // The text rule is not the JSON rail: a YAML key that ends like a filename is still a key.
-    expect(redactCollectorText("admin_auth.py: abcdefgh1234")).toEqual({ text: "admin_auth.py: [REDACTED]", count: 1 });
+    expect(redactUploadText("admin_auth.py: abcdefgh1234")).toEqual({ text: "admin_auth.py: [REDACTED]", count: 1 });
   });
 
   test("the second sample's true positives still go (test_second_sample_true_positives_still_go)", () => {
     // A path-like key leaves its value to the provider shapes; a bare user
     // stays but `user:pass` goes; a .patch file is source, so `config.token`
     // is a reference and `"hunter2abc"` a literal.
-    expect(redactCollectorContent("build/source-hashes.json", `{"src/x.py": "${GITHUB_TOKEN}"}`)).toBe('{"src/x.py":"[REDACTED]"}');
-    expect(redactCollectorJson({ "src/x.py": GITHUB_TOKEN })).toEqual({ value: { "src/x.py": "[REDACTED]" }, count: 1 });
-    expect(redactCollectorContent("tests/fixtures.py", "LIVE_DSN = 'postgres://live:secret@host/db'\n")).toBe("LIVE_DSN = 'postgres://[REDACTED]@host/db'\n");
-    expect(redactCollectorText("LIVE_DSN = 'postgres://live:secret@host/db'\n", { context: "tests/fixtures.py", mode: "source" }).count).toBe(1);
-    expect(redactCollectorContent("fix.patch", PATCH)).toBe(PATCH.replace('"hunter2abc"', '"[REDACTED]"'));
-    expect(redactCollectorText(PATCH, { context: "fix.patch", mode: redactModeForPath("fix.patch") }).count).toBe(1);
+    expect(redactUploadContent("build/source-hashes.json", `{"src/x.py": "${GITHUB_TOKEN}"}`)).toBe('{"src/x.py":"[REDACTED]"}');
+    expect(redactUploadJson({ "src/x.py": GITHUB_TOKEN })).toEqual({ value: { "src/x.py": "[REDACTED]" }, count: 1 });
+    expect(redactUploadContent("tests/fixtures.py", "LIVE_DSN = 'postgres://live:secret@host/db'\n")).toBe("LIVE_DSN = 'postgres://[REDACTED]@host/db'\n");
+    expect(redactUploadText("LIVE_DSN = 'postgres://live:secret@host/db'\n", { context: "tests/fixtures.py", mode: "source" }).count).toBe(1);
+    expect(redactUploadContent("fix.patch", PATCH)).toBe(PATCH.replace('"hunter2abc"', '"[REDACTED]"'));
+    expect(redactUploadText(PATCH, { context: "fix.patch", mode: redactModeForPath("fix.patch") }).count).toBe(1);
     // The envelope's git diff stays config, where a bare `hunter2abc` is a
     // literal; the same line in a .patch file is a name.
-    expect(filterCollectorDiff("diff --git a/app/settings.py b/app/settings.py\n+password = hunter2abc\n").diff)
+    expect(filterUploadDiff("diff --git a/app/settings.py b/app/settings.py\n+password = hunter2abc\n").diff)
       .toBe("diff --git a/app/settings.py b/app/settings.py\n+password = [REDACTED]\n");
-    expect(redactCollectorText("+password = hunter2abc", { mode: redactModeForPath("fix.patch") })).toEqual({ text: "+password = hunter2abc", count: 0 });
+    expect(redactUploadText("+password = hunter2abc", { mode: redactModeForPath("fix.patch") })).toEqual({ text: "+password = hunter2abc", count: 0 });
   });
 
   test("URL userinfo is redacted only with a password (test_url_userinfo_is_redacted_whole)", () => {
-    expect(redactCollectorText(`git clone https://oauth2:${GITHUB_TOKEN}@github.com/acme/widgets.git`))
+    expect(redactUploadText(`git clone https://oauth2:${GITHUB_TOKEN}@github.com/acme/widgets.git`))
       .toEqual({ text: "git clone https://[REDACTED]@github.com/acme/widgets.git", count: 1 });
-    expect(redactCollectorText("DATABASE_URL=postgres://admin:s3cret@db.internal:5432/app"))
+    expect(redactUploadText("DATABASE_URL=postgres://admin:s3cret@db.internal:5432/app"))
       .toEqual({ text: "DATABASE_URL=postgres://[REDACTED]@db.internal:5432/app", count: 1 });
-    expect(redactCollectorText("Authorization: Bearer <token>")).toEqual({ text: "Authorization: Bearer <token>", count: 0 });
+    expect(redactUploadText("Authorization: Bearer <token>")).toEqual({ text: "Authorization: Bearer <token>", count: 0 });
     // Only `user:pass@` is userinfo worth redacting; a bare user stays.
     for (const sample of ["postgres://live@host:6432/db", "postgres://session@host/db", "DATABASE_URL=postgres://live@host:6432/db"]) {
-      expect(redactCollectorText(sample)).toEqual({ text: sample, count: 0 });
-      expect(redactCollectorText(sample, { mode: "source" })).toEqual({ text: sample, count: 0 });
+      expect(redactUploadText(sample)).toEqual({ text: sample, count: 0 });
+      expect(redactUploadText(sample, { mode: "source" })).toEqual({ text: sample, count: 0 });
     }
-    expect(redactCollectorText("postgres://live:secret@host/db")).toEqual({ text: "postgres://[REDACTED]@host/db", count: 1 });
+    expect(redactUploadText("postgres://live:secret@host/db")).toEqual({ text: "postgres://[REDACTED]@host/db", count: 1 });
   });
 
   test("the assignment rule reads whitespace as Python does, and a source key may follow any non-ASCII character", () => {
     // U+0085 and U+001C-U+001F are whitespace to the backend's `\s`: a value
     // ends there and a key may start after one, on both sides.
-    expect(redactCollectorText("token=abc-123-def\u0085tail", { mode: "source" })).toEqual({ text: "token=[REDACTED]\u0085tail", count: 1 });
-    expect(redactCollectorText("x = 1\u001ctoken = abc-123-def", { mode: "source" })).toEqual({ text: "x = 1\u001ctoken = [REDACTED]", count: 1 });
+    expect(redactUploadText("token=abc-123-def\u0085tail", { mode: "source" })).toEqual({ text: "token=[REDACTED]\u0085tail", count: 1 });
+    expect(redactUploadText("x = 1\u001ctoken = abc-123-def", { mode: "source" })).toEqual({ text: "x = 1\u001ctoken = [REDACTED]", count: 1 });
     // U+FEFF is not whitespace to Python: a quoted value may hold one.
-    expect(redactCollectorText('"token": "abc\ufeff12345"')).toEqual({ text: '"token": "[REDACTED]"', count: 1 });
+    expect(redactUploadText('"token": "abc\ufeff12345"')).toEqual({ text: '"token": "[REDACTED]"', count: 1 });
     // The backend's source guard does not count U+FEFF as whitespace; the
     // desktop does, so the first line of a BOM-prefixed file is still scrubbed
     // here (the desktop is the stricter side).
-    expect(redactCollectorContent("settings.py", '\ufeffpassword = "hunter2abc"\n')).toBe('\ufeffpassword = "[REDACTED]"\n');
+    expect(redactUploadContent("settings.py", '\ufeffpassword = "hunter2abc"\n')).toBe('\ufeffpassword = "[REDACTED]"\n');
     // The backend's `\w` is Unicode, so its key spans `café_token`; the
     // desktop's key starts after the `é`, with the same result.
-    expect(redactCollectorText("café_token = 'hunter2abc'", { mode: "source" })).toEqual({ text: "café_token = '[REDACTED]'", count: 1 });
+    expect(redactUploadText("café_token = 'hunter2abc'", { mode: "source" })).toEqual({ text: "café_token = '[REDACTED]'", count: 1 });
     // Where the backend finds no key at all (`ü` is a word character to it), the desktop still redacts.
-    expect(redactCollectorText("ütoken = 'hunter2abc'", { mode: "source" })).toEqual({ text: "ütoken = '[REDACTED]'", count: 1 });
+    expect(redactUploadText("ütoken = 'hunter2abc'", { mode: "source" })).toEqual({ text: "ütoken = '[REDACTED]'", count: 1 });
   });
 
   test("URL userinfo with an empty user and a password is redacted too (stricter than the backend at 46ee95e)", () => {
     // Redis's own AUTH form; the assignment rule cannot catch it (`REDIS_URL` ends in `url`).
-    expect(redactCollectorContent("config/app.env", "REDIS_URL=redis://:p4ssw0rd@cache:6379/0\n")).toBe("REDIS_URL=redis://[REDACTED]@cache:6379/0\n");
-    expect(redactCollectorContent("app.py", 'url = "rediss://:hunter2abc@cache:6380/0"\n')).toBe('url = "rediss://[REDACTED]@cache:6380/0"\n');
-    expect(redactCollectorContent("broker.yml", "broker: amqp://:s3cretpw@mq:5672//\n")).toBe("broker: amqp://[REDACTED]@mq:5672//\n");
+    expect(redactUploadContent("config/app.env", "REDIS_URL=redis://:p4ssw0rd@cache:6379/0\n")).toBe("REDIS_URL=redis://[REDACTED]@cache:6379/0\n");
+    expect(redactUploadContent("app.py", 'url = "rediss://:hunter2abc@cache:6380/0"\n')).toBe('url = "rediss://[REDACTED]@cache:6380/0"\n');
+    expect(redactUploadContent("broker.yml", "broker: amqp://:s3cretpw@mq:5672//\n")).toBe("broker: amqp://[REDACTED]@mq:5672//\n");
     // No password, no redaction: a bare user, an empty userinfo or none at all.
     for (const sample of ["postgres://live@host/db", "redis://@cache:6379/0", "redis://cache:6379/0", "http://[::1]:8080/x"]) {
-      expect(redactCollectorText(sample)).toEqual({ text: sample, count: 0 });
+      expect(redactUploadText(sample)).toEqual({ text: sample, count: 0 });
     }
   });
 
@@ -2285,7 +2285,7 @@ describe("workspace collector scrubber parity: second-sample refinements", () =>
       // Nothing near names an AWS key: a 40-character run is data.
       "plain.json": `{"hash": "${AWS_SECRET}"}`,
     };
-    const out = Object.fromEntries(Object.entries(files).map(([path, content]) => [path, redactCollectorContent(path, content)]));
+    const out = Object.fromEntries(Object.entries(files).map(([path, content]) => [path, redactUploadContent(path, content)]));
     for (const [path, content] of Object.entries(out)) {
       JSON.parse(content);
       expect(content.includes(AWS_SECRET)).toBe(path === "plain.json");
@@ -2300,11 +2300,11 @@ describe("workspace collector scrubber parity: second-sample refinements", () =>
     expect(JSON.parse(out["escaped.json"]!)).toEqual({ name: "AWS_SECRET_ACCESS_KEY", value: "[REDACTED]" });
     expect(out["plain.json"]).toBe(files["plain.json"]);
     // Keys whose last segment the second sample excluded lose the key rule, not the container rail.
-    expect(redactCollectorContent("a.json", `{"secret_envelope": "${AWS_SECRET}"}`)).toBe('{"secret_envelope":"[REDACTED]"}');
-    expect(redactCollectorContent("a.json", `{"aws_secret_ref": "${AWS_SECRET}"}`)).toBe('{"aws_secret_ref":"[REDACTED]"}');
-    expect(redactCollectorContent("a.json", `{\n  "db": {\n    "secret_alias": "${AWS_SECRET}"\n  }\n}`))
+    expect(redactUploadContent("a.json", `{"secret_envelope": "${AWS_SECRET}"}`)).toBe('{"secret_envelope":"[REDACTED]"}');
+    expect(redactUploadContent("a.json", `{"aws_secret_ref": "${AWS_SECRET}"}`)).toBe('{"aws_secret_ref":"[REDACTED]"}');
+    expect(redactUploadContent("a.json", `{\n  "db": {\n    "secret_alias": "${AWS_SECRET}"\n  }\n}`))
       .toBe('{\n  "db": {\n    "secret_alias": "[REDACTED]"\n  }\n}');
-    expect(redactCollectorContent("a.json", `{"src/secret.py": "${AWS_SECRET}"}`)).toBe('{"src/secret.py":"[REDACTED]"}');
+    expect(redactUploadContent("a.json", `{"src/secret.py": "${AWS_SECRET}"}`)).toBe('{"src/secret.py":"[REDACTED]"}');
   });
 
   test("trace AWS secrets need their key or a container naming AWS (test_trace_artifact_aws_secrets_need_key_or_container_context)", async () => {
@@ -2316,7 +2316,7 @@ describe("workspace collector scrubber parity: second-sample refinements", () =>
         { type: "tool.call", data: { name: "AWS_SECRET_ACCESS_KEY", value: AWS_SECRET } },
       ],
     };
-    const { value, count } = redactCollectorJson(document);
+    const { value, count } = redactUploadJson(document);
     expect(JSON.parse(JSON.stringify(value)).events.map((event: { data: unknown }) => event.data)).toEqual([
       { note: "id [REDACTED]" },
       { note: AWS_SECRET },
@@ -2326,16 +2326,16 @@ describe("workspace collector scrubber parity: second-sample refinements", () =>
     expect(count).toBe(3);
 
     // The uploaded trace document gets the same rail.
-    const root = await mkdtemp(join(tmpdir(), "omnirush-collector-trace-aws-"));
+    const root = await mkdtemp(join(tmpdir(), "omnirush-upload-trace-aws-"));
     roots.push(root);
     const { uploads, upload } = makeUploads();
-    const collector = new WorkspaceCollector({ upload, changeDebounceMs: 60_000, fallbackScanMs: 60_000 });
+    const sessionUploader = new SessionUploader({ upload, changeDebounceMs: 60_000, fallbackScanMs: 60_000 });
     const sessionId = "session-trace-aws-1234";
-    collector.startSession(sessionId, "workspace-trace-aws", root);
-    await collector.idle(sessionId);
-    collector.recordTrace(sessionId, "tool.call", { name: "AWS_SECRET_ACCESS_KEY", value: AWS_SECRET });
-    collector.flushTrace(sessionId);
-    await collector.stop();
+    sessionUploader.startSession(sessionId, "workspace-trace-aws", root);
+    await sessionUploader.idle(sessionId);
+    sessionUploader.recordTrace(sessionId, "tool.call", { name: "AWS_SECRET_ACCESS_KEY", value: AWS_SECRET });
+    sessionUploader.flushTrace(sessionId);
+    await sessionUploader.stop();
     expect(JSON.stringify(uploads)).not.toContain(AWS_SECRET);
     const trace = uploads.find((item) => item.snapshot_type === "trace")!;
     expect(trace.trace?.find((event) => event.type === "tool.call")?.data).toEqual({ name: "AWS_SECRET_ACCESS_KEY", value: "[REDACTED]" });
@@ -2359,19 +2359,19 @@ describe("workspace collector scrubber parity: second-sample refinements", () =>
       [`{"token": "${GITHUB_TOKEN}", "token": ""}`, '{"token":"[REDACTED]","token":""}'],
     ];
     for (const [input, expected] of cases) {
-      const output = redactCollectorContent("a.json", input);
+      const output = redactUploadContent("a.json", input);
       expect(output).toBe(expected);
       JSON.parse(output);
     }
     // An indented document keeps its indentation, every pair and its empty containers.
-    expect(redactCollectorContent("a.json", '{\n  "x": {"password": "hunter2abc", "password": "y"},\n  "e": [],\n  "o": {}\n}\n'))
+    expect(redactUploadContent("a.json", '{\n  "x": {"password": "hunter2abc", "password": "y"},\n  "e": [],\n  "o": {}\n}\n'))
       .toBe('{\n  "x": {\n    "password": "[REDACTED]",\n    "password": "y"\n  },\n  "e": [],\n  "o": {}\n}\n');
     // A `__proto__` key stays an ordinary member.
-    expect(redactCollectorContent("a.json", '{"__proto__": {"password": "hunter2abc"}}')).toBe('{"__proto__":{"password":"[REDACTED]"}}');
+    expect(redactUploadContent("a.json", '{"__proto__": {"password": "hunter2abc"}}')).toBe('{"__proto__":{"password":"[REDACTED]"}}');
   });
 
   test("a .patch file is scrubbed as source while the envelope's git diff stays config", async () => {
-    const root = await mkdtemp(join(tmpdir(), "omnirush-collector-patch-"));
+    const root = await mkdtemp(join(tmpdir(), "omnirush-upload-patch-"));
     roots.push(root);
     await git(root, "init", "-q");
     await mkdir(join(root, "app"), { recursive: true });
@@ -2382,9 +2382,9 @@ describe("workspace collector scrubber parity: second-sample refinements", () =>
     await writeFile(join(root, "fix.patch"), PATCH);
     await writeFile(join(root, "notes.diff"), "+password = hunter2abc\n");
     const { uploads, upload } = makeUploads();
-    const collector = new WorkspaceCollector({ upload, fallbackScanMs: 60_000 });
-    collector.startSession("session-patch-1", "workspace-patch", root);
-    await collector.stop();
+    const sessionUploader = new SessionUploader({ upload, fallbackScanMs: 60_000 });
+    sessionUploader.startSession("session-patch-1", "workspace-patch", root);
+    await sessionUploader.stop();
 
     const start = uploads.find((item) => item.snapshot_type === "start")!;
     const content = (path: string) => start.files.find((file) => file.path === path)?.content;
@@ -2401,18 +2401,18 @@ describe("workspace collector scrubber parity: second-sample refinements", () =>
 
 // --- gateway auth: stale device tokens ---------------------------------------
 
-describe("workspace collector gateway auth", () => {
+describe("session uploader gateway auth", () => {
   type Warning = { message: string; attributes?: Record<string, unknown> };
 
   async function authHarness(respond: (attempt: number) => Response, refresh?: () => Promise<string | null>) {
-    const root = await mkdtemp(join(tmpdir(), "omnirush-collector-auth-"));
-    const stateDir = await mkdtemp(join(tmpdir(), "omnirush-collector-auth-state-"));
+    const root = await mkdtemp(join(tmpdir(), "omnirush-upload-auth-"));
+    const stateDir = await mkdtemp(join(tmpdir(), "omnirush-upload-auth-state-"));
     roots.push(root, stateDir);
     await writeFile(join(root, "app.txt"), "hello\n");
     const uploads: Envelope[] = [];
     const warnings: Warning[] = [];
     const counters = { attempts: 0, refreshes: 0 };
-    const collector = new WorkspaceCollector({
+    const sessionUploader = new SessionUploader({
       stateDir,
       upload: async (_sessionId, compressed) => {
         counters.attempts += 1;
@@ -2434,34 +2434,34 @@ describe("workspace collector gateway auth", () => {
       retryBaseMs: 60_000,
     });
     const sessionId = "session-auth-1234";
-    collector.startSession(sessionId, "workspace-auth", root);
-    await collector.idle(sessionId);
-    const rejected = warnings.filter((warning) => warning.message === "OmniRush collection upload rejected as unauthorized");
-    return { collector, sessionId, uploads, warnings, rejected, counters };
+    sessionUploader.startSession(sessionId, "workspace-auth", root);
+    await sessionUploader.idle(sessionId);
+    const rejected = warnings.filter((warning) => warning.message === "OmniRush session upload upload rejected as unauthorized");
+    return { sessionUploader, sessionId, uploads, warnings, rejected, counters };
   }
 
   const unauthorized = (status: number, body: unknown = { error: "token_expired" }) => Response.json(body, { status });
   const created = () => Response.json({ ok: true }, { status: 201 });
 
   test("refreshes the access token after a 401 and retries the upload once", async () => {
-    const { collector, sessionId, uploads, rejected, counters } = await authHarness(
+    const { sessionUploader, sessionId, uploads, rejected, counters } = await authHarness(
       (attempt) => (attempt === 1 ? unauthorized(401) : created()),
       async () => "fresh-token",
     );
     expect(counters).toEqual({ attempts: 2, refreshes: 1 });
     expect(uploads.map((item) => [item.snapshot_type, item.sequence])).toEqual([["start", 1]]);
-    expect(await collector.spoolStatus()).toEqual({ entries: 0, bytes: 0 });
-    expect(await collector.sessionDeliveryStatus(sessionId)).toMatchObject({ failureCount: 0 });
-    expect(rejected).toEqual([{ message: "OmniRush collection upload rejected as unauthorized", attributes: { sessionId, status: 401, refreshed: true } }]);
-    await collector.stop();
+    expect(await sessionUploader.spoolStatus()).toEqual({ entries: 0, bytes: 0 });
+    expect(await sessionUploader.sessionDeliveryStatus(sessionId)).toMatchObject({ failureCount: 0 });
+    expect(rejected).toEqual([{ message: "OmniRush session upload upload rejected as unauthorized", attributes: { sessionId, status: 401, refreshed: true } }]);
+    await sessionUploader.stop();
   });
 
-  test("sends the refreshed bearer when retrying over the collect endpoint", async () => {
-    const root = await mkdtemp(join(tmpdir(), "omnirush-collector-auth-fetch-"));
+  test("sends the refreshed bearer when retrying over the session upload endpoint", async () => {
+    const root = await mkdtemp(join(tmpdir(), "omnirush-upload-auth-fetch-"));
     roots.push(root);
     await writeFile(join(root, "app.txt"), "hello\n");
     const bearers: string[] = [];
-    const collector = new WorkspaceCollector({
+    const sessionUploader = new SessionUploader({
       gatewayUrl: "https://gateway.example.test/v1",
       accessToken: "stale-token",
       fetch: async (_input: string, init?: RequestInit) => {
@@ -2473,76 +2473,76 @@ describe("workspace collector gateway auth", () => {
       uploadRetryDelayMs: 1,
     });
     const sessionId = "session-auth-fetch-1234";
-    collector.startSession(sessionId, "workspace-auth", root);
-    await collector.idle(sessionId);
+    sessionUploader.startSession(sessionId, "workspace-auth", root);
+    await sessionUploader.idle(sessionId);
     expect(bearers).toEqual(["Bearer stale-token", "Bearer fresh-token"]);
-    await collector.stop();
+    await sessionUploader.stop();
     expect(bearers.at(-1)).toBe("Bearer fresh-token");
   });
 
   test("spools the upload when the gateway still rejects the refreshed token", async () => {
-    const { collector, sessionId, uploads, warnings, rejected, counters } = await authHarness(() => unauthorized(401), async () => "fresh-token");
+    const { sessionUploader, sessionId, uploads, warnings, rejected, counters } = await authHarness(() => unauthorized(401), async () => "fresh-token");
     expect(counters).toEqual({ attempts: 2, refreshes: 1 });
     expect(uploads).toHaveLength(0);
-    expect(await collector.spoolStatus()).toMatchObject({ entries: 1 });
-    expect(await collector.sessionDeliveryStatus(sessionId)).toMatchObject({ failureCount: 1, lastSuccessAt: null });
+    expect(await sessionUploader.spoolStatus()).toMatchObject({ entries: 1 });
+    expect(await sessionUploader.sessionDeliveryStatus(sessionId)).toMatchObject({ failureCount: 1, lastSuccessAt: null });
     expect(rejected).toHaveLength(1);
-    expect(warnings.map((warning) => warning.message)).toContain("OmniRush collection artifact spooled for retry");
-    await collector.stop();
+    expect(warnings.map((warning) => warning.message)).toContain("OmniRush session upload artifact spooled for retry");
+    await sessionUploader.stop();
   });
 
   test("spools the upload when the token refresh fails", async () => {
-    const { collector, sessionId, uploads, rejected, counters } = await authHarness(
+    const { sessionUploader, sessionId, uploads, rejected, counters } = await authHarness(
       (attempt) => (attempt === 1 ? unauthorized(401) : created()),
       async () => { throw new Error("refresh endpoint unavailable"); },
     );
     expect(counters).toEqual({ attempts: 1, refreshes: 1 });
     expect(uploads).toHaveLength(0);
-    expect(await collector.spoolStatus()).toMatchObject({ entries: 1 });
+    expect(await sessionUploader.spoolStatus()).toMatchObject({ entries: 1 });
     expect(rejected).toEqual([{
-      message: "OmniRush collection upload rejected as unauthorized",
+      message: "OmniRush session upload upload rejected as unauthorized",
       attributes: { sessionId, status: 401, refreshed: false, refreshError: "refresh endpoint unavailable" },
     }]);
-    await collector.stop();
+    await sessionUploader.stop();
   });
 
   test("spools the upload when no token refresh is available", async () => {
-    const { collector, uploads, rejected, counters } = await authHarness((attempt) => (attempt === 1 ? unauthorized(401) : created()));
+    const { sessionUploader, uploads, rejected, counters } = await authHarness((attempt) => (attempt === 1 ? unauthorized(401) : created()));
     expect(counters).toEqual({ attempts: 1, refreshes: 0 });
     expect(uploads).toHaveLength(0);
-    expect(await collector.spoolStatus()).toMatchObject({ entries: 1 });
+    expect(await sessionUploader.spoolStatus()).toMatchObject({ entries: 1 });
     expect(rejected[0]?.attributes).toMatchObject({ status: 401, refreshed: false });
-    await collector.stop();
+    await sessionUploader.stop();
   });
 
   test("drops the upload without a refresh or spool entry when the account is signed out", async () => {
     for (const status of [403, 401]) {
-      const { collector, sessionId, uploads, warnings, rejected, counters } = await authHarness(
+      const { sessionUploader, sessionId, uploads, warnings, rejected, counters } = await authHarness(
         () => unauthorized(status, { error: "omnirush_account_required" }),
         async () => "fresh-token",
       );
       expect(counters).toEqual({ attempts: 1, refreshes: 0 });
       expect(uploads).toHaveLength(0);
       expect(rejected).toHaveLength(0);
-      expect(await collector.spoolStatus()).toEqual({ entries: 0, bytes: 0 });
-      expect(await collector.sessionDeliveryStatus(sessionId)).toMatchObject({ failureCount: 1, lastSuccessAt: null });
-      const failed = warnings.find((warning) => warning.message === "OmniRush collection operation failed");
-      expect(failed?.attributes).toMatchObject({ error: `collector upload failed with status ${status} (omnirush_account_required)` });
-      await collector.stop();
+      expect(await sessionUploader.spoolStatus()).toEqual({ entries: 0, bytes: 0 });
+      expect(await sessionUploader.sessionDeliveryStatus(sessionId)).toMatchObject({ failureCount: 1, lastSuccessAt: null });
+      const failed = warnings.find((warning) => warning.message === "OmniRush session upload operation failed");
+      expect(failed?.attributes).toMatchObject({ error: `sessionUploader upload failed with status ${status} (omnirush_account_required)` });
+      await sessionUploader.stop();
     }
   });
 });
 
 // --- snapshot cap ------------------------------------------------------------
 
-describe("workspace collector snapshot cap", () => {
+describe("session uploader snapshot cap", () => {
   const KIB = 1024;
   const CAP = 3 * 1024 * 1024; // leaves 1 MiB for content once the 2 MiB wrapper margin is reserved
   const NAMES = Array.from({ length: 20 }, (_, index) => `file-${String(index).padStart(2, "0")}.txt`);
 
   /** Twenty files growing by 8 KiB each, 1.6 MiB in all: more than CAP leaves for content. */
   async function largeWorkspace(): Promise<string> {
-    const root = await mkdtemp(join(tmpdir(), "omnirush-collector-cap-"));
+    const root = await mkdtemp(join(tmpdir(), "omnirush-upload-cap-"));
     roots.push(root);
     const line = "alpha beta gamma delta\n";
     await Promise.all(NAMES.map((name, index) => writeFile(join(root, name), line.repeat(Math.ceil(((index + 1) * 8 * KIB) / line.length)))));
@@ -2553,7 +2553,7 @@ describe("workspace collector snapshot cap", () => {
     const uploads: Envelope[] = [];
     const rawBytes: number[] = [];
     const warnings: string[] = [];
-    const collector = new WorkspaceCollector({
+    const sessionUploader = new SessionUploader({
       upload: async (_sessionId, compressed) => {
         const buffer = zstdDecompressSync(compressed);
         rawBytes.push(buffer.length);
@@ -2565,10 +2565,10 @@ describe("workspace collector snapshot cap", () => {
       ...(options.snapshotMaxBytes ? { snapshotMaxBytes: options.snapshotMaxBytes } : {}),
     });
     const sessionId = "session-cap-1234";
-    collector.startSession(sessionId, "workspace-cap", root);
-    for (const path of options.touched ?? []) collector.recordTrace(sessionId, "file.read", { path });
-    collector.flushTrace(sessionId);
-    await collector.stop();
+    sessionUploader.startSession(sessionId, "workspace-cap", root);
+    for (const path of options.touched ?? []) sessionUploader.recordTrace(sessionId, "file.read", { path });
+    sessionUploader.flushTrace(sessionId);
+    await sessionUploader.stop();
     const start = uploads.find((item) => item.snapshot_type === "start")!;
     const startBytes = rawBytes[uploads.indexOf(start)]!;
     const sent = start.files.map((file) => file.path).filter((path) => !path.startsWith("__omnirush__/"));
@@ -2601,7 +2601,7 @@ describe("workspace collector snapshot cap", () => {
       snapshot_cap_omitted_count: omitted.length,
       snapshot_cap_omitted_bytes: omitted.reduce((sum, path) => sum + size(path), 0),
     });
-    expect(warnings.filter((message) => message === "OmniRush collection snapshot trimmed to the snapshot cap")).toHaveLength(1);
+    expect(warnings.filter((message) => message === "OmniRush session upload snapshot trimmed to the snapshot cap")).toHaveLength(1);
     expect(notes).toHaveLength(1);
     expect(notes[0]).toMatchObject({ data: { snapshot_type: "start", trigger: "session_start", omitted_count: omitted.length } });
     expect(notes[0]?.data?.budget_bytes).toBeLessThan(CAP);
@@ -2625,18 +2625,18 @@ describe("workspace collector snapshot cap", () => {
     expect([...sent].sort()).toEqual(NAMES);
     expect(start.privacy).toMatchObject({ files_truncated: false, snapshot_cap_omitted_count: 0, snapshot_cap_omitted_bytes: 0 });
     expect(notes).toHaveLength(0);
-    expect(warnings).not.toContain("OmniRush collection snapshot trimmed to the snapshot cap");
+    expect(warnings).not.toContain("OmniRush session upload snapshot trimmed to the snapshot cap");
   });
 });
 
 // --- incremental snapshots, watcher discipline and memory --------------------
 
-describe("workspace collector incremental snapshots", () => {
+describe("session uploader incremental snapshots", () => {
   const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
   /** A git workspace with tracked sources, a dependency tree and gitignored build output. */
   async function workspace(prefix: string, sourceFiles = 30): Promise<string> {
-    const root = await mkdtemp(join(tmpdir(), `omnirush-collector-${prefix}-`));
+    const root = await mkdtemp(join(tmpdir(), `omnirush-upload-${prefix}-`));
     roots.push(root);
     await git(root, "init", "-q");
     await writeFile(join(root, ".gitignore"), "dist/\nnode_modules/\n");
@@ -2682,18 +2682,18 @@ describe("workspace collector incremental snapshots", () => {
   test("a change snapshot reads only the changed file and reuses digests across sessions on one root", async () => {
     const root = await workspace("cache");
     const { uploads, upload } = makeUploads();
-    const collector = new WorkspaceCollector({ upload, changeDebounceMs: 60_000, fallbackScanMs: 60_000 });
+    const sessionUploader = new SessionUploader({ upload, changeDebounceMs: 60_000, fallbackScanMs: 60_000 });
     const first = "session-cache-first-1";
-    collector.startSession(first, "workspace-cache", root);
-    await collector.idle(first);
-    const afterStart = { ...collector.metrics };
+    sessionUploader.startSession(first, "workspace-cache", root);
+    await sessionUploader.idle(first);
+    const afterStart = { ...sessionUploader.metrics };
     expect(afterStart.fullScans).toBe(1);
     expect(afterStart.fileReads).toBeGreaterThanOrEqual(31);
 
     await writeFile(join(root, "src", "f06.txt"), "source file 6, edited\n");
-    collector.captureSnapshot(first, "turn_completed");
-    await collector.idle(first);
-    const afterChange = { ...collector.metrics };
+    sessionUploader.captureSnapshot(first, "turn_completed");
+    await sessionUploader.idle(first);
+    const afterChange = { ...sessionUploader.metrics };
     const change = changes(uploads)[0]!;
     expect(contentPaths(change)).toEqual(["src/f06.txt"]);
     expect(change.files_scope).toBe("changed");
@@ -2708,9 +2708,9 @@ describe("workspace collector incremental snapshots", () => {
 
     // A second chat on the same workspace starts from the shared cache: a stat per file, no reads.
     const second = "session-cache-second-1";
-    collector.startSession(second, "workspace-cache", root);
-    await collector.idle(second);
-    const afterSecond = { ...collector.metrics };
+    sessionUploader.startSession(second, "workspace-cache", root);
+    await sessionUploader.idle(second);
+    const afterSecond = { ...sessionUploader.metrics };
     expect(afterSecond.fullScans).toBe(2);
     const secondStart = uploads.find((item) => item.snapshot_type === "start" && item.session_id === second)!;
     expect(secondStart.files_scope).toBe("full");
@@ -2719,24 +2719,24 @@ describe("workspace collector incremental snapshots", () => {
     // file as it is on disk, verified by digest, without the regex pipeline.
     expect(afterSecond.fileReads - afterChange.fileReads).toBe(32);
     expect(afterSecond.fileRedactions - afterChange.fileRedactions).toBe(0);
-    expect(collector.cacheStatus()).toEqual({ roots: 1, entries: 32 });
-    await collector.stop();
-    expect(collector.cacheStatus()).toEqual({ roots: 0, entries: 0 });
+    expect(sessionUploader.cacheStatus()).toEqual({ roots: 1, entries: 32 });
+    await sessionUploader.stop();
+    expect(sessionUploader.cacheStatus()).toEqual({ roots: 0, entries: 0 });
   });
 
   test("skips a milestone capture outright when nothing is dirty, and rescans after a new directory appears", async () => {
     const root = await workspace("dirty", 10);
     const { uploads, upload } = makeUploads();
-    const collector = new WorkspaceCollector({ upload, changeDebounceMs: 60_000, fallbackScanMs: 60_000 });
+    const sessionUploader = new SessionUploader({ upload, changeDebounceMs: 60_000, fallbackScanMs: 60_000 });
     const sessionId = "session-dirty-1234";
-    collector.startSession(sessionId, "workspace-dirty", root);
-    await collector.idle(sessionId);
-    expect(collector.sessionDiagnostics(sessionId)).toMatchObject({ watchMode: "watching", dirtyPaths: 0, dirtyOverflow: false });
-    const before = { ...collector.metrics };
-    collector.captureSnapshot(sessionId, "turn_completed");
-    collector.captureSnapshot(sessionId, "prompt");
-    await collector.idle(sessionId);
-    const after = { ...collector.metrics };
+    sessionUploader.startSession(sessionId, "workspace-dirty", root);
+    await sessionUploader.idle(sessionId);
+    expect(sessionUploader.sessionDiagnostics(sessionId)).toMatchObject({ watchMode: "watching", dirtyPaths: 0, dirtyOverflow: false });
+    const before = { ...sessionUploader.metrics };
+    sessionUploader.captureSnapshot(sessionId, "turn_completed");
+    sessionUploader.captureSnapshot(sessionId, "prompt");
+    await sessionUploader.idle(sessionId);
+    const after = { ...sessionUploader.metrics };
     expect(after.capturesSkipped - before.capturesSkipped).toBe(2);
     expect(after.fileStats - before.fileStats).toBe(0);
     expect(after.fullScans + after.dirtyScans).toBe(before.fullScans + before.dirtyScans);
@@ -2748,14 +2748,14 @@ describe("workspace collector incremental snapshots", () => {
     await mkdir(join(root, "feature"));
     await writeFile(join(root, "feature", "new.txt"), "brand new\n");
     await sleep(150);
-    expect(collector.sessionDiagnostics(sessionId)?.dirtyOverflow).toBe(true);
-    collector.captureSnapshot(sessionId, "turn_completed");
-    await collector.idle(sessionId);
-    expect(collector.metrics.fullScans).toBe(before.fullScans + 1);
+    expect(sessionUploader.sessionDiagnostics(sessionId)?.dirtyOverflow).toBe(true);
+    sessionUploader.captureSnapshot(sessionId, "turn_completed");
+    await sessionUploader.idle(sessionId);
+    expect(sessionUploader.metrics.fullScans).toBe(before.fullScans + 1);
     expect(contentPaths(changes(uploads)[0]!)).toEqual(["feature/new.txt"]);
-    expect(collector.sessionDiagnostics(sessionId)?.watchedPaths).toContain("feature");
-    collector.flushTrace(sessionId);
-    await collector.stop();
+    expect(sessionUploader.sessionDiagnostics(sessionId)?.watchedPaths).toContain("feature");
+    sessionUploader.flushTrace(sessionId);
+    await sessionUploader.stop();
     expect(triggerEvents(uploads)).toEqual([
       { trigger: "turn_completed", captured: false },
       { trigger: "prompt", captured: false },
@@ -2766,30 +2766,30 @@ describe("workspace collector incremental snapshots", () => {
   test("watches only directories with eligible files, batches ignore checks and polls past the watched-files cap", async () => {
     const root = await workspace("watch", 6);
     const { uploads, upload } = makeUploads();
-    const collector = new WorkspaceCollector({ upload, changeDebounceMs: 10, fallbackScanMs: 60_000 });
+    const sessionUploader = new SessionUploader({ upload, changeDebounceMs: 10, fallbackScanMs: 60_000 });
     const sessionId = "session-watch-1234";
-    collector.startSession(sessionId, "workspace-watch", root);
-    await collector.idle(sessionId);
-    expect(collector.sessionDiagnostics(sessionId)?.watchedPaths.sort()).toEqual([".", "src"]);
-    const before = { ...collector.metrics };
+    sessionUploader.startSession(sessionId, "workspace-watch", root);
+    await sessionUploader.idle(sessionId);
+    expect(sessionUploader.sessionDiagnostics(sessionId)?.watchedPaths.sort()).toEqual([".", "src"]);
+    const before = { ...sessionUploader.metrics };
     // Churn in the dependency tree and in gitignored output never reaches a callback.
     for (let index = 0; index < 200; index += 1) {
       await writeFile(join(root, "node_modules", "pkg", `churn-${index}.js`), `// ${index}\n`);
       await writeFile(join(root, "dist", `chunk-${index}.js`), `// ${index}\n`);
     }
     await sleep(250);
-    await collector.idle(sessionId);
-    expect(collector.metrics.watchEvents - before.watchEvents).toBe(0);
-    expect(collector.metrics.ignoreCheckSpawns - before.ignoreCheckSpawns).toBe(0);
+    await sessionUploader.idle(sessionId);
+    expect(sessionUploader.metrics.watchEvents - before.watchEvents).toBe(0);
+    expect(sessionUploader.metrics.ignoreCheckSpawns - before.ignoreCheckSpawns).toBe(0);
     expect(changes(uploads)).toHaveLength(0);
-    await collector.stop();
+    await sessionUploader.stop();
     expect(JSON.stringify(uploads)).not.toContain("churn-");
     expect(JSON.stringify(uploads)).not.toContain("chunk-");
 
     // New files are put to git's ignore rules in one spawn per burst, not one
     // per file (the production debounce is 2 s).
     const batched = makeUploads();
-    const batcher = new WorkspaceCollector({ upload: batched.upload, changeDebounceMs: 60_000, fallbackScanMs: 60_000 });
+    const batcher = new SessionUploader({ upload: batched.upload, changeDebounceMs: 60_000, fallbackScanMs: 60_000 });
     const batchedId = "session-batched-1234";
     batcher.startSession(batchedId, "workspace-batched", root);
     await batcher.idle(batchedId);
@@ -2812,7 +2812,7 @@ describe("workspace collector incremental snapshots", () => {
 
     // Past the cap the tree is polled: no watchers, and a milestone rescans it.
     const polled = makeUploads();
-    const poller = new WorkspaceCollector({ upload: polled.upload, changeDebounceMs: 60_000, fallbackScanMs: 60_000, maxWatchedFiles: 3 });
+    const poller = new SessionUploader({ upload: polled.upload, changeDebounceMs: 60_000, fallbackScanMs: 60_000, maxWatchedFiles: 3 });
     const polledId = "session-polled-1234";
     poller.startSession(polledId, "workspace-polled", root);
     await poller.idle(polledId);
@@ -2827,11 +2827,11 @@ describe("workspace collector incremental snapshots", () => {
 
   test("labels snapshot scope and re-sends changes the gateway never accepted", async () => {
     const root = await workspace("scope", 4);
-    const stateDir = await mkdtemp(join(tmpdir(), "omnirush-collector-scope-state-"));
+    const stateDir = await mkdtemp(join(tmpdir(), "omnirush-upload-scope-state-"));
     roots.push(stateDir);
     let status = 201;
     const uploads: Envelope[] = [];
-    const collector = new WorkspaceCollector({
+    const sessionUploader = new SessionUploader({
       stateDir,
       upload: async (_sessionId, compressed) => {
         if (status !== 201) return Response.json({ error: "rejected" }, { status });
@@ -2842,45 +2842,45 @@ describe("workspace collector incremental snapshots", () => {
       fallbackScanMs: 60_000,
     });
     const sessionId = "session-scope-1234";
-    collector.startSession(sessionId, "workspace-scope", root);
-    await collector.idle(sessionId);
+    sessionUploader.startSession(sessionId, "workspace-scope", root);
+    await sessionUploader.idle(sessionId);
     expect(uploads[0]).toMatchObject({ snapshot_type: "start", files_scope: "full" });
     expect(uploads[0]).not.toHaveProperty("changed_paths");
 
     await writeFile(join(root, "src", "f00.txt"), "rejected edit\n");
     status = 400;
-    collector.captureSnapshot(sessionId, "turn_completed");
-    await collector.idle(sessionId);
+    sessionUploader.captureSnapshot(sessionId, "turn_completed");
+    await sessionUploader.idle(sessionId);
     expect(changes(uploads)).toHaveLength(0);
     status = 201;
-    collector.captureSnapshot(sessionId, "turn_completed");
-    await collector.idle(sessionId);
+    sessionUploader.captureSnapshot(sessionId, "turn_completed");
+    await sessionUploader.idle(sessionId);
     const resent = changes(uploads)[0]!;
     expect(contentPaths(resent)).toEqual(["src/f00.txt"]);
     expect(resent.changed_paths).toEqual(["src/f00.txt"]);
     expect(resent.files_scope).toBe("changed");
 
-    collector.flushTrace(sessionId);
-    await collector.stop();
+    sessionUploader.flushTrace(sessionId);
+    await sessionUploader.stop();
     const end = uploads.find((item) => item.snapshot_type === "end")!;
     expect(end.files_scope).toBe("changed");
     expect(end.changed_paths).toEqual([]);
     expect(uploads.find((item) => item.snapshot_type === "trace")?.files_scope).toBe("full");
     // Envelopes are streamed through a temp file that never outlives the upload.
-    expect((await readdir(join(stateDir, "omnirush-collector-tmp")).catch(() => [])).filter((name) => name.endsWith(".tmp"))).toEqual([]);
-    expect(collector.sessionDiagnostics(sessionId)).toBeNull();
+    expect((await readdir(join(stateDir, "omnirush-upload-tmp")).catch(() => [])).filter((name) => name.endsWith(".tmp"))).toEqual([]);
+    expect(sessionUploader.sessionDiagnostics(sessionId)).toBeNull();
   });
 
   test("spaces filesystem-driven change snapshots by the minimum interval while milestones capture at once", async () => {
     const root = await workspace("interval", 4);
     const { uploads, upload } = makeUploads();
-    const collector = new WorkspaceCollector({ upload, changeDebounceMs: 10, fallbackScanMs: 60_000, minChangeIntervalMs: 500 });
+    const sessionUploader = new SessionUploader({ upload, changeDebounceMs: 10, fallbackScanMs: 60_000, minChangeIntervalMs: 500 });
     const sessionId = "session-interval-1234";
-    collector.startSession(sessionId, "workspace-interval", root);
-    await collector.idle(sessionId);
+    sessionUploader.startSession(sessionId, "workspace-interval", root);
+    await sessionUploader.idle(sessionId);
     await writeFile(join(root, "src", "f00.txt"), "first burst\n");
     await sleep(120);
-    await collector.idle(sessionId);
+    await sessionUploader.idle(sessionId);
     expect(changes(uploads)).toHaveLength(1);
     const firstAt = Date.parse(changes(uploads)[0]!.captured_at as string);
     // Two edits inside the window merge into one deferred snapshot.
@@ -2888,120 +2888,120 @@ describe("workspace collector incremental snapshots", () => {
     await sleep(60);
     await writeFile(join(root, "src", "f02.txt"), "second burst b\n");
     await sleep(120);
-    await collector.idle(sessionId);
+    await sessionUploader.idle(sessionId);
     expect(changes(uploads)).toHaveLength(1);
-    expect(collector.metrics.capturesDeferred).toBeGreaterThanOrEqual(1);
+    expect(sessionUploader.metrics.capturesDeferred).toBeGreaterThanOrEqual(1);
     await sleep(500);
-    await collector.idle(sessionId);
+    await sessionUploader.idle(sessionId);
     expect(changes(uploads)).toHaveLength(2);
     expect(contentPaths(changes(uploads)[1]!).sort()).toEqual(["src/f01.txt", "src/f02.txt"]);
     expect(Date.parse(changes(uploads)[1]!.captured_at as string) - firstAt).toBeGreaterThanOrEqual(450);
     // A turn milestone inside the window is not held back.
     await writeFile(join(root, "src", "f03.txt"), "milestone edit\n");
-    collector.captureSnapshot(sessionId, "turn_completed");
-    await collector.idle(sessionId);
+    sessionUploader.captureSnapshot(sessionId, "turn_completed");
+    await sessionUploader.idle(sessionId);
     expect(changes(uploads)).toHaveLength(3);
     expect(contentPaths(changes(uploads)[2]!)).toEqual(["src/f03.txt"]);
-    await collector.stop();
+    await sessionUploader.stop();
   });
 
   test("neither watches nor rescans a rebuilt gitignored directory, and rescans once .gitignore changes", async () => {
     const root = await workspace("ignored", 6);
     const { uploads, upload } = makeUploads();
-    const collector = new WorkspaceCollector({ upload, changeDebounceMs: 60_000, fallbackScanMs: 60_000 });
+    const sessionUploader = new SessionUploader({ upload, changeDebounceMs: 60_000, fallbackScanMs: 60_000 });
     const sessionId = "session-ignored-1234";
-    collector.startSession(sessionId, "workspace-ignored", root);
-    await collector.idle(sessionId);
-    const before = { ...collector.metrics };
+    sessionUploader.startSession(sessionId, "workspace-ignored", root);
+    await sessionUploader.idle(sessionId);
+    const before = { ...sessionUploader.metrics };
     // A build that wipes and recreates its gitignored output directory.
     await rm(join(root, "dist"), { recursive: true, force: true });
     await mkdir(join(root, "dist"));
     await writeFile(join(root, "dist", "bundle.js"), "rebuilt\n");
     await sleep(200);
-    expect(collector.sessionDiagnostics(sessionId)).toMatchObject({ dirtyOverflow: false });
-    expect(collector.sessionDiagnostics(sessionId)?.watchedPaths).not.toContain("dist");
-    collector.captureSnapshot(sessionId, "turn_completed");
-    await collector.idle(sessionId);
-    expect(collector.metrics.fullScans).toBe(before.fullScans);
+    expect(sessionUploader.sessionDiagnostics(sessionId)).toMatchObject({ dirtyOverflow: false });
+    expect(sessionUploader.sessionDiagnostics(sessionId)?.watchedPaths).not.toContain("dist");
+    sessionUploader.captureSnapshot(sessionId, "turn_completed");
+    await sessionUploader.idle(sessionId);
+    expect(sessionUploader.metrics.fullScans).toBe(before.fullScans);
     expect(changes(uploads)).toHaveLength(0);
 
     // An untracked log goes out; a new ignore rule then hides it, and the
     // edit to .gitignore makes the next capture rescan the tree under it.
     await writeFile(join(root, "notes.log"), "scratch notes\n");
     await sleep(150);
-    collector.captureSnapshot(sessionId, "turn_completed");
-    await collector.idle(sessionId);
+    sessionUploader.captureSnapshot(sessionId, "turn_completed");
+    await sessionUploader.idle(sessionId);
     expect(changes(uploads).at(-1)!.manifest.map((entry) => entry.path)).toContain("notes.log");
     await writeFile(join(root, ".gitignore"), "dist/\nnode_modules/\n*.log\n");
     await sleep(150);
-    expect(collector.sessionDiagnostics(sessionId)?.dirtyOverflow).toBe(true);
-    collector.captureSnapshot(sessionId, "turn_completed");
-    await collector.idle(sessionId);
+    expect(sessionUploader.sessionDiagnostics(sessionId)?.dirtyOverflow).toBe(true);
+    sessionUploader.captureSnapshot(sessionId, "turn_completed");
+    await sessionUploader.idle(sessionId);
     const last = changes(uploads).at(-1)!;
-    expect(collector.metrics.fullScans).toBe(before.fullScans + 1);
+    expect(sessionUploader.metrics.fullScans).toBe(before.fullScans + 1);
     expect(last.manifest.map((entry) => entry.path)).not.toContain("notes.log");
     expect(last.changed_paths).toEqual([".gitignore"]);
-    await collector.stop();
+    await sessionUploader.stop();
   });
 
   test("drops the files of a directory moved out of the workspace without rescanning the tree", async () => {
     const root = await workspace("moved", 10);
-    const outside = await mkdtemp(join(tmpdir(), "omnirush-collector-moved-out-"));
+    const outside = await mkdtemp(join(tmpdir(), "omnirush-upload-moved-out-"));
     roots.push(outside);
     const { uploads, upload } = makeUploads();
-    const collector = new WorkspaceCollector({ upload, changeDebounceMs: 60_000, fallbackScanMs: 60_000 });
+    const sessionUploader = new SessionUploader({ upload, changeDebounceMs: 60_000, fallbackScanMs: 60_000 });
     const sessionId = "session-moved-1234";
-    collector.startSession(sessionId, "workspace-moved", root);
-    await collector.idle(sessionId);
-    const before = { ...collector.metrics };
+    sessionUploader.startSession(sessionId, "workspace-moved", root);
+    await sessionUploader.idle(sessionId);
+    const before = { ...sessionUploader.metrics };
     // One event for the directory, none for the five files inside it.
     await rename(join(root, "src", "lib"), join(outside, "lib"));
     await sleep(200);
-    collector.captureSnapshot(sessionId, "turn_completed");
-    await collector.idle(sessionId);
+    sessionUploader.captureSnapshot(sessionId, "turn_completed");
+    await sessionUploader.idle(sessionId);
     const change = changes(uploads)[0]!;
     const paths = change.manifest.map((entry) => entry.path);
     expect(paths.filter((path) => path.startsWith("src/lib/"))).toEqual([]);
     expect(paths).toContain("src/f00.txt");
-    expect(collector.metrics.fullScans).toBe(before.fullScans);
-    expect(collector.metrics.dirtyScans).toBe(before.dirtyScans + 1);
-    await collector.stop();
+    expect(sessionUploader.metrics.fullScans).toBe(before.fullScans);
+    expect(sessionUploader.metrics.dirtyScans).toBe(before.dirtyScans + 1);
+    await sessionUploader.stop();
   });
 
   test("polls a workspace with more top-level directories than it watches", async () => {
-    const root = await mkdtemp(join(tmpdir(), "omnirush-collector-wide-"));
+    const root = await mkdtemp(join(tmpdir(), "omnirush-upload-wide-"));
     roots.push(root);
     for (let index = 0; index < 65; index += 1) {
       await mkdir(join(root, `dir${index}`));
       await writeFile(join(root, `dir${index}`, "a.txt"), `file ${index}\n`);
     }
     const { upload } = makeUploads();
-    const collector = new WorkspaceCollector({ upload, changeDebounceMs: 60_000, fallbackScanMs: 60_000 });
+    const sessionUploader = new SessionUploader({ upload, changeDebounceMs: 60_000, fallbackScanMs: 60_000 });
     const sessionId = "session-wide-1234";
-    collector.startSession(sessionId, "workspace-wide", root);
-    await collector.idle(sessionId);
-    expect(collector.sessionDiagnostics(sessionId)).toMatchObject({ watchMode: "polling", watchedPaths: [], dirtyOverflow: true });
-    await collector.stop();
+    sessionUploader.startSession(sessionId, "workspace-wide", root);
+    await sessionUploader.idle(sessionId);
+    expect(sessionUploader.sessionDiagnostics(sessionId)).toMatchObject({ watchMode: "polling", watchedPaths: [], dirtyOverflow: true });
+    await sessionUploader.stop();
   });
 
   test("keeps a file larger than the change journal out of it, and still snapshots the file", async () => {
     const root = await workspace("journal", 4);
     const { uploads, upload } = makeUploads();
-    const collector = new WorkspaceCollector({ upload, changeDebounceMs: 60_000, fallbackScanMs: 60_000 });
+    const sessionUploader = new SessionUploader({ upload, changeDebounceMs: 60_000, fallbackScanMs: 60_000 });
     const sessionId = "session-journal-1234";
-    collector.startSession(sessionId, "workspace-journal", root);
-    await collector.idle(sessionId);
+    sessionUploader.startSession(sessionId, "workspace-journal", root);
+    await sessionUploader.idle(sessionId);
     await writeFile(join(root, "src", "small.txt"), "small edit\n");
     await writeFile(join(root, "src", "large.txt"), "large log line\n".repeat(70_000));
     await sleep(200);
-    collector.captureSnapshot(sessionId, "turn_completed");
-    await collector.idle(sessionId);
+    sessionUploader.captureSnapshot(sessionId, "turn_completed");
+    await sessionUploader.idle(sessionId);
     const change = changes(uploads)[0]!;
     expect(contentPaths(change).sort()).toEqual(["src/large.txt", "src/small.txt"]);
     const journal = change.files.find((file) => file.path === "__omnirush__/changes.json")!;
     expect(journal.content).toContain('"path":"src/small.txt"');
     expect(journal.content).not.toContain("src/large.txt");
-    await collector.stop();
+    await sessionUploader.stop();
   });
 
   test("runs one reconcile pass per interval for every session on a root, and it finds what no watcher reported", async () => {
@@ -3010,18 +3010,18 @@ describe("workspace collector incremental snapshots", () => {
     await fillWatchSlots(root);
     await mkdir(join(root, "assets"));
     const { uploads, upload } = makeUploads();
-    const collector = new WorkspaceCollector({ upload, changeDebounceMs: 10, fallbackScanMs: 300, minChangeIntervalMs: 0 });
+    const sessionUploader = new SessionUploader({ upload, changeDebounceMs: 10, fallbackScanMs: 300, minChangeIntervalMs: 0 });
     const sessions = ["session-reconcile-a1", "session-reconcile-b1"];
-    for (const sessionId of sessions) collector.startSession(sessionId, "workspace-reconcile", root);
-    for (const sessionId of sessions) await collector.idle(sessionId);
-    expect(collector.sessionDiagnostics(sessions[0]!)).toMatchObject({ watchMode: "watching" });
-    expect(collector.sessionDiagnostics(sessions[0]!)?.watchedPaths).toHaveLength(65);
-    expect(collector.sessionDiagnostics(sessions[0]!)?.watchedPaths).not.toContain("assets");
-    const before = collector.metrics.reconciles;
+    for (const sessionId of sessions) sessionUploader.startSession(sessionId, "workspace-reconcile", root);
+    for (const sessionId of sessions) await sessionUploader.idle(sessionId);
+    expect(sessionUploader.sessionDiagnostics(sessions[0]!)).toMatchObject({ watchMode: "watching" });
+    expect(sessionUploader.sessionDiagnostics(sessions[0]!)?.watchedPaths).toHaveLength(65);
+    expect(sessionUploader.sessionDiagnostics(sessions[0]!)?.watchedPaths).not.toContain("assets");
+    const before = sessionUploader.metrics.reconciles;
     await writeFile(join(root, "assets", "found.txt"), "found by the reconcile pass\n");
     await sleep(1_000);
-    for (const sessionId of sessions) await collector.idle(sessionId);
-    const passes = collector.metrics.reconciles - before;
+    for (const sessionId of sessions) await sessionUploader.idle(sessionId);
+    const passes = sessionUploader.metrics.reconciles - before;
     // About three passes in a second at a 300 ms interval; per-session passes would make six.
     expect(passes).toBeGreaterThanOrEqual(1);
     expect(passes).toBeLessThanOrEqual(4);
@@ -3029,22 +3029,22 @@ describe("workspace collector incremental snapshots", () => {
       const change = changes(uploads).find((item) => item.session_id === sessionId);
       expect(change && contentPaths(change)).toEqual(["assets/found.txt"]);
     }
-    await collector.stop();
+    await sessionUploader.stop();
   });
 
   test("two chats on one folder: only the one running a turn uploads the edits made meanwhile, and each still captures its own milestones", async () => {
     const root = await workspace("shared", 4);
     const { uploads, upload } = makeUploads();
-    const collector = new WorkspaceCollector({ upload, changeDebounceMs: 10, fallbackScanMs: 150, minChangeIntervalMs: 0 });
+    const sessionUploader = new SessionUploader({ upload, changeDebounceMs: 10, fallbackScanMs: 150, minChangeIntervalMs: 0 });
     const working = "session-shared-working-1";
     const idle = "session-shared-idle-0001";
     const both = [working, idle];
-    for (const sessionId of both) collector.startSession(sessionId, "workspace-shared", root);
-    for (const sessionId of both) await collector.idle(sessionId);
+    for (const sessionId of both) sessionUploader.startSession(sessionId, "workspace-shared", root);
+    for (const sessionId of both) await sessionUploader.idle(sessionId);
     const settle = async () => {
       // Past the debounce and several reconcile passes.
       await sleep(600);
-      for (const sessionId of both) await collector.idle(sessionId);
+      for (const sessionId of both) await sessionUploader.idle(sessionId);
     };
     const changesOf = (sessionId: string) => changes(uploads)
       .filter((item) => item.session_id === sessionId)
@@ -3052,16 +3052,16 @@ describe("workspace collector incremental snapshots", () => {
     // Whichever of the watcher and the reconcile pass saw the edit first.
     const edit = expect.stringMatching(/^(?:fs_change|periodic)$/);
 
-    collector.captureSnapshot(working, "prompt");
-    await collector.idle(working);
+    sessionUploader.captureSnapshot(working, "prompt");
+    await sessionUploader.idle(working);
     await writeFile(join(root, "src", "f00.txt"), "the agent's edit\n");
     await settle();
     expect(changesOf(working)).toEqual([[edit, ["src/f00.txt"]]]);
     expect(changesOf(idle)).toEqual([]);
-    expect(collector.metrics.capturesHeld).toBeGreaterThan(0);
+    expect(sessionUploader.metrics.capturesHeld).toBeGreaterThan(0);
 
     // The turn ends: the other chat still leaves that turn's edits alone, reconcile passes included.
-    collector.captureSnapshot(working, "turn_completed");
+    sessionUploader.captureSnapshot(working, "turn_completed");
     await settle();
     expect(changesOf(idle)).toEqual([]);
 
@@ -3073,18 +3073,18 @@ describe("workspace collector incremental snapshots", () => {
 
     // The other chat's own prompt carries what it has not sent yet; while it
     // runs its turn, the first chat holds back in turn.
-    collector.captureSnapshot(idle, "prompt");
-    await collector.idle(idle);
+    sessionUploader.captureSnapshot(idle, "prompt");
+    await sessionUploader.idle(idle);
     expect(changesOf(idle)).toEqual([["prompt", ["README.md", "src/f00.txt"]]]);
     const sentByWorking = changesOf(working).length;
     await writeFile(join(root, "src", "f02.txt"), "the other agent's edit\n");
     await settle();
     expect(changesOf(idle).at(-1)).toEqual([edit, ["src/f02.txt"]]);
     expect(changesOf(working)).toHaveLength(sentByWorking);
-    collector.captureSnapshot(idle, "turn_completed");
-    await collector.idle(idle);
-    for (const sessionId of both) collector.flushTrace(sessionId);
-    await collector.stop();
+    sessionUploader.captureSnapshot(idle, "turn_completed");
+    await sessionUploader.idle(idle);
+    for (const sessionId of both) sessionUploader.flushTrace(sessionId);
+    await sessionUploader.stop();
     for (const sessionId of both) {
       const milestones = uploads
         .filter((item) => item.snapshot_type === "trace" && item.session_id === sessionId)
@@ -3096,16 +3096,16 @@ describe("workspace collector incremental snapshots", () => {
   });
 
   test("keeps gitignored files out of change snapshots and the journal in a workspace git does not manage", async () => {
-    const root = await mkdtemp(join(tmpdir(), "omnirush-collector-nogit-"));
+    const root = await mkdtemp(join(tmpdir(), "omnirush-upload-nogit-"));
     roots.push(root);
     await writeFile(join(root, ".gitignore"), "*.log\nbuild/\n");
     await mkdir(join(root, "src"));
     await writeFile(join(root, "src", "a.txt"), "a\n");
     const { uploads, upload } = makeUploads();
-    const collector = new WorkspaceCollector({ upload, changeDebounceMs: 60_000, fallbackScanMs: 60_000 });
+    const sessionUploader = new SessionUploader({ upload, changeDebounceMs: 60_000, fallbackScanMs: 60_000 });
     const sessionId = "session-nogit-1234";
-    collector.startSession(sessionId, "workspace-nogit", root);
-    await collector.idle(sessionId);
+    sessionUploader.startSession(sessionId, "workspace-nogit", root);
+    await sessionUploader.idle(sessionId);
     // git answers nothing here: the watcher-reported paths go through the
     // .gitignore files the listing walker applies.
     await writeFile(join(root, "src", "debug.log"), "debug output\n");
@@ -3113,12 +3113,12 @@ describe("workspace collector incremental snapshots", () => {
     await writeFile(join(root, "build", "out.txt"), "build output\n");
     await writeFile(join(root, "src", "b.txt"), "b\n");
     await sleep(200);
-    collector.captureSnapshot(sessionId, "turn_completed");
-    await collector.idle(sessionId);
+    sessionUploader.captureSnapshot(sessionId, "turn_completed");
+    await sessionUploader.idle(sessionId);
     const change = changes(uploads)[0]!;
     expect(contentPaths(change)).toEqual(["src/b.txt"]);
     expect(change.manifest.map((entry) => entry.path).sort()).toEqual([".gitignore", "src/a.txt", "src/b.txt"]);
-    await collector.stop();
+    await sessionUploader.stop();
     expect(JSON.stringify(uploads)).not.toContain("debug.log");
     expect(JSON.stringify(uploads)).not.toContain("out.txt");
   });
@@ -3139,20 +3139,20 @@ describe("workspace collector incremental snapshots", () => {
     await mkdir(join(root, "scripts")); // empty
     await mkdir(join(root, "secrets")); // a denied name
     const { uploads, upload } = makeUploads();
-    const collector = new WorkspaceCollector({ upload, changeDebounceMs: 10, fallbackScanMs: 60_000, minChangeIntervalMs: 0 });
+    const sessionUploader = new SessionUploader({ upload, changeDebounceMs: 10, fallbackScanMs: 60_000, minChangeIntervalMs: 0 });
     const sessionId = "session-unlisted-1234";
-    collector.startSession(sessionId, "workspace-unlisted", root);
-    await collector.idle(sessionId);
+    sessionUploader.startSession(sessionId, "workspace-unlisted", root);
+    await sessionUploader.idle(sessionId);
     // Not dist/ (gitignored), node_modules/, secrets/ or .git/ (denied).
-    expect(collector.sessionDiagnostics(sessionId)?.watchedPaths.sort()).toEqual([".", "config", "scripts", "src"]);
+    expect(sessionUploader.sessionDiagnostics(sessionId)?.watchedPaths.sort()).toEqual([".", "config", "scripts", "src"]);
     // Another editor writes next to the denied file: the watcher sees it at once.
     await writeFile(join(root, "config", "app.yml"), "mode: production\n");
     await sleep(300);
-    await collector.idle(sessionId);
+    await sessionUploader.idle(sessionId);
     const change = changes(uploads)[0]!;
     expect(change.trigger).toBe("fs_change");
     expect(contentPaths(change)).toEqual(["config/app.yml"]);
-    await collector.stop();
+    await sessionUploader.stop();
     expect(JSON.stringify(uploads)).not.toContain("API=1");
   });
 
@@ -3161,23 +3161,23 @@ describe("workspace collector incremental snapshots", () => {
     await fillWatchSlots(root);
     await mkdir(join(root, "assets"));
     const { uploads, upload } = makeUploads();
-    const collector = new WorkspaceCollector({ upload, changeDebounceMs: 60_000, fallbackScanMs: 60_000 });
+    const sessionUploader = new SessionUploader({ upload, changeDebounceMs: 60_000, fallbackScanMs: 60_000 });
     const sessionId = "session-unwatched-1234";
-    collector.startSession(sessionId, "workspace-unwatched", root);
-    await collector.idle(sessionId);
-    expect(collector.sessionDiagnostics(sessionId)?.watchedPaths).not.toContain("assets");
-    collector.captureSnapshot(sessionId, "prompt");
-    await collector.idle(sessionId);
+    sessionUploader.startSession(sessionId, "workspace-unwatched", root);
+    await sessionUploader.idle(sessionId);
+    expect(sessionUploader.sessionDiagnostics(sessionId)?.watchedPaths).not.toContain("assets");
+    sessionUploader.captureSnapshot(sessionId, "prompt");
+    await sessionUploader.idle(sessionId);
     // A bash tool writes it; no trace event names it and no watcher covers assets/.
     await mkdir(join(root, "assets", "db"));
     await writeFile(join(root, "assets", "db", "migrate.sh"), "#!/bin/sh\necho migrate\n");
     await sleep(200);
-    collector.captureSnapshot(sessionId, "turn_completed");
-    await collector.idle(sessionId);
+    sessionUploader.captureSnapshot(sessionId, "turn_completed");
+    await sessionUploader.idle(sessionId);
     // The end-of-turn artifact scan marks it dirty for the turn's own snapshot.
     expect(contentPaths(changes(uploads)[0]!)).toEqual(["assets/db/migrate.sh"]);
-    collector.flushTrace(sessionId);
-    await collector.stop();
+    sessionUploader.flushTrace(sessionId);
+    await sessionUploader.stop();
     expect(triggerEvents(uploads)).toEqual([
       { trigger: "prompt", captured: false },
       { trigger: "turn_completed", captured: true },
@@ -3185,7 +3185,7 @@ describe("workspace collector incremental snapshots", () => {
   });
 
   test.skipIf(process.platform === "win32")("a path git refuses to answer for (beyond a symlinked directory) neither changes the ignore answer for its batch nor gets read", async () => {
-    const base = await mkdtemp(join(tmpdir(), "omnirush-collector-symlink-"));
+    const base = await mkdtemp(join(tmpdir(), "omnirush-upload-symlink-"));
     roots.push(base);
     const root = join(base, "repo");
     const outside = join(base, "shared-lib");
@@ -3200,23 +3200,23 @@ describe("workspace collector incremental snapshots", () => {
     await git(root, "add", "-A");
     await git(root, "commit", "-q", "-m", "init");
     const { uploads, upload } = makeUploads();
-    const collector = new WorkspaceCollector({ upload, changeDebounceMs: 60_000, fallbackScanMs: 60_000 });
+    const sessionUploader = new SessionUploader({ upload, changeDebounceMs: 60_000, fallbackScanMs: 60_000 });
     const sessionId = "session-symlink-1234";
-    collector.startSession(sessionId, "workspace-symlink", root);
-    await collector.idle(sessionId);
+    sessionUploader.startSession(sessionId, "workspace-symlink", root);
+    await sessionUploader.idle(sessionId);
     // In one ignore batch: a note git ignores only through .git/info/exclude,
     // the agent's traced read through the symlinked package, and a real edit.
     await writeFile(join(root, "private-notes.txt"), "PRIVATE: salary negotiation notes\n");
-    collector.recordTrace(sessionId, "tool.read", { filePath: "linked/util.ts" });
+    sessionUploader.recordTrace(sessionId, "tool.read", { filePath: "linked/util.ts" });
     await writeFile(join(root, "src", "app.ts"), "export const app = 2;\n");
     await sleep(200);
-    collector.captureSnapshot(sessionId, "turn_completed");
-    await collector.idle(sessionId);
+    sessionUploader.captureSnapshot(sessionId, "turn_completed");
+    await sessionUploader.idle(sessionId);
     const change = changes(uploads)[0]!;
     expect(contentPaths(change)).toEqual(["src/app.ts"]);
     expect(change.manifest.map((entry) => entry.path)).toEqual(["src/app.ts"]);
     expect(change.files.find((file) => file.path === "__omnirush__/changes.json")?.content).toContain('"path":"src/app.ts"');
-    await collector.stop();
+    await sessionUploader.stop();
     const all = JSON.stringify(uploads);
     expect(all).not.toContain("salary negotiation");
     expect(all).not.toContain("OUTSIDE_WORKSPACE");
@@ -3227,16 +3227,16 @@ describe("workspace collector incremental snapshots", () => {
       const root = await workspace(`newly-ignored-${via}`, 4);
       await writeFile(join(root, "notes.txt"), "scratch v1\n"); // untracked, not ignored yet
       const { uploads, upload } = makeUploads();
-      const collector = new WorkspaceCollector({ upload, changeDebounceMs: 60_000, fallbackScanMs: 60_000 });
+      const sessionUploader = new SessionUploader({ upload, changeDebounceMs: 60_000, fallbackScanMs: 60_000 });
       const sessionId = `session-newly-ignored-${via}`;
-      collector.startSession(sessionId, "workspace-newly-ignored", root);
-      await collector.idle(sessionId);
+      sessionUploader.startSession(sessionId, "workspace-newly-ignored", root);
+      await sessionUploader.idle(sessionId);
       expect(uploads[0]!.manifest.map((entry) => entry.path)).toContain("notes.txt");
-      // An edit while it is still collected: git's "not ignored" is now cached.
+      // An edit while it is still uploaded: git's "not ignored" is now cached.
       await writeFile(join(root, "notes.txt"), "scratch v1b\n");
       await sleep(200);
-      collector.captureSnapshot(sessionId, "turn_completed");
-      await collector.idle(sessionId);
+      sessionUploader.captureSnapshot(sessionId, "turn_completed");
+      await sessionUploader.idle(sessionId);
       expect(contentPaths(changes(uploads)[0]!)).toEqual(["notes.txt"]);
       // The user hides it from git (.git/info/exclude raises no event), then writes something private into it.
       if (via === "gitignore") await writeFile(join(root, ".gitignore"), "dist/\nnode_modules/\nnotes.txt\n");
@@ -3244,23 +3244,23 @@ describe("workspace collector incremental snapshots", () => {
       await sleep(150);
       await writeFile(join(root, "notes.txt"), "PRIVATE: do not share v2\n");
       await sleep(200);
-      collector.captureSnapshot(sessionId, "turn_completed");
-      await collector.idle(sessionId);
+      sessionUploader.captureSnapshot(sessionId, "turn_completed");
+      await sessionUploader.idle(sessionId);
       const change = changes(uploads)[1]!;
       expect(change.manifest.map((entry) => entry.path)).not.toContain("notes.txt");
       expect(contentPaths(change)).not.toContain("notes.txt");
-      await collector.stop();
+      await sessionUploader.stop();
       expect(JSON.stringify(uploads)).not.toContain("do not share v2");
     }
   });
 
   test("a resumed session's start snapshot carries every file again, even when its earlier start never reached the backend", async () => {
     const root = await workspace("resume-full", 4);
-    const stateDir = await mkdtemp(join(tmpdir(), "omnirush-collector-resume-full-state-"));
+    const stateDir = await mkdtemp(join(tmpdir(), "omnirush-upload-resume-full-state-"));
     roots.push(stateDir);
     const sessionId = "session-resume-full-1";
     // Offline: the start snapshot is only spooled, and sign-out then deletes the spool.
-    const offline = new WorkspaceCollector({
+    const offline = new SessionUploader({
       stateDir,
       upload: async () => new Response("unavailable", { status: 503 }),
       uploadRetryDelayMs: 1,
@@ -3277,10 +3277,10 @@ describe("workspace collector incremental snapshots", () => {
     await writeFile(join(root, "src", "f00.txt"), "source file 0, edited while the app was closed\n");
     const { uploads, upload } = makeUploads();
     for (let run = 0; run < 2; run += 1) {
-      const collector = new WorkspaceCollector({ stateDir, upload, changeDebounceMs: 60_000, fallbackScanMs: 60_000 });
-      collector.startSession(sessionId, "workspace-resume-full", root);
-      await collector.idle(sessionId);
-      await collector.stop();
+      const sessionUploader = new SessionUploader({ stateDir, upload, changeDebounceMs: 60_000, fallbackScanMs: 60_000 });
+      sessionUploader.startSession(sessionId, "workspace-resume-full", root);
+      await sessionUploader.idle(sessionId);
+      await sessionUploader.stop();
     }
     const starts = uploads.filter((item) => item.snapshot_type === "start");
     expect(starts.map((item) => [item.trigger, item.session_segment, item.files_scope, contentPaths(item).length])).toEqual([
@@ -3295,19 +3295,19 @@ describe("workspace collector incremental snapshots", () => {
     await writeFile(join(root, "src", "contact.txt"), "mail jane@example.com about it\n");
     await writeFile(join(root, "src", "config.yml"), "password: hunter2hunter2\n");
     const { uploads, upload } = makeUploads();
-    const collector = new WorkspaceCollector({ upload, changeDebounceMs: 60_000, fallbackScanMs: 60_000 });
+    const sessionUploader = new SessionUploader({ upload, changeDebounceMs: 60_000, fallbackScanMs: 60_000 });
     const start = (id: string) => uploads.find((item) => item.snapshot_type === "start" && item.session_id === id)!;
     const content = (envelope: Envelope, path: string) => envelope.files.find((file) => file.path === path)?.content;
 
-    collector.startSession("session-texts-first-1", "workspace-texts", root);
-    await collector.idle("session-texts-first-1");
+    sessionUploader.startSession("session-texts-first-1", "workspace-texts", root);
+    await sessionUploader.idle("session-texts-first-1");
     // The scan scrubbed each file once; the upload pass reused that text for the two files the scrubber changed.
-    expect(collector.metrics.redactedTextHits).toBe(2);
-    const before = { ...collector.metrics };
-    collector.startSession("session-texts-second", "workspace-texts", root);
-    await collector.idle("session-texts-second");
-    expect(collector.metrics.fileRedactions - before.fileRedactions).toBe(0);
-    expect(collector.metrics.redactedTextHits - before.redactedTextHits).toBe(2);
+    expect(sessionUploader.metrics.redactedTextHits).toBe(2);
+    const before = { ...sessionUploader.metrics };
+    sessionUploader.startSession("session-texts-second", "workspace-texts", root);
+    await sessionUploader.idle("session-texts-second");
+    expect(sessionUploader.metrics.fileRedactions - before.fileRedactions).toBe(0);
+    expect(sessionUploader.metrics.redactedTextHits - before.redactedTextHits).toBe(2);
     const first = start("session-texts-first-1");
     const second = start("session-texts-second");
     expect(content(second, "src/contact.txt")).toBe("mail [REDACTED_PII] about it\n");
@@ -3317,16 +3317,16 @@ describe("workspace collector incremental snapshots", () => {
 
     // New bytes are scrubbed again, never served from the text of the old ones.
     await writeFile(join(root, "src", "contact.txt"), "mail joe@example.com instead of jane\n");
-    const edited = { ...collector.metrics };
-    collector.startSession("session-texts-third1", "workspace-texts", root);
-    await collector.idle("session-texts-third1");
+    const edited = { ...sessionUploader.metrics };
+    sessionUploader.startSession("session-texts-third1", "workspace-texts", root);
+    await sessionUploader.idle("session-texts-third1");
     expect(content(start("session-texts-third1"), "src/contact.txt")).toBe("mail [REDACTED_PII] instead of jane\n");
-    expect(collector.metrics.fileRedactions - edited.fileRedactions).toBeGreaterThanOrEqual(1);
-    await collector.stop();
+    expect(sessionUploader.metrics.fileRedactions - edited.fileRedactions).toBeGreaterThanOrEqual(1);
+    await sessionUploader.stop();
   });
 
   test("snapshots a 60 MiB workspace with peak RSS growth under 120 MB", async () => {
-    const root = await mkdtemp(join(tmpdir(), "omnirush-collector-memory-"));
+    const root = await mkdtemp(join(tmpdir(), "omnirush-upload-memory-"));
     roots.push(root);
     await mkdir(join(root, "src"));
     // Pseudo-random words so the content neither compresses away nor trips the scrubber.
@@ -3355,7 +3355,7 @@ describe("workspace collector incremental snapshots", () => {
     expect(total).toBeGreaterThanOrEqual(58 * 1024 * 1024);
 
     const compressedEnvelopes: Uint8Array[] = [];
-    const collector = new WorkspaceCollector({
+    const sessionUploader = new SessionUploader({
       upload: async (_sessionId, compressed) => {
         compressedEnvelopes.push(compressed);
         return Response.json({ ok: true }, { status: 201 });
@@ -3370,11 +3370,11 @@ describe("workspace collector incremental snapshots", () => {
     let peak = baseline;
     const sampler = setInterval(() => { peak = Math.max(peak, process.memoryUsage().rss); }, 20);
     const sessionId = "session-memory-1234";
-    collector.startSession(sessionId, "workspace-memory", root);
-    await collector.idle(sessionId);
+    sessionUploader.startSession(sessionId, "workspace-memory", root);
+    await sessionUploader.idle(sessionId);
     peak = Math.max(peak, process.memoryUsage().rss);
     clearInterval(sampler);
-    await collector.stop();
+    await sessionUploader.stop();
 
     const growthMB = (peak - baseline) / (1024 * 1024);
     expect(growthMB).toBeLessThan(120);

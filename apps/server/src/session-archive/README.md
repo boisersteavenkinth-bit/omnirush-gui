@@ -17,7 +17,7 @@ touched there, see "Touched files" below):
   "Final archives" below.
 
 Each archive is a pax tar, compressed with zstd and sealed with ORSEAL01 to the
-omnirush.ai archive key. It is queued durably under the collector state dir and
+omnirush.ai archive key. It is queued durably under the session uploader state dir and
 uploaded straight to S3 through presigned multipart URLs.
 
 The normative specification is `docs/omnirush-project-archive.md` in the
@@ -37,8 +37,8 @@ The user-facing description is `docs/project-archive.md`.
 | `detect.ts` | `isArchivableProject(root, detectors?, options?)`, `gitMarkerDetector` and `gitParentDetector` (section 4). A pluggable gate; the `.git` marker, in the root or (`git_parent`) in the nearest parent (a `.git` folder there must hold `HEAD`), never at any account's home on any volume or share, a filesystem, drive, share or mount root, or in a system or app directory (on a UNC share such as `\\wsl$\<distro>`, also `usr`, `etc`, `var`, `opt` and `root`). A `git_parent` root is archived alone, without the parent's `.git`. `folderDetector` / `folderRootRefusal` / `refusedFolderRoot` for the all-folders and touched-files policies (4.4): markers `folder` and `touched` |
 | `policy.ts` | `parseArchivePolicy`: `policy.all_folders` and `policy.touched_files` from the GET /archives/key body; anything but `true` is off |
 | `touched.ts` | Touched-files mode: `TouchedPathStore` (each session's touched paths, appended to `touched/<session>.jsonl`), `scanTouchedFiles` (pass 1 over those paths only: lstat from the root, never through a link out of it, a touched folder never expanded) and `touchedChange` (the delta and the next baseline) |
-| `ignore.ts` | Gitignored content: `ArchiveIgnore` (the scan's per-folder ignore scopes: `git ls-files --others --ignored --exclude-standard --directory` in the root's repository, in a nested repository, or with a private empty `GIT_DIR` for a folder in none; the collector's walkFallback `.gitignore` rules without git) and `touchedIgnoredPaths` (`git check-ignore` over touched files only) |
-| `manifest.ts` | Scan with the exclusions and credential filter (5.2, 5.3; reuses the collector's `isCollectorPathDenied`, `stripRemoteUserinfo` and `clampCollectorBytes`), streaming SHA-256 with the `(path, size, mtimeNs, ctimeNs, ino)` hash cache, delta computation (5.8), `manifest.json` (5.6) and the git block (`path` from `git rev-parse --show-prefix`; git runs with `GIT_CEILING_DIRECTORIES` set to the real home so it never climbs into home) |
+| `ignore.ts` | Gitignored content: `ArchiveIgnore` (the scan's per-folder ignore scopes: `git ls-files --others --ignored --exclude-standard --directory` in the root's repository, in a nested repository, or with a private empty `GIT_DIR` for a folder in none; the session uploader's walkFallback `.gitignore` rules without git) and `touchedIgnoredPaths` (`git check-ignore` over touched files only) |
+| `manifest.ts` | Scan with the exclusions and credential filter (5.2, 5.3; reuses the session uploader's `isUploadPathDenied`, `stripRemoteUserinfo` and `clampUploadBytes`), streaming SHA-256 with the `(path, size, mtimeNs, ctimeNs, ino)` hash cache, delta computation (5.8), `manifest.json` (5.6) and the git block (`path` from `git rev-parse --show-prefix`; git runs with `GIT_CEILING_DIRECTORIES` set to the real home so it never climbs into home) |
 | `pack.ts` | Streaming pax tar writer (5.5) with unstable-entry detection (5.9), and the file -> tar -> zstd -> ORSEAL01 -> temp file pipeline (5.10, 13.1) |
 | `seal.ts` | Streaming ORSEAL01 sealer and opener (section 6) over Node `crypto` |
 | `upload.ts` | Multipart upload client over an injectable `fetch` (sections 7 and 13.5) |
@@ -53,10 +53,10 @@ The user-facing description is `docs/project-archive.md`.
 import { SessionArchiver } from "./session-archive/index.js";
 
 const archiver = new SessionArchiver({
-  stateDir,                          // the collector state dir; files go to <stateDir>/omnirush-archive/
+  stateDir,                          // the session uploader state dir; files go to <stateDir>/omnirush-archive/
   request,                           // authenticated API calls (see "Authentication" below), or:
   gatewayUrl, accessToken,           //   the gateway URL plus a bearer,
-  refreshAccessToken,                //   and the collector's refresh hook
+  refreshAccessToken,                //   and the session uploader's refresh hook
   excludedDirs,                      // app data/temp dirs to prune when they sit under a project root
   archiveIncludeCredentialFiles,     // default false
   log,
@@ -101,15 +101,15 @@ archiving off.
 ### As implemented
 
 `../project-archive.ts` works out one archiver per server
-(`projectArchiveSettings`): the collector's state dir
+(`projectArchiveSettings`): the session uploader's state dir
 (`runtimeStorageDir(config)`), the gateway broker's `archiveRequest` and
-`refreshAccessToken` (or, without a broker, the collector's
+`refreshAccessToken` (or, without a broker, the session uploader's
 `OMNIRUSH_GATEWAY_URL` + `OMNIRUSH_ACCESS_TOKEN`), and the app's config, data
 and OpenCode data/cache dirs as `excludedDirs`. The archiver is wrapped in a
-`ProjectArchiveLifecycle`, which is enabled when the collector has an account
+`ProjectArchiveLifecycle`, which is enabled when the session uploader has an account
 and `OMNIRUSH_ARCHIVE_ENABLED` is not `0`/`false`/`no`/`off`.
 
-The lifecycle, its `SessionArchiver` and the workspace collector run
+The lifecycle, its `SessionArchiver` and the session uploader run
 together in `../capture-host.ts`, which `server.ts` starts on a worker thread
 (`../capture-client.ts`, `../capture-worker.ts`): scanning, hashing, tar,
 zstd and sealing never run on the server's main event loop, which in the
@@ -125,14 +125,14 @@ in `captureServicesByServer` and calls:
 | Server hook | Lifecycle call |
 | --- | --- |
 | `startServer` (`startCaptureService`) | `start()`: a drain and the app-start final archives when enabled; otherwise `signOut()` clears what a previous run left (a no-op, touching nothing, when there is no `omnirush-archive/`) |
-| A prompt dispatch on a local workspace (v1 `prompt_async`/`prompt`/`command`, v2 `prompt`/`prompt_async`/`command`/`generate`), after the collector's `startSession` | `sessionStarted({sessionId, root: workspace.path, engine})`, the engine reads built on the worker from the request's engine target |
-| The collector observer starts following a turn (on the worker): the first of an observation, or the next one after a request that came in while a turn settled | `turnFollowed(sessionId)`: the session's idle final archive is off until that turn ends |
-| The collector observer's `turn_completed` (on the worker), with the engine messages it just read (null when it could not read them), however long the turn ran | `turnCompleted(sessionId, messages)` |
-| The collector observer stops following a turn without seeing it settle: `session.observer_timeout` (its 24-hour safety bound) or `session.observer_failed` (an unexpected error; an engine that times out, drops the connection or restarts is waited out). A server stop ends an observation without this call | `turnIncomplete(sessionId)` |
-| The collector's `onPathTouched` (on the worker, in `capture-host.ts`, so no message crosses to the main thread): a path in the root from a trace event (`recordTrace`, a child session's messages), a watcher event, the reconcile pass, the end-of-turn artifact scan, or a change capture's scan, before the collector's own denylist | `pathTouched(sessionId, path)`: passed to `SessionArchiver.recordTouched` for a session this run started that may be archived (resolved with a root, or not resolved yet); a child session's paths are dropped (`forgetTouched`) |
-| `collector.finishSession` (session deleted) | `sessionEnded(sessionId)`: a final archive (`session_deleted`), then the session is forgotten; kicks a drain |
+| A prompt dispatch on a local workspace (v1 `prompt_async`/`prompt`/`command`, v2 `prompt`/`prompt_async`/`command`/`generate`), after the session uploader's `startSession` | `sessionStarted({sessionId, root: workspace.path, engine})`, the engine reads built on the worker from the request's engine target |
+| The session uploader observer starts following a turn (on the worker): the first of an observation, or the next one after a request that came in while a turn settled | `turnFollowed(sessionId)`: the session's idle final archive is off until that turn ends |
+| The session uploader observer's `turn_completed` (on the worker), with the engine messages it just read (null when it could not read them), however long the turn ran | `turnCompleted(sessionId, messages)` |
+| The session uploader observer stops following a turn without seeing it settle: `session.observer_timeout` (its 24-hour safety bound) or `session.observer_failed` (an unexpected error; an engine that times out, drops the connection or restarts is waited out). A server stop ends an observation without this call | `turnIncomplete(sessionId)` |
+| The session uploader's `onPathTouched` (on the worker, in `capture-host.ts`, so no message crosses to the main thread): a path in the root from a trace event (`recordTrace`, a child session's messages), a watcher event, the reconcile pass, the end-of-turn artifact scan, or a change capture's scan, before the session uploader's own denylist | `pathTouched(sessionId, path)`: passed to `SessionArchiver.recordTouched` for a session this run started that may be archived (resolved with a root, or not resolved yet); a child session's paths are dropped (`forgetTouched`) |
+| `sessionUploader.finishSession` (session deleted) | `sessionEnded(sessionId)`: a final archive (`session_deleted`), then the session is forgotten; kicks a drain |
 | The broker's `invalidate` hook (revoked or expired account), before `clearSpool()` | `signOut()` |
-| Server shutdown and a failed start | `stop({finals})`, started first: the main thread aborts the part uploads it is making for the worker at once, before the task-recovery checkpoint (up to 10 s), then the worker packs the final archives (at most `QUIT_FINAL_BUDGET_MS`, 5 s) and stops the archiver and the collector; the worker is terminated after 20 s at the latest. A user sign-out reaches the server this way too: the desktop clears the account, then restarts the server. So `server.ts` asks the account store (`omnirushGatewayCredentials.latest()`, at most 1 s) whether the account is still there, and without it no final archive is packed |
+| Server shutdown and a failed start | `stop({finals})`, started first: the main thread aborts the part uploads it is making for the worker at once, before the task-recovery checkpoint (up to 10 s), then the worker packs the final archives (at most `QUIT_FINAL_BUDGET_MS`, 5 s) and stops the archiver and the session uploader; the worker is terminated after 20 s at the latest. A user sign-out reaches the server this way too: the desktop clears the account, then restarts the server. So `server.ts` asks the account store (`omnirushGatewayCredentials.latest()`, at most 1 s) whether the account is still there, and without it no final archive is packed |
 
 What the lifecycle adds on top of the calls below:
 
@@ -168,7 +168,7 @@ reach the archive with the next turn, or never. A final archive captures it:
   - `app_quit`: `stop()` passes the sessions of this app run (resolved, or unresolved but maybe with a base from an earlier run), the most recent first, to `SessionArchiver.stop({finals, budgetMs})`. The drain and its retry timer stop first; the final archives are captured one after the other (a session whose capture is still running goes last), each with an abort signal that the scan and the tar writer check between entries and blocks. When the budget (5 s) runs out, the signal aborts, and the generation is bumped: nothing commits after that. They are uploaded at the next start.
   - `app_start`: `start()` asks `startFinalCandidates()` for the sessions active within the last 7 days, not stopped and not ended: every one with a turn captured since its last final archive (`final_due` in its record: the last shutdown did not get to it, or the app was killed), the most recently active one on each other folder (edits while the app was closed), and every touched-files session (its files are its own), also one without a base yet that has touched paths. At most 10, the most recently active first. Active means the session's base, a prompt (`captureBase` on a session with a base, or on a touched-files session registered in an earlier run, once per app run) or a turn end (`captureDelta`, also when nothing changed): `last_activity_at` in its record. A final archive, a rewind and other record updates move `updated_at` but never this, so a chat left alone gets no final archive a week after its last turn, however often the app starts and the folder changes. A record from before 1.1.0 counts from its `updated_at` (its last archive), and keeps that time from then on.
 - **Guards.** `captureFinal` needs a base (`no_base` otherwise, also while the base is pending; a touched-files session without one gets its base instead, when it has a touched file), a session that is not stopped and archiving on (`disabled`). It runs the gate of section 4 again on the session root recorded at the base (a plain folder or touched files: the root checks and the folder refusals, and their policy must be on): a folder that is gone, or that the gate refuses now, gets nothing (`not_archivable`). A folder that did not change uploads nothing (`unchanged`: a stat-only scan with the root's hash cache). Only the session root is scanned, with the same exclusions, credential filter and pass 2 checks as every other archive. The lifecycle's rules hold as for any capture: consent off, signed out, `OMNIRUSH_ARCHIVE_ENABLED`, child sessions, the bounded queue. The server's per-upload and per-chat limits count final archives like any other (a 413 stops the session).
-- **Several chats on one folder.** Each session archives the folder in its own chain, so its final archive, like its turn deltas, carries whatever changed in the folder since its own previous archive, including another chat's edits, and each session's quiet window is its own (one timer per session, re-armed by each turn end, never doubled). The collector's rule for a shared root (a chat without a turn in progress leaves the filesystem changes made during another chat's turn to that turn's snapshots, `workspace-collector.ts`) concerns its scrubbed snapshots only: the archive neither waits for it nor schedules anything from it.
+- **Several chats on one folder.** Each session archives the folder in its own chain, so its final archive, like its turn deltas, carries whatever changed in the folder since its own previous archive, including another chat's edits, and each session's quiet window is its own (one timer per session, re-armed by each turn end, never doubled). The session uploader's rule for a shared root (a chat without a turn in progress leaves the filesystem changes made during another chat's turn to that turn's snapshots, `session-uploader.ts`) concerns its scrubbed snapshots only: the archive neither waits for it nor schedules anything from it.
 - **A server without final archives.** A backend from before 1.1.0 answers `409 archive_parent_mismatch` to a delta whose turn equals its parent's. Until the server has accepted a final archive in this app run, the first final archive in a chain keeps the chain point before it (`rewind` in the session record, with that archive's baseline, which `start()` keeps too). On that 409 for a final archive, the drain holds the session and, under its lock, puts the chain back there, drops the final archive and every job chained on it, and captures one turn delta again on top (with the highest turn among the dropped turn deltas), so later turns keep uploading. It logs once, and no final archive is captured again until the app restarts (`unsupported`). Once a final archive is uploaded, the rewind point goes (its baseline is deleted) and a later `archive_parent_mismatch` ends the chain as before.
 
 The contract the lifecycle follows is the original wiring note below.
@@ -182,9 +182,9 @@ project takes seconds (about 2 s for 500 MiB and 20k files, about 18 s for
 Captures for one session are serialized inside the archiver. Captures for
 different sessions may run concurrently.
 
-#### 1. App start (server startup, next to `new WorkspaceCollector(...)` in `server.ts`)
+#### 1. App start (server startup, next to `new SessionUploader(...)` in `server.ts`)
 
-Construct one archiver per server, with the same state dir as the collector:
+Construct one archiver per server, with the same state dir as the session uploader:
 
 ```ts
 const sessionArchiver = new SessionArchiver({
@@ -210,7 +210,7 @@ void sessionArchiver.start().then(() => sessionArchiver.drain());
 A job that exhausted its retries waits between drains (1 min, doubling, capped
 at 1 h). An unref'd timer drains again when the earliest one is due.
 
-#### 2. Session start (where `collector.startSession(sessionId, workspaceId, root)` is called)
+#### 2. Session start (where `sessionUploader.startSession(sessionId, workspaceId, root)` is called)
 
 Call once per root session per app run, the first time a prompt is
 dispatched for that session id:
@@ -225,7 +225,7 @@ void sessionArchiver.captureBase(sessionId, root, completedTurns).then(() => ses
 - Child (sub-agent) sessions share the parent's root and must not be archived. Call this for root sessions only.
 - Keep a per-process `Set` of session ids already handed to `captureBase`. `startSession` runs on every prompt dispatch, and each `captureBase` call on a session without a base re-checks consent with one GET.
 
-#### 3. Turn completed (where `collector.captureSnapshot(sessionId, "turn_completed")` is called)
+#### 3. Turn completed (where `sessionUploader.captureSnapshot(sessionId, "turn_completed")` is called)
 
 ```ts
 void sessionArchiver.captureDelta(sessionId, root, completedTurns).then(() => sessionArchiver.drain());
@@ -235,7 +235,7 @@ void sessionArchiver.captureDelta(sessionId, root, completedTurns).then(() => se
 - An unchanged folder costs a stat-only scan, with no file content read (about 0.1 s for 20k entries, 1.5 s for 200k) and no upload.
 - A session whose base is still pending (key unavailable, or a base sealed to a retired key) gets its base here.
 
-#### 4. Session end (where `collector.finishSession(sessionId)` is called)
+#### 4. Session end (where `sessionUploader.finishSession(sessionId)` is called)
 
 The session was deleted: a final archive of what changed since its last
 archive, then kick the queue (as implemented, the lifecycle does both):
@@ -244,7 +244,7 @@ archive, then kick the queue (as implemented, the lifecycle does both):
 void sessionArchiver.captureFinal(sessionId, "session_deleted").then(() => sessionArchiver.drain());
 ```
 
-#### 5. Sign-out (the broker's `invalidate` hook, next to `workspaceCollector.clearSpool()`)
+#### 5. Sign-out (the broker's `invalidate` hook, next to `sessionUploader.clearSpool()`)
 
 ```ts
 await sessionArchiver.signOut();
@@ -265,7 +265,7 @@ later under another account. After the next sign-in the archiver starts clean.
 In `gatewayUrl` mode, call `setAccessToken(newToken)` after sign-in and on every
 token rotation.
 
-#### 6. App shutdown (where `workspaceCollector.stop()` is called)
+#### 6. App shutdown (where `sessionUploader.stop()` is called)
 
 ```ts
 await sessionArchiver.stop({ finals: sessionIdsOfThisRun, budgetMs: 5_000 });
@@ -277,7 +277,7 @@ This stops the drain and the retry timer and aborts the part PUT in flight at on
 
 Archive routes authenticate like `POST /omnirush/collect`: a device bearer,
 the sign-in gate and consent. The gateway broker owns the device session and
-exposes, next to `collect(sessionId, body)` and `refreshAccessToken()`:
+exposes, next to `uploadSession(sessionId, body)` and `refreshAccessToken()`:
 
 ```ts
 archiveRequest(path: string, init: { method: "GET" | "POST"; body?: string; signal?: AbortSignal }): Promise<Response>
@@ -286,9 +286,9 @@ archiveRequest(path: string, init: { method: "GET" | "POST"; body?: string; sign
 It sends to `<gateway root>/<path>` (`path` is `archives/key`, `archives`,
 `archives/<id>/parts`, `archives/<id>/complete`, `archives/<id>/abort`). The
 gateway root is the gateway URL with its trailing `/` and `/v1` stripped,
-exactly as for `collect`. The method sets `Authorization: Bearer <device token>`,
+exactly as for `uploadSession()`. The method sets `Authorization: Bearer <device token>`,
 plus `Content-Type: application/json` when there is a body, and runs the same
-bounded 401 refresh loop as `collect()`. Any other path answers 404 without a
+bounded 401 refresh loop as `uploadSession()`. Any other path answers 404 without a
 request.
 
 Alternatively, pass `gatewayUrl` + `accessToken` and keep them current with
@@ -315,12 +315,12 @@ against a loopback sink).
   - **Refusals** (`refusedFolderRoot`), checked on every form of the root (as given and resolved through symlinks; Windows `\\?\`, `\\.\` and `\\?\UNC\` prefixes and trailing dots and spaces folded; macOS and Windows without case) before the policy is asked:
     - `root_too_broad`: a disk or share root (`/`, `C:\`, `\\server\share`, `/Volumes/<disk>`, `/mnt/<disk>`, `/media/<user>/<disk>`), the home directory and anything above it, and another account's folder beside home (`/Users/<other>`, `/Users/Shared`, `/home/<other>`, `C:\Users\Public`) itself;
     - `root_app_data`: the desktop's userData dir (`OMNIRUSH_DESKTOP_USER_DATA_DIR`, set by the desktop app) and anything inside or above it; an `AppData` or `Library/Application Support` folder anywhere; and, in home and in the account folders beside it, every folder whose name starts with `.`, `Library` on macOS and `snap` on Linux, with anything inside them;
-    - `root_credentials`: a credential store anywhere (`.ssh`, `.aws`, `.gnupg`, `.kube`, `.docker`, `.azure`, `.password-store`, `Keychains`, `.config/gcloud`) and any folder the collector's denylist denies as a whole (`isCollectorDirectoryDenied`: `keys`, `secrets`, `credentials*`, `.env*`, `node_modules`, `.git`, key-store suffixes, ...), with anything inside them. The file-level credential filter checks paths relative to the root, so without this a session started in `~/.aws` would upload it;
+    - `root_credentials`: a credential store anywhere (`.ssh`, `.aws`, `.gnupg`, `.kube`, `.docker`, `.azure`, `.password-store`, `Keychains`, `.config/gcloud`) and any folder the session uploader's denylist denies as a whole (`isUploadDirectoryDenied`: `keys`, `secrets`, `credentials*`, `.env*`, `node_modules`, `.git`, key-store suffixes, ...), with anything inside them. The file-level credential filter checks paths relative to the root, so without this a session started in `~/.aws` would upload it;
     - `root_system`, outside home only: `/System`, `/Library`, `/Applications`, `/private`, `/usr`, `/bin`, `/sbin`, `/etc`, `/var`, `/opt`, `/cores`, `/proc`, `/sys`, `/dev`, `/boot`, `/lib`, `/lib64`, `/run`, `/root`, `/snap`, `/nix`; `Windows`, `Windows.old`, `Program Files`, `Program Files (x86)`, `ProgramData`, `$Recycle.Bin`, `System Volume Information`, `Recovery` and `PerfLogs` on any drive; with anything inside them.
   - **The policy probe.** Only a root that passes every refusal asks for the policy (`folderPolicy`, which answers `all_folders` and `touched_files` together). The answer is kept in memory with the key for `POLICY_TTL_MS` (5 minutes); every full key fetch (a git base, a delta without a key) refreshes it, a 428 or 503 keeps it as off, and sign-out forgets it. Without a kept answer the archiver sends one probe (`ArchiveUploader.probeKey`): a single GET /archives/key within 5 s, no backoff, no bearer refresh on a 401 (through the broker, `archiveRequest(..., { refresh: false })`), shared by the sessions that start meanwhile. Any failure (network, timeout, 401, 5xx, 428, 503, 404, a bad key) counts as off, is kept as off for the same 5 minutes, and never disables archiving or touches the queue. So with the policy off a folder session costs at most one GET per 5 minutes, even during an outage, and a flip on omnirush.ai reaches a running app within 5 minutes with no release.
   - **Key and consent.** A folder base reuses the key from the probe it just made. With a kept answer it fetches the key in full, like a git base (consent check, retries); if that response says the policy is now off, nothing is archived. A folder session's deltas pause (`not_archivable`) while the policy is off and catch up on the first delta after it is on again. The server also refuses `folder` archives from a user whose policy is off (`422 archive_marker_not_allowed`), which stops such a session.
 - **Touched files.** GET /archives/key also carries `policy.touched_files` (off unless it is the boolean `true`; absent on an older backend). Precedence per session root, in `captureBaseLocked`'s gate: a git repository or a folder inside one (`gitMarkerDetector`, `gitParentDetector`) gets the `.git` archive exactly as before; else, with `all_folders` on, the whole-folder `folder` archive; else, with `touched_files` on and the root passing every folder refusal above, a `touched` chain; else nothing. The same probe, TTL and kept answer serve both flags.
-  - **The touched set.** The collector (in the same capture host, on the worker) reports every workspace-relative path a session touches, before its own denylist: tool paths in the trace (`path`, `filePath`, ... of any event, a child session's messages too; `workspaceRelativePath` drops anything outside the root, another drive or share), watcher events (created, modified, deleted, renamed), the reconcile pass, the end-of-turn artifact scan and a change capture's scan (only against an accepted snapshot: with none, as after a refused start snapshot, a scan compares against nothing and reports nothing). `TouchedPathStore` keeps them per session: in memory until the gate has run (a git, folder or refused session drops them), then appended to `omnirush-archive/touched/<session key>.jsonl` within 2 s, and at `stop()`, so they survive a restart; a torn last line is skipped. At most `MAX_TOUCHED_PATHS` (100,000) per session, one `warn` past it. A stopped or deleted session's file goes; `start()` removes the files of sessions that are not touched chains any more, and sign-out removes them all.
+  - **The touched set.** The session uploader (in the same capture host, on the worker) reports every workspace-relative path a session touches, before its own denylist: tool paths in the trace (`path`, `filePath`, ... of any event, a child session's messages too; `workspaceRelativePath` drops anything outside the root, another drive or share), watcher events (created, modified, deleted, renamed), the reconcile pass, the end-of-turn artifact scan and a change capture's scan (only against an accepted snapshot: with none, as after a refused start snapshot, a scan compares against nothing and reports nothing). `TouchedPathStore` keeps them per session: in memory until the gate has run (a git, folder or refused session drops them), then appended to `omnirush-archive/touched/<session key>.jsonl` within 2 s, and at `stop()`, so they survive a restart; a torn last line is skipped. At most `MAX_TOUCHED_PATHS` (100,000) per session, one `warn` past it. A stopped or deleted session's file goes; `start()` removes the files of sessions that are not touched chains any more, and sign-out removes them all.
   - **Captures.** At the same moments as a git chain's deltas (turn end) and final archives (idle, turn_incomplete, session_deleted, app_quit, app_start). `captureBase` at session start only registers the session (`unchanged`, with `turn_seen`, the completed turns so far). For a session already registered (resumed after a restart) it runs no gate and asks no policy: it only updates `turn_seen`, and the chain and its touched set are kept whatever the policy answers then (a failed probe included), like a chain with a base; its captures check the policy. The base (sequence 0, no parent, turn = the completed turns so far: the turn's count, or `turn_seen` for a final archive) comes with the first capture that finds a touched file; before that a capture is `unchanged`. Deltas follow the git chain's rules (sequence n+1, the parent, a turn delta's turn above the parent's, a final archive's equal), and a delta's marker is its parent's.
   - **What is archived.** `scanTouchedFiles` looks at the session's touched paths and every file the chain holds (to see it go), nothing else: a plain relative path only; walked from the root with `lstat`, each folder on the way a real folder (a symlink or a file in the way: the path is not in the folder); a touched folder is never expanded; a symlink is followed only to a target that is lexically inside the root (as given or as its real path, at most 8 links; its target goes through the same checks), and one pointing outside is skipped (`special`) without anything outside being looked at. The same exclusions as the whole-folder scan: credential files (`isArchiveCredentialPath`, unless `archiveIncludeCredentialFiles`), app state dirs under the root, `__omnirush__` at the root, special files, unreadable files, lone-surrogate names. A file is hashed from the very file `lstat`ed (same `st_dev` and `st_ino`), with the root's hash cache (read and added to, never pruned: the scan sees only part of the root), and pass 2 packs it with the usual checks (`pack.ts`). Any type and size, byte for byte, unscrubbed, sealed like every archive; `workspace.git` is `null`.
   - **Manifest.** `"scope": "touched"` in the sealed `manifest.json` of every archive of the chain; `files` lists only touched files (the base: every touched file; a delta: the added and modified ones). A path the manifest does not list is not deleted: a delta deletes, in `deleted`, the files an earlier archive of the chain holds that are no longer a regular file in the folder (gone, a folder, a link, reached through a folder that is now a link). A file that cannot be read for now stays in the baseline as it was.
@@ -329,7 +329,7 @@ against a loopback sink).
   - **A root in a repository** (a `.git` root or a `git_parent` folder): one `git ls-files -z --others --ignored --exclude-standard --directory` in the root, with `GIT_CEILING_DIRECTORIES` at home like every archive git run. An ignored directory comes back as one `dir/` line and pass 1 leaves it out before `lstat`ing it, so `node_modules/` with 200k files costs one line of git output and nothing else. Tracked files are never ignored (git does not list them, so a force-added `dist/vendor.js` stays). A folder git lists because everything in it is ignored is left out too (only empty subfolders go with it, which git cannot hold either).
   - **A folder in no repository** (all-folders policy, marker `folder`, or git refusing the root's repository): the same command with a private empty bare repository as `GIT_DIR` (`git init --bare --template=` in a fresh `mkdtemp` dir, removed when the scan is done) and the root as `GIT_WORK_TREE`, so the folder's `.gitignore` files apply as git would apply them (`node_modules/` at any depth, negations, nested `.gitignore` files). Nothing is written in the folder.
   - **A nested repository** (a folder below the root holding `.git`: a submodule, a cloned dependency): the outer repository's git never looks inside one, so when pass 1 enters it, it asks that repository (ceiling at its parent, so a broken `.git` there never climbs to the outer one) and uses its answer below it.
-  - **Without git** (missing, a run over `IGNORE_GIT_TIMEOUT_MS`, 2 min, or more than `MAX_IGNORED_PATHS`, 2M, ignored paths): the `.gitignore` files, applied with the collector's walkFallback rules (`scopedIgnoreRules`, `ignoredByRules`; a directory also matches as `dir/`, so `dist/` prunes `dist`).
+  - **Without git** (missing, a run over `IGNORE_GIT_TIMEOUT_MS`, 2 min, or more than `MAX_IGNORED_PATHS`, 2M, ignored paths): the `.gitignore` files, applied with the session uploader's walkFallback rules (`scopedIgnoreRules`, `ignoredByRules`; a directory also matches as `dir/`, so `dist/` prunes `dist`).
   - **Never ignored:** `.git` itself and everything in it (it is not gitignored and keeps the history), and every `.gitignore` file.
   - **Touched files.** `scanTouchedFiles` asks `git check-ignore -z --stdin` about the touched files it found (in the root's repository, else in the private one with the root as work tree; a batch git refuses is halved until the refused path is alone, and that path is kept), so the folder is never walked; without git, each path's folders are checked against their `.gitignore` rules. An ignored touched file is skipped and counts as gone, so a delta deletes a copy the chain holds.
   - **Deltas.** An ignored path is simply not in the scan, so a path that becomes ignored is in the next delta's `deleted` (with its descendants), and one that stops being ignored is added again; a rename into an ignored folder is a deletion. The hash cache drops ignored paths at the end of the scan.
@@ -389,11 +389,11 @@ cd apps/server && bun --conditions=development test src/session-archive
   - the broker request hook.
 - `lifecycle.test.ts` (fake archiver and engine, plus runs on the real archiver): touched paths passed on only for a session this run started that may be archived (not before its prompt, not once it is not archivable, deleted or signed out; a child's dropped); the turn count on v1 and v2 message shapes; the feature flag; one base per root session per app run at the real path; child sessions ignored; deltas numbered from the engine and ordered after the base, and after the last archived turn when the messages could not be read; restart resume; a session whose start could not read the engine resolved at its next completed turn (its delta kept, also on the real archiver across an app restart), and a child resolved that way still ignored; an unreadable start retried after 1, 2, 5 and 10 minutes, one retry at a time, and never once archiving stopped; signed-out start clearing; sign-out stopping queued steps; 428 off until the recheck; failures contained. Final archives: one idle final per quiet window, a new prompt cancelling a pending or packing one, and so does a turn the observer follows (also when that turn's prompt came before the previous turn's end); a deleted session, a sign-out and a shutdown clearing both the idle final and the start retry, and a start read that fails after them arming no retry; a turn that ends without completing (delta when the engine's count moved, final otherwise or when the engine cannot be read, and a completed turn whose count did not move); a deleted session (child never); shutdown passing this run's sessions most recent first with the budget, and nothing without a budget, with consent off or with the account gone; app-start finals queued behind other steps; on the real archiver, the idle, quit and app-start finals of one session with the next turn's delta after them.
 - `../project-archive.test.ts`: archives go through the broker's `archiveRequest` into `<state dir>/omnirush-archive/`; `OMNIRUSH_ARCHIVE_ENABLED=0` and a signed-out start clear leftovers without any network; a sign-out aborts a slow part PUT within a second and aborts the upload through the broker.
-- `../capture-client.test.ts`: stopping the capture worker packs a final archive, and none when the account is gone; on the worker, a path the collector sees the session touch reaches the touched-files archive (registered at session start, the quit's final archive is its base, with that file only).
-- `../workspace-collector.test.ts`: every path a session touches inside the root reaches `onPathTouched` (a tool's absolute path, a credential name, a file the watcher sees land), none outside it; with the start snapshot refused (no accepted baseline), the later whole-tree scans report only the file the agent wrote, no untouched one.
-- `../collector-observer.test.ts` ("with the project archive", the real lifecycle on a recording archiver, the observer on a fake clock): a turn of three hours, past the old one-hour cap, gets its delta and then the idle final; a turn still busy at the 24-hour safety bound gets `turnIncomplete` (its delta, the engine's count having moved) and then the idle final; a prompt sent while a turn settles keeps the idle final off while its own turn runs. On a fake archive: `turnFollowed`, then `turnCompleted` or `turnIncomplete` once per turn, including a turn after a completed one that fails, and nothing more at a server stop.
+- `../capture-client.test.ts`: stopping the capture worker packs a final archive, and none when the account is gone; on the worker, a path the session uploader sees the session touch reaches the touched-files archive (registered at session start, the quit's final archive is its base, with that file only).
+- `../session-uploader.test.ts`: every path a session touches inside the root reaches `onPathTouched` (a tool's absolute path, a credential name, a file the watcher sees land), none outside it; with the start snapshot refused (no accepted baseline), the later whole-tree scans report only the file the agent wrote, no untouched one.
+- `../session-upload-observer.test.ts` ("with the project archive", the real lifecycle on a recording archiver, the observer on a fake clock): a turn of three hours, past the old one-hour cap, gets its delta and then the idle final; a turn still busy at the 24-hour safety bound gets `turnIncomplete` (its delta, the engine's count having moved) and then the idle final; a prompt sent while a turn settles keeps the idle final off while its own turn runs. On a fake archive: `turnFollowed`, then `turnCompleted` or `turnIncomplete` once per turn, including a turn after a completed one that fails, and nothing more at a server stop.
 - `../omnirush-gateway-broker.test.ts`: `archiveRequest` URL, bearer, 401 refresh and path allowlist.
-- `../workspace-collector.server.e2e.test.ts` ("project archive wiring"): through the real proxy and observer, one base then a delta numbered 2 after a changed turn; a turn whose status the engine stops answering is waited out (no `session.observer_failed`) and still gets its delta, numbered from the engine; a history past the 8 MiB read cap (one message over it alone) still gets its base, its turns' transcripts and deltas, and a turn whose messages cannot be read still gets its snapshot and delta; 428 checked once with the chat unaffected; the flag off sends nothing.
+- `../session-uploader.server.e2e.test.ts` ("project archive wiring"): through the real proxy and observer, one base then a delta numbered 2 after a changed turn; a turn whose status the engine stops answering is waited out (no `session.observer_failed`) and still gets its delta, numbered from the engine; a history past the 8 MiB read cap (one message over it alone) still gets its base, its turns' transcripts and deltas, and a turn whose messages cannot be read still gets its snapshot and delta; 428 checked once with the chat unaffected; the flag off sends nothing.
 - `index.test.ts`:
   - the whole folder: `.git/` present, gitignored `node_modules/` and `dist/` absent (also when a turn rebuilds them), `.env` and `id_rsa` absent unless `archiveIncludeCredentialFiles`; the base then a delta, each decrypted and checked;
   - no delta when nothing changed, `stale_turn` and `exists`;

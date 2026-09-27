@@ -324,7 +324,7 @@ describe("OmniRush gateway broker credential adoption", () => {
     let invalidated = 0;
     let reads = 0;
     const broker = adoptingBroker(async () => (reads++ === 0 ? bundle(1) : bundle(2)), refreshCalls, () => { invalidated += 1; });
-    const response = await broker.collect("session-1234", new Uint8Array([1, 2, 3]));
+    const response = await broker.uploadSession("session-1234", new Uint8Array([1, 2, 3]));
     expect(response.status).toBe(200);
     expect(refreshCalls).toEqual(["refresh-1"]);
     expect(invalidated).toBe(0);
@@ -630,7 +630,7 @@ describe("OmniRush gateway broker sharing a device session with the desktop acco
 describe("OmniRush gateway broker project archive requests", () => {
   const archiveId = "0f6c2a7e-5b1d-4c8e-9a3f-2d7b6e1c4a90";
 
-  test("reach the gateway root with the device bearer and refresh an expired one like collect()", async () => {
+  test("reach the gateway root with the device bearer and refresh an expired one like uploadSession()", async () => {
     const calls: Array<{ url: string; method: string; authorization: string | null; contentType: string | null; body: unknown }> = [];
     const refreshCalls: string[] = [];
     const broker = new OmniRushGatewayBroker({
@@ -957,10 +957,10 @@ describe("OmniRush gateway broker model catalog requests", () => {
   });
 });
 
-describe("OmniRush gateway broker collect deadline", () => {
+describe("OmniRush gateway broker session upload deadline", () => {
   const gatewayUrl = "https://gateway.example/omnirush/v1";
   // 200 ms, the body at 1 MiB/s, 200 ms for the answer: 401 ms for a few bytes, 650 ms for 256 KiB.
-  const collectUploadBudget = { baseMs: 200, bytesPerSecond: 1024 * 1024, maxSendMs: 5_000, responseMs: 200 };
+  const sessionUploadBudget = { baseMs: 200, bytesPerSecond: 1024 * 1024, maxSendMs: 5_000, responseMs: 200 };
 
   /** Resolves after `ms`, or rejects with the signal's reason once it aborts. */
   const sleep = (ms: number, signal: AbortSignal) => new Promise<void>((resolvePromise, reject) => {
@@ -974,12 +974,12 @@ describe("OmniRush gateway broker collect deadline", () => {
 
   type Attempt = { authorization: string | null; signal: AbortSignal };
 
-  /** The gateway accepts `access-2` only; `answer` decides how each collect attempt goes. */
-  function collectBroker(attempts: Attempt[], refreshCalls: string[], answer: (attempt: Attempt) => Promise<Response>) {
+  /** The gateway accepts `access-2` only; `answer` decides how each upload attempt goes. */
+  function uploadBroker(attempts: Attempt[], refreshCalls: string[], answer: (attempt: Attempt) => Promise<Response>) {
     return new OmniRushGatewayBroker({
       credentials: { gatewayUrl, accessToken: "access-1", refreshToken: "refresh-1" },
       engineToken: "local-engine-token",
-      collectUploadBudget,
+      sessionUploadBudget,
       fetch: async (input, init) => {
         if (String(input).endsWith("/device/refresh")) {
           refreshCalls.push((JSON.parse(String(init?.body)) as { refresh_token: string }).refresh_token);
@@ -994,14 +994,14 @@ describe("OmniRush gateway broker collect deadline", () => {
 
   test("ends at the deadline its body's size sets", async () => {
     const attempts: Attempt[] = [];
-    const broker = collectBroker(attempts, [], async ({ signal }) => {
+    const broker = uploadBroker(attempts, [], async ({ signal }) => {
       // Accepted bearer, but the answer never comes.
       await new Promise((_resolvePromise, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true }));
       return Response.json({ ok: true });
     });
     const started = performance.now();
     const ended = async (bytes: number) => {
-      const error = await broker.collect("session-deadline-1", new Uint8Array(bytes)).catch((reason: unknown) => reason);
+      const error = await broker.uploadSession("session-deadline-1", new Uint8Array(bytes)).catch((reason: unknown) => reason);
       return { name: (error as Error).name, afterMs: performance.now() - started };
     };
     const [small, large] = await Promise.all([ended(64), ended(256 * 1024)]);
@@ -1016,7 +1016,7 @@ describe("OmniRush gateway broker collect deadline", () => {
   test("gives the retry with a refreshed bearer a deadline of its own", async () => {
     const attempts: Attempt[] = [];
     const refreshCalls: string[] = [];
-    const broker = collectBroker(attempts, refreshCalls, async ({ authorization, signal }) => {
+    const broker = uploadBroker(attempts, refreshCalls, async ({ authorization, signal }) => {
       // Each try takes 250 ms of its 401: together they outlast one shared deadline.
       await sleep(250, signal);
       return authorization === "Bearer access-2"
@@ -1024,7 +1024,7 @@ describe("OmniRush gateway broker collect deadline", () => {
         : Response.json({ detail: "invalid_token" }, { status: 401 });
     });
     const caller = new AbortController();
-    const response = await broker.collect("session-deadline-2", new Uint8Array(64), caller.signal);
+    const response = await broker.uploadSession("session-deadline-2", new Uint8Array(64), caller.signal);
     expect(response.status).toBe(201);
     expect(refreshCalls).toEqual(["refresh-1"]);
     expect(attempts.map((attempt) => attempt.authorization)).toEqual(["Bearer access-1", "Bearer access-2"]);
@@ -1035,15 +1035,15 @@ describe("OmniRush gateway broker collect deadline", () => {
   test("ends at once when the caller's signal aborts, on the retry with a refreshed bearer too", async () => {
     const attempts: Attempt[] = [];
     const caller = new AbortController();
-    const reason = new DOMException("The collector's deadline", "TimeoutError");
-    const broker = collectBroker(attempts, [], async ({ authorization, signal }) => {
+    const reason = new DOMException("The session uploader's deadline", "TimeoutError");
+    const broker = uploadBroker(attempts, [], async ({ authorization, signal }) => {
       if (authorization !== "Bearer access-2") return Response.json({ detail: "invalid_token" }, { status: 401 });
       setTimeout(() => caller.abort(reason), 50);
       await sleep(10_000, signal);
       return Response.json({ ok: true }, { status: 201 });
     });
     const started = performance.now();
-    const error = await broker.collect("session-deadline-3", new Uint8Array(64), caller.signal).catch((cause: unknown) => cause);
+    const error = await broker.uploadSession("session-deadline-3", new Uint8Array(64), caller.signal).catch((cause: unknown) => cause);
     expect(error).toBe(reason);
     expect(performance.now() - started).toBeLessThan(401 - 100);
     expect(attempts.map((attempt) => attempt.authorization)).toEqual(["Bearer access-1", "Bearer access-2"]);

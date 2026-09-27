@@ -8,7 +8,7 @@
  * with the touched-files policy on, the same chain holding only the files
  * the agent touched there (touched.ts), its base at the first capture that
  * has one. Each archive is sealed to the omnirush.ai archive key, queued
- * durably under the collector state dir and uploaded to S3 through
+ * durably under the session uploader state dir and uploaded to S3 through
  * presigned multipart URLs. The embedded server drives it through
  * lifecycle.ts; see README.md.
  */
@@ -68,7 +68,7 @@ export { gitMarkerDetector, gitParentDetector, isArchivableProject, type Archiva
 export { isArchiveCredentialPath, type ArchiveTrigger, type FinalReason } from "./manifest.js";
 export type { ArchiveApiRequest } from "./upload.js";
 
-/** Subdirectory of the collector state dir that holds everything the archiver keeps. */
+/** Subdirectory of the session uploader state dir that holds everything the archiver keeps. */
 export const ARCHIVE_STATE_DIRECTORY = "omnirush-archive";
 const SESSION_ID_PATTERN = /^[A-Za-z0-9._:-]{8,128}$/;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -92,16 +92,16 @@ const MAX_START_FINALS = 10;
 export const POLICY_TTL_MS = 5 * 60_000;
 
 export type SessionArchiverOptions = {
-  /** As the collector: the archive routes are derived from it like the collect URL. */
+  /** As the session uploader: the archive routes are derived from it like the session upload URL. */
   gatewayUrl?: string;
   accessToken?: string;
-  /** The collector's hook: a fresh bearer after a 401, or null. */
+  /** The session uploader's hook: a fresh bearer after a 401, or null. */
   refreshAccessToken?: () => Promise<string | null>;
   /** External egress for S3 part PUTs (and API calls without `request`); externalFetch by default. */
   fetch?: ArchiveFetch;
   /** Authenticated API calls through the device-session owner (the gateway broker); replaces gatewayUrl + accessToken. */
   request?: ArchiveApiRequest;
-  /** The collector state dir; the archiver keeps its files in `<stateDir>/omnirush-archive/`. */
+  /** The session uploader state dir; the archiver keeps its files in `<stateDir>/omnirush-archive/`. */
   stateDir: string;
   /** App state/temp/data dirs pruned when under a root (the state dir itself is always pruned). */
   excludedDirs?: string[];
@@ -362,7 +362,7 @@ export class SessionArchiver {
     return this.started;
   }
 
-  /** The device bearer changed (collector token rotation). */
+  /** The device bearer changed (session uploader token rotation). */
   setAccessToken(token: string | null): void {
     this.uploader.setAccessToken(token);
   }
@@ -495,7 +495,7 @@ export class SessionArchiver {
 
   /**
    * A path the session touched, workspace-relative (portable `/`), as the
-   * collector reports it: a tool's path in the trace, or a change the
+   * session uploader reports it: a tool's path in the trace, or a change the
    * watcher saw. Kept (on disk, a moment later) for a touched-files session;
    * dropped for any other once the gate has run. Cheap: called for every
    * file event.

@@ -1,11 +1,11 @@
 /**
  * The "turn.diff" trace event: at the end of each turn, a unified diff per
- * workspace file the turn changed, of the scrubbed text the collector last
+ * workspace file the turn changed, of the scrubbed text the session uploader last
  * sent for it before the turn against the scrubbed text it sent after, so the
  * trace pairs the turn with exactly what it changed. The texts come from
  * TurnBaseStore, a bounded content-addressed store of the scrubbed texts the
- * collector sent (keyed by their redacted sha256, the digest the manifest
- * names), kept under the collector state dir so bases survive a restart.
+ * session uploader sent (keyed by their redacted sha256, the digest the manifest
+ * names), kept under the session uploader state dir so bases survive a restart.
  * Everything here runs on the capture worker (see capture-host.ts).
  */
 import { createHash } from "node:crypto";
@@ -21,7 +21,7 @@ export const MAX_TURN_DIFF_EVENT_BYTES = 2 * 1024 * 1024;
 export const MAX_TURN_DIFF_MS = 250;
 /** Budget of the base store, least recently used out first. */
 export const TURN_BASE_STORE_BYTES = 64 * 1024 * 1024;
-/** Texts over the collector's per-file cap are never stored. */
+/** Texts over the session uploader's per-file cap are never stored. */
 const MAX_BASE_TEXT_BYTES = 4 * 1024 * 1024;
 const DIFF_CONTEXT_LINES = 3;
 /** A diff gets a place in the event only while at least this much of the budget is left. */
@@ -57,7 +57,7 @@ export type TurnDiffFile = {
   status: TurnDiffStatus;
   /**
    * Redacted sha256 of the text before the turn: null for an added or skipped
-   * file, and for a no_base one the collector first saw already changed by the turn.
+   * file, and for a no_base one the session uploader first saw already changed by the turn.
    */
   before_sha256: string | null;
   /** Redacted sha256 of the text after the turn (null for a deleted or skipped file). */
@@ -419,7 +419,7 @@ function sha256Hex(text: string): string {
 }
 
 /**
- * The scrubbed texts the collector sent, by redacted sha256, least recently
+ * The scrubbed texts the session uploader sent, by redacted sha256, least recently
  * used out first once `budget` bytes are held. The texts are files under
  * `dir` (one per digest, owner-only) and an index keeps their order across
  * restarts; a text is read back only while its digest still matches. Writes
@@ -446,8 +446,9 @@ export class TurnBaseStore {
   /** Writes under way: clear() lets them settle before it removes the directory. */
   private readonly writing = new Set<Promise<void>>();
 
-  constructor(private readonly dir: string, private readonly budget = TURN_BASE_STORE_BYTES) {
-    this.ready = this.load(dir);
+  /** `after`: the move of the store from its pre-2.2.2 name, which the store waits for before it reads the directory. */
+  constructor(private readonly dir: string, private readonly budget = TURN_BASE_STORE_BYTES, after: Promise<void> = Promise.resolve()) {
+    this.ready = after.then(() => this.load(dir));
   }
 
   private async load(dir: string): Promise<void> {

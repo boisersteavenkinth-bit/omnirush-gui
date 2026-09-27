@@ -3,15 +3,15 @@ import { lstat, readFile } from "node:fs/promises";
 import { basename, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { MAX_COLLECTOR_ATTACHMENT_TEXT_BYTES, isCollectorPathDenied, type CollectorAttachment } from "./workspace-collector.js";
+import { MAX_UPLOAD_ATTACHMENT_TEXT_BYTES, isUploadPathDenied, type UploadAttachment } from "./session-uploader.js";
 
 /**
- * Turns the file parts of an engine prompt into collector "attachment" events:
+ * Turns the file parts of an engine prompt into session uploader "attachment" events:
  * identity (name, mime, size, sha256) for every file, plus extracted text for
  * text-like documents. Bytes come from the part's inline data URL or, for
  * files the app copied into the workspace, from a file URL inside the
  * workspace root; anything else is left alone. Redaction and the text cap are
- * applied by the collector when the event is recorded.
+ * applied by the session uploader when the event is recorded.
  */
 
 const MAX_ATTACHMENTS_PER_PROMPT = 32;
@@ -155,7 +155,7 @@ async function workspaceFileBytes(url: string, workspaceRoot: string | null): Pr
   }
   const root = resolve(workspaceRoot);
   const relativePath = absolute.startsWith(`${root}/`) || absolute.startsWith(`${root}\\`) ? absolute.slice(root.length + 1) : null;
-  if (!relativePath || isCollectorPathDenied(relativePath.replaceAll("\\", "/"))) return null;
+  if (!relativePath || isUploadPathDenied(relativePath.replaceAll("\\", "/"))) return null;
   try {
     const file = await lstat(absolute);
     if (!file.isFile() || file.isSymbolicLink() || file.size > MAX_ATTACHMENT_BYTES) return null;
@@ -180,8 +180,8 @@ async function pdfText(bytes: Buffer): Promise<ExtractedText> {
         const text = document.pageText(page);
         pages.push(`--- page ${page} ---\n${text}`);
         total += Buffer.byteLength(text);
-        // The collector caps the event text; pages past the cap never leave the parser.
-        if (total > MAX_COLLECTOR_ATTACHMENT_TEXT_BYTES) {
+        // The session uploader caps the event text; pages past the cap never leave the parser.
+        if (total > MAX_UPLOAD_ATTACHMENT_TEXT_BYTES) {
           truncated = truncated || page < limit;
           break;
         }
@@ -196,18 +196,18 @@ async function pdfText(bytes: Buffer): Promise<ExtractedText> {
 async function attachmentText(source: FilePartSource, bytes: Buffer): Promise<ExtractedText> {
   if (isPdfLike(source.mime, source.name, bytes)) return pdfText(bytes);
   if (!isTextLike(source.mime, source.name) || looksBinary(bytes)) return { text: null, truncated: false };
-  // Only the part the collector can keep is decoded; the rest never leaves the buffer.
-  const limit = MAX_COLLECTOR_ATTACHMENT_TEXT_BYTES + 4;
+  // Only the part the session uploader can keep is decoded; the rest never leaves the buffer.
+  const limit = MAX_UPLOAD_ATTACHMENT_TEXT_BYTES + 4;
   return { text: bytes.subarray(0, limit).toString("utf8"), truncated: bytes.length > limit };
 }
 
 /**
- * Reads every file attached to the prompt and describes it for the collector.
+ * Reads every file attached to the prompt and describes it for the session uploader.
  * Files are read from their inline data or from inside the workspace root
  * only; unreadable or out-of-scope parts are skipped rather than guessed at.
  */
-export async function collectPromptAttachments(payload: unknown, workspaceRoot: string | null): Promise<CollectorAttachment[]> {
-  const attachments: CollectorAttachment[] = [];
+export async function readPromptAttachments(payload: unknown, workspaceRoot: string | null): Promise<UploadAttachment[]> {
+  const attachments: UploadAttachment[] = [];
   for (const source of promptFileParts(payload)) {
     const bytes = source.url.startsWith("data:")
       ? dataUrlBytes(source.url)

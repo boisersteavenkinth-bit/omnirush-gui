@@ -2,15 +2,15 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { createSessionObservers, observeCollectedSession, type EngineTarget, type ObservedCollector, type ObserverTiming } from "../collector-observer.js";
-import type { CollectorChildSession } from "../workspace-collector.js";
+import { createSessionObservers, observeUploadedSession, type EngineTarget, type ObservedUploader, type ObserverTiming } from "../session-upload-observer.js";
+import type { UploadChildSession } from "../session-uploader.js";
 import { startEngineFacade, type EngineFacade } from "./facade.js";
 
 /**
  * The uploaded trace does not depend on the engine: the turn observer
- * (collector-observer.ts) follows the same recorded conversation (two
+ * (session-upload-observer.ts) follows the same recorded conversation (two
  * parallel sub-agents, fixtures/*-sub.json) once on the 1.x engine and once
- * on the 2.x engine behind the engine adapter, and hands the collector the
+ * on the 2.x engine behind the engine adapter, and hands the session uploader the
  * same trace events, carrying messages and sub-agent sessions with the same
  * fields.
  */
@@ -133,10 +133,10 @@ async function startV2Engine(tree: Tree): Promise<EngineTarget> {
 type Entry =
   | { kind: "trace"; type: string; data?: unknown }
   | { kind: "model"; model: unknown }
-  | { kind: "child"; child: CollectorChildSession }
+  | { kind: "child"; child: UploadChildSession }
   | { kind: "flush"; final?: unknown };
 
-class RecordingCollector implements ObservedCollector {
+class RecordingUploader implements ObservedUploader {
   readonly enabled = true;
   readonly entries: Entry[] = [];
   async sessionCheckpoint() {
@@ -155,7 +155,7 @@ class RecordingCollector implements ObservedCollector {
   async childSessionIds() {
     return [];
   }
-  recordChildSession(_sessionId: string, child: CollectorChildSession) {
+  recordChildSession(_sessionId: string, child: UploadChildSession) {
     this.entries.push({ kind: "child", child });
   }
   captureSnapshot() {}
@@ -166,15 +166,15 @@ class RecordingCollector implements ObservedCollector {
 
 const timing: Partial<ObserverTiming> = { sleep: async () => undefined };
 
-async function observe(target: EngineTarget, sessionId: string): Promise<RecordingCollector> {
-  const collector = new RecordingCollector();
+async function observe(target: EngineTarget, sessionId: string): Promise<RecordingUploader> {
+  const sessionUploader = new RecordingUploader();
   const archive = { turnFollowed: () => undefined, turnCompleted: () => undefined, turnIncomplete: () => undefined };
-  await observeCollectedSession({ collector, archive, observers: createSessionObservers(), sessionId, target, timing });
-  return collector;
+  await observeUploadedSession({ sessionUploader, archive, observers: createSessionObservers(), sessionId, target, timing });
+  return sessionUploader;
 }
 
 /** Sub-agents start concurrently: children are compared by the task they were given. */
-function childKey(child: CollectorChildSession): string {
+function childKey(child: UploadChildSession): string {
   const first = (child.messages as Array<{ parts?: Array<{ text?: string }> }>)[0];
   return String(first?.parts?.[0]?.text ?? "");
 }
@@ -187,14 +187,14 @@ describe("the uploaded trace over the 2.x engine matches the 1.x engine's", () =
     for (const node of flatten(v2)) for (const message of node.messages) if (message.type === "assistant" && message.model && typeof message.model === "object") (message.model as Record<string, unknown>).variant = "default";
     const before = await observe(startV1Engine(v1), String(v1.session.id));
     const after = await observe(await startV2Engine(v2), String(v2.session.id));
-    const labels = (collector: RecordingCollector) => collector.entries.map((entry) => (entry.kind === "trace" ? entry.type : entry.kind));
+    const labels = (sessionUploader: RecordingUploader) => sessionUploader.entries.map((entry) => (entry.kind === "trace" ? entry.type : entry.kind));
     expect(labels(after)).toEqual(labels(before));
     expect(labels(after)).toContain("child");
 
-    const final = (collector: RecordingCollector) => (collector.entries.find((entry) => entry.kind === "flush" && entry.final !== undefined) as { final: { messages: unknown[] } }).final;
+    const final = (sessionUploader: RecordingUploader) => (sessionUploader.entries.find((entry) => entry.kind === "flush" && entry.final !== undefined) as { final: { messages: unknown[] } }).final;
     expect(shapeDiff(final(before).messages, final(after).messages)).toEqual([]);
 
-    const children = (collector: RecordingCollector) => collector.entries
+    const children = (sessionUploader: RecordingUploader) => sessionUploader.entries
       .flatMap((entry) => (entry.kind === "child" ? [entry.child] : []))
       .sort((a, b) => childKey(a).localeCompare(childKey(b)));
     const [left, right] = [children(before), children(after)];
@@ -208,7 +208,7 @@ describe("the uploaded trace over the 2.x engine matches the 1.x engine's", () =
     });
 
     // The session.model event: the same provider, model, variant and agent.
-    const model = (collector: RecordingCollector) => collector.entries.find((entry) => entry.kind === "model");
+    const model = (sessionUploader: RecordingUploader) => sessionUploader.entries.find((entry) => entry.kind === "model");
     expect(model(after)).toBeDefined();
     expect(model(after)).toEqual(model(before));
   });

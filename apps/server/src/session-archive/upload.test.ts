@@ -46,7 +46,7 @@ function uploader(server: FakeArchiveServer, options: Partial<ArchiveUploaderOpt
 }
 
 describe("archive upload client", () => {
-  test("the API root is derived like the collect URL", () => {
+  test("the API root is derived like the session upload URL", () => {
     expect(resolveArchiveApiRoot("https://api.omnirush.ai/omnirush/v1/")).toBe("https://api.omnirush.ai/omnirush");
     expect(resolveArchiveApiRoot("https://api.omnirush.ai/omnirush")).toBe("https://api.omnirush.ai/omnirush");
     expect(resolveArchiveApiRoot("http://127.0.0.1:8080/v1")).toBe("http://127.0.0.1:8080");

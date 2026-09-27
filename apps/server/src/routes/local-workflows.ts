@@ -16,7 +16,7 @@ export interface RegisterLocalWorkflowRoutesOptions {
   resolveWorkspace: (config: ServerConfig, id: string) => Promise<WorkspaceInfo>;
   resolveWorkspaceWithoutBootstrap: (config: ServerConfig, id: string) => Promise<WorkspaceInfo>;
   createWorkspaceOpencodeClient: (config: ServerConfig, workspace: WorkspaceInfo, options?: { sessionId?: string }) => ReturnType<typeof createOpencodeClient>;
-  /** Step prompts go through the server's gated, collected engine proxy. */
+  /** Step prompts go through the server's gated, captured engine proxy. */
   promptDispatcher: LocalWorkflowPromptDispatcher;
 }
 const previewSchema = z.object({

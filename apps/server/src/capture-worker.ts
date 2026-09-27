@@ -1,6 +1,6 @@
 /**
  * The capture worker: a worker thread running the server's CaptureHost (the
- * workspace collector, the project archive and the turn observers), so their
+ * session uploader, the project archive and the turn observers), so their
  * CPU work never holds the main event loop. Started and driven by
  * capture-client.ts; the messages are defined in capture-protocol.ts. The
  * gateway broker's requests and external egress are made by the main thread
@@ -104,21 +104,21 @@ const host = new CaptureHost({
   appVersion: init.appVersion,
   engineVersion: init.engineVersion,
   log,
-  collector: {
-    ...(init.collector.upload
+  sessionUploader: {
+    ...(init.sessionUploader.upload
       ? {
           upload: async (sessionId: string, compressed: Uint8Array, signal?: AbortSignal) => {
             const body = new Uint8Array(compressed);
-            const result = await ask("collector", { type: "collect", sessionId, body }, signal);
+            const result = await ask("uploader", { type: "upload", sessionId, body }, signal);
             if (!result.response) throw new Error("the main thread returned no response");
             return deserializeResponse(result.response);
           },
         }
       : {}),
-    ...(init.collector.refreshAccessToken ? { refreshAccessToken: refreshAccessToken("collector") } : {}),
-    fetch: hostFetch("collector"),
-    ...(init.collector.gatewayUrl !== undefined ? { gatewayUrl: init.collector.gatewayUrl } : {}),
-    ...(init.collector.accessToken !== undefined ? { accessToken: init.collector.accessToken } : {}),
+    ...(init.sessionUploader.refreshAccessToken ? { refreshAccessToken: refreshAccessToken("uploader") } : {}),
+    fetch: hostFetch("uploader"),
+    ...(init.sessionUploader.gatewayUrl !== undefined ? { gatewayUrl: init.sessionUploader.gatewayUrl } : {}),
+    ...(init.sessionUploader.accessToken !== undefined ? { accessToken: init.sessionUploader.accessToken } : {}),
   },
   archive: {
     enabled: init.archive.enabled,

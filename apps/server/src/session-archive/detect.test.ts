@@ -362,7 +362,7 @@ describe("all-folders gate (4.4)", () => {
       [linux, "/srv/backup/sam/.kube", "root_credentials"],
       [linux, "/mnt/data/home/.config/gcloud", "root_credentials"],
       [windows, "D:\\Backup\\.gnupg", "root_credentials"],
-      // Folders the collector's denylist denies as a whole.
+      // Folders the session uploader's denylist denies as a whole.
       ...["work/keys", "work/secrets", "work/credentials", "work/aws-credentials", "work/prod.secrets", "work/.env.d", "work/certs.pem", "work/app/node_modules/pkg", "work/repo/.git/hooks"].map(
         (dir): [FolderGateContext, string, "root_credentials"] => [mac, `/Users/sam/${dir}`, "root_credentials"],
       ),

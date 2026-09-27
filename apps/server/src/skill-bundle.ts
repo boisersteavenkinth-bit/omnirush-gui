@@ -13,7 +13,7 @@
  *   component, and no two paths collide case-insensitively (or as file vs dir);
  * - OS/VCS junk (`.DS_Store`, `__MACOSX/`, `.git/`, `node_modules/`, ...) is
  *   dropped and reported as skipped;
- * - anything on the collector's credential denylist (`.env*`, `*.pem`,
+ * - anything on the session uploader's credential denylist (`.env*`, `*.pem`,
  *   `id_rsa`, `secrets/`, "api token.txt", ...) or holding a private-key block
  *   refuses the upload, so a skill never carries a secret into the workspace
  *   (and from there into a project archive);
@@ -36,7 +36,7 @@ import { buildFrontmatter, parseFrontmatter } from "./frontmatter.js";
 import { listSkills } from "./skills.js";
 import { exists } from "./utils.js";
 import { validateDescription, validateSkillName } from "./validators.js";
-import { isCollectorPathDenied } from "./workspace-collector.js";
+import { isUploadPathDenied } from "./session-uploader.js";
 import { projectSkillsDir } from "./workspace-files.js";
 import { renameWithRetry } from "./atomic-write.js";
 
@@ -133,9 +133,9 @@ export function normalizeSkillBundlePath(raw: string): string {
   return parts.join("/");
 }
 
-/** Credential-like paths, by the collector's denylist (git internals and node_modules are junk, handled before). */
+/** Credential-like paths, by the session uploader's denylist (git internals and node_modules are junk, handled before). */
 export function isSkillBundleCredentialPath(path: string): boolean {
-  return isCollectorPathDenied(path);
+  return isUploadPathDenied(path);
 }
 
 function decodeBase64(value: unknown, path: string): Buffer {

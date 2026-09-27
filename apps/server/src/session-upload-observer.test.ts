@@ -7,17 +7,17 @@ import { zstdDecompressSync } from "node:zlib";
 import {
   createSessionObservers,
   engineReplaced,
-  observeCollectedSession,
+  observeUploadedSession,
   projectArchiveEngineReads,
   promptDispatched,
   type EngineTarget,
-  type ObservedCollector,
+  type ObservedUploader,
   type ObserverTiming,
   type SessionObservers,
-} from "./collector-observer.js";
+} from "./session-upload-observer.js";
 import type { CaptureResult, DrainResult, FinalReason } from "./session-archive/index.js";
 import { ProjectArchiveLifecycle, type ProjectArchiver } from "./session-archive/lifecycle.js";
-import { WorkspaceCollector, type CollectorChildSession } from "./workspace-collector.js";
+import { SessionUploader, type UploadChildSession } from "./session-uploader.js";
 
 /**
  * The turn observer against a fake engine, on a fake clock: a turn is
@@ -142,8 +142,8 @@ type Entry =
   | { kind: "snapshot"; trigger: string }
   | { kind: "flush"; final?: unknown };
 
-/** Records what the observer hands the collector, in order. */
-class FakeCollector implements ObservedCollector {
+/** Records what the observer hands the session uploader, in order. */
+class FakeUploader implements ObservedUploader {
   readonly enabled = true;
   checkpoint: string | undefined;
   readonly entries: Entry[] = [];
@@ -170,7 +170,7 @@ class FakeCollector implements ObservedCollector {
     return [];
   }
 
-  recordChildSession(_sessionId: string, _child: CollectorChildSession): void {}
+  recordChildSession(_sessionId: string, _child: UploadChildSession): void {}
 
   captureSnapshot(_sessionId: string, trigger: "prompt" | "turn_completed"): void {
     this.entries.push({ kind: "snapshot", trigger });
@@ -217,10 +217,10 @@ function fakeArchive() {
   };
 }
 
-type ObservedArchive = Parameters<typeof observeCollectedSession>[0]["archive"];
+type ObservedArchive = Parameters<typeof observeUploadedSession>[0]["archive"];
 
-function observe(input: { collector: ObservedCollector; archive: ObservedArchive; observers: SessionObservers; target: EngineTarget; timing: Partial<ObserverTiming> }) {
-  return observeCollectedSession({ ...input, sessionId: SESSION });
+function observe(input: { sessionUploader: ObservedUploader; archive: ObservedArchive; observers: SessionObservers; target: EngineTarget; timing: Partial<ObserverTiming> }) {
+  return observeUploadedSession({ ...input, sessionId: SESSION });
 }
 
 /** A project archiver that records what the real lifecycle asks of it (bases and deltas numbered like the real one). */
@@ -277,23 +277,23 @@ async function archivedSession(engine: ReturnType<typeof startEngine>, finalIdle
   return { root, archiver, archive };
 }
 
-describe("collector observer", () => {
+describe("session upload observer", () => {
   test("a turn busy for three hours, past the old one-hour cap, gets its messages, snapshot and archive delta, with status reads easing off", async () => {
     const clock = fakeClock();
     const engine = startEngine();
-    const collector = new FakeCollector();
+    const sessionUploader = new FakeUploader();
     const archive = fakeArchive();
     engine.control.messages = [message("msg_user_0001", "user", "Work on issue 42")];
     engine.control.status = () => (clock.elapsed() < 3 * HOUR ? "busy" : "idle");
     clock.at(3 * HOUR, () => engine.control.messages.push(message("msg_assistant_0001", "assistant", "Fixed issue 42")));
 
-    await observe({ collector, archive, observers: createSessionObservers(), target: engine.target, timing: clock.timing });
+    await observe({ sessionUploader, archive, observers: createSessionObservers(), target: engine.target, timing: clock.timing });
 
-    expect(collector.labels()).not.toContain("session.observer_timeout");
-    expect(collector.labels()).not.toContain("session.observer_failed");
-    expect(collector.labels()).toEqual(["session.idle", "snapshot:turn_completed", "flush:turn"]);
-    expect(collector.turnMessageIds()).toEqual([["msg_user_0001", "msg_assistant_0001"]]);
-    expect(collector.checkpoint).toBe("msg_assistant_0001");
+    expect(sessionUploader.labels()).not.toContain("session.observer_timeout");
+    expect(sessionUploader.labels()).not.toContain("session.observer_failed");
+    expect(sessionUploader.labels()).toEqual(["session.idle", "snapshot:turn_completed", "flush:turn"]);
+    expect(sessionUploader.turnMessageIds()).toEqual([["msg_user_0001", "msg_assistant_0001"]]);
+    expect(sessionUploader.checkpoint).toBe("msg_assistant_0001");
     expect(archive.turns).toHaveLength(1);
     expect(archive.turns[0]).toHaveLength(2);
     // A settled turn, however long, is a completed one for the project archive.
@@ -309,17 +309,17 @@ describe("collector observer", () => {
   test("a status read that times out twice, then answers, does not end the observation", async () => {
     const clock = fakeClock();
     const engine = startEngine();
-    const collector = new FakeCollector();
+    const sessionUploader = new FakeUploader();
     const archive = fakeArchive();
     engine.control.messages = [message("msg_user_0001", "user"), message("msg_assistant_0001", "assistant")];
     engine.control.status = () => (clock.elapsed() < 5 * 60_000 ? "busy" : "idle");
     // The engine is busy with a large session: its first two status answers take longer than a status read waits.
     engine.control.statusDelaysMs = [400, 400];
 
-    await observe({ collector, archive, observers: createSessionObservers(), target: engine.target, timing: { ...clock.timing, statusTimeoutMs: 50 } });
+    await observe({ sessionUploader, archive, observers: createSessionObservers(), target: engine.target, timing: { ...clock.timing, statusTimeoutMs: 50 } });
 
-    expect(collector.labels()).toEqual(["session.idle", "snapshot:turn_completed", "flush:turn"]);
-    expect(collector.turnMessageIds()).toEqual([["msg_user_0001", "msg_assistant_0001"]]);
+    expect(sessionUploader.labels()).toEqual(["session.idle", "snapshot:turn_completed", "flush:turn"]);
+    expect(sessionUploader.turnMessageIds()).toEqual([["msg_user_0001", "msg_assistant_0001"]]);
     expect(archive.calls).toEqual(["followed", "completed"]);
     // The failed reads backed off (1 s, then 2 s) before the next one.
     expect(clock.waits.slice(0, 3)).toEqual([1_000, 1_000, 2_000]);
@@ -329,7 +329,7 @@ describe("collector observer", () => {
     const clock = fakeClock();
     const before = startEngine();
     const after = startEngine();
-    const collector = new FakeCollector();
+    const sessionUploader = new FakeUploader();
     const archive = fakeArchive();
     const observers = createSessionObservers();
     before.control.messages = [message("msg_user_0001", "user")];
@@ -340,25 +340,25 @@ describe("collector observer", () => {
     clock.at(20 * 60_000, () => void before.server.stop(true));
     let rejoined: Promise<void> | null = null;
     clock.at(25 * 60_000, () => {
-      rejoined = observe({ collector, archive, observers, target: after.target, timing: clock.timing });
+      rejoined = observe({ sessionUploader, archive, observers, target: after.target, timing: clock.timing });
     });
 
-    const observation = observe({ collector, archive, observers, target: before.target, timing: clock.timing });
+    const observation = observe({ sessionUploader, archive, observers, target: before.target, timing: clock.timing });
     await observation;
 
     expect(rejoined as Promise<void> | null).toBe(observation);
-    expect(collector.labels()).toEqual([
+    expect(sessionUploader.labels()).toEqual([
       "session.engine_unavailable",
       "session.engine_recovered",
       "session.idle",
       "snapshot:turn_completed",
       "flush:turn",
     ]);
-    const [unavailable] = collector.trace("session.engine_unavailable") as Array<{ error: string; failures: number }>;
+    const [unavailable] = sessionUploader.trace("session.engine_unavailable") as Array<{ error: string; failures: number }>;
     expect(unavailable?.failures).toBeGreaterThan(1);
-    const [recovered] = collector.trace("session.engine_recovered") as Array<{ unavailable_ms: number }>;
+    const [recovered] = sessionUploader.trace("session.engine_recovered") as Array<{ unavailable_ms: number }>;
     expect(recovered?.unavailable_ms).toBeGreaterThanOrEqual(4 * 60_000);
-    expect(collector.turnMessageIds()).toEqual([["msg_user_0001", "msg_assistant_0001"]]);
+    expect(sessionUploader.turnMessageIds()).toEqual([["msg_user_0001", "msg_assistant_0001"]]);
     expect(archive.turns).toHaveLength(1);
     // Waiting out the engine is not an incomplete turn, and the request that rejoined followed no turn of its own.
     expect(archive.calls).toEqual(["followed", "completed"]);
@@ -368,7 +368,7 @@ describe("collector observer", () => {
   test("a prompt sent while the turn settles is followed as a turn of its own", async () => {
     const clock = fakeClock();
     const engine = startEngine();
-    const collector = new FakeCollector();
+    const sessionUploader = new FakeUploader();
     const archive = fakeArchive();
     const observers = createSessionObservers();
     engine.control.messages = [message("msg_user_0001", "user"), message("msg_assistant_0001", "assistant")];
@@ -379,16 +379,16 @@ describe("collector observer", () => {
       engine.control.onMessagesRead = null;
       busyUntil = clock.elapsed() + 5 * 60_000;
       engine.control.messages.push(message("msg_user_0002", "user"), message("msg_assistant_0002", "assistant"));
-      void observe({ collector, archive, observers, target: engine.target, timing: clock.timing });
+      void observe({ sessionUploader, archive, observers, target: engine.target, timing: clock.timing });
     };
 
-    await observe({ collector, archive, observers, target: engine.target, timing: clock.timing });
+    await observe({ sessionUploader, archive, observers, target: engine.target, timing: clock.timing });
 
-    expect(collector.labels()).toEqual([
+    expect(sessionUploader.labels()).toEqual([
       "session.idle", "snapshot:turn_completed", "flush:turn",
       "session.idle", "snapshot:turn_completed", "flush:turn",
     ]);
-    expect(collector.turnMessageIds()).toEqual([
+    expect(sessionUploader.turnMessageIds()).toEqual([
       ["msg_user_0001", "msg_assistant_0001"],
       ["msg_user_0002", "msg_assistant_0002"],
     ]);
@@ -400,15 +400,15 @@ describe("collector observer", () => {
   test("the server stopping mid-turn ends the observation quietly and leaves the checkpoint where it was", async () => {
     const clock = fakeClock();
     const engine = startEngine();
-    const collector = new FakeCollector();
-    collector.checkpoint = "msg_assistant_0000";
+    const sessionUploader = new FakeUploader();
+    sessionUploader.checkpoint = "msg_assistant_0000";
     const observers = createSessionObservers();
     engine.control.status = () => "busy";
     clock.at(2 * HOUR, () => observers.controller.abort());
     const archive = fakeArchive();
-    await observe({ collector, archive, observers, target: engine.target, timing: clock.timing });
-    expect(collector.entries).toEqual([]);
-    expect(collector.checkpoint).toBe("msg_assistant_0000");
+    await observe({ sessionUploader, archive, observers, target: engine.target, timing: clock.timing });
+    expect(sessionUploader.entries).toEqual([]);
+    expect(sessionUploader.checkpoint).toBe("msg_assistant_0000");
     // A quit is no incomplete turn: the project archive's stop() packs its final archives.
     expect(archive.calls).toEqual(["followed"]);
   });
@@ -418,11 +418,11 @@ describe("collector observer", () => {
     const engine = startEngine();
     const archive = fakeArchive();
     const observers = createSessionObservers();
-    // A collector that fails on the second turn's idle event, before that turn's snapshot.
+    // A session uploader that fails on the second turn's idle event, before that turn's snapshot.
     let idles = 0;
-    const collector = new (class extends FakeCollector {
+    const sessionUploader = new (class extends FakeUploader {
       override recordTrace(sessionId: string, type: string, data?: unknown): void {
-        if (type === "session.idle" && ++idles === 2) throw new Error("the collector failed");
+        if (type === "session.idle" && ++idles === 2) throw new Error("the session uploader failed");
         super.recordTrace(sessionId, type, data);
       }
     })();
@@ -433,12 +433,12 @@ describe("collector observer", () => {
       engine.control.onMessagesRead = null;
       busyUntil = clock.elapsed() + 5 * 60_000;
       engine.control.messages.push(message("msg_user_0002", "user"), message("msg_assistant_0002", "assistant"));
-      void observe({ collector, archive, observers, target: engine.target, timing: clock.timing });
+      void observe({ sessionUploader, archive, observers, target: engine.target, timing: clock.timing });
     };
 
-    await observe({ collector, archive, observers, target: engine.target, timing: clock.timing });
+    await observe({ sessionUploader, archive, observers, target: engine.target, timing: clock.timing });
 
-    expect(collector.labels()).toEqual([
+    expect(sessionUploader.labels()).toEqual([
       "session.idle", "snapshot:turn_completed", "flush:turn",
       "session.observer_failed", "snapshot:turn_completed", "flush",
     ]);
@@ -448,7 +448,7 @@ describe("collector observer", () => {
   });
 });
 
-describe("collector observer across engine rollovers and queued prompts", () => {
+describe("session upload observer across engine rollovers and queued prompts", () => {
   /** A message the engine created at `created` (epoch ms); an assistant one finished. */
   const at = (id: string, role: "user" | "assistant", created: number): EngineMessage => {
     const each = message(id, role);
@@ -462,7 +462,7 @@ describe("collector observer across engine rollovers and queued prompts", () => 
     // Two engine generations over one shared database: the same messages answer on both.
     const draining = startEngine();
     const primary = startEngine();
-    const collector = new FakeCollector();
+    const sessionUploader = new FakeUploader();
     const archive = fakeArchive();
     const observers = createSessionObservers();
     const shared = [message("msg_user_0001", "user")];
@@ -479,21 +479,21 @@ describe("collector observer across engine rollovers and queued prompts", () => 
       void draining.server.stop(true);
     });
 
-    await observe({ collector, archive, observers, target: draining.target, timing: clock.timing });
+    await observe({ sessionUploader, archive, observers, target: draining.target, timing: clock.timing });
 
-    expect(collector.labels()).not.toContain("session.engine_unavailable");
-    expect(collector.labels()).not.toContain("session.observer_timeout");
-    expect(collector.labels()).toEqual(["session.idle", "snapshot:turn_completed", "flush:turn"]);
-    expect(collector.turnMessageIds()).toEqual([["msg_user_0001", "msg_assistant_0001"]]);
+    expect(sessionUploader.labels()).not.toContain("session.engine_unavailable");
+    expect(sessionUploader.labels()).not.toContain("session.observer_timeout");
+    expect(sessionUploader.labels()).toEqual(["session.idle", "snapshot:turn_completed", "flush:turn"]);
+    expect(sessionUploader.turnMessageIds()).toEqual([["msg_user_0001", "msg_assistant_0001"]]);
     expect(archive.calls).toEqual(["followed", "completed"]);
     // It settled within seconds of the turn's end, reading the new engine with that engine's credentials.
     expect(clock.elapsed()).toBeLessThan(100_000);
     expect(primary.control.authorizations.length).toBeGreaterThan(0);
     expect(new Set(primary.control.authorizations)).toEqual(new Set(["Basic bmV3LWVuZ2luZQ=="]));
     // A request that still names the closed engine (it was routed before the close) is read from the new one.
-    const late = new FakeCollector();
+    const late = new FakeUploader();
     const lateArchive = fakeArchive();
-    await observe({ collector: late, archive: lateArchive, observers, target: draining.target, timing: clock.timing });
+    await observe({ sessionUploader: late, archive: lateArchive, observers, target: draining.target, timing: clock.timing });
     expect(late.labels()).toEqual(["session.idle", "snapshot:turn_completed", "flush:turn"]);
     expect(observers.sessions.size).toBe(0);
   });
@@ -501,7 +501,7 @@ describe("collector observer across engine rollovers and queued prompts", () => 
   test("a prompt sent within two seconds of the turn going idle ends that turn: each prompt gets its own snapshot, messages and settle", async () => {
     const clock = fakeClock();
     const engine = startEngine();
-    const collector = new FakeCollector();
+    const sessionUploader = new FakeUploader();
     const archive = fakeArchive();
     const observers = createSessionObservers();
     const start = clock.timing.now!();
@@ -514,27 +514,27 @@ describe("collector observer across engine rollovers and queued prompts", () => 
     // the prompt and runs a second turn.
     clock.at(60_500, () => {
       const dispatchedAt = clock.timing.now!();
-      promptDispatched(observers, collector, SESSION, dispatchedAt);
+      promptDispatched(observers, sessionUploader, SESSION, dispatchedAt);
       busyUntil = 3 * 60_000;
       engine.control.messages.push(at("msg_user_0002", "user", dispatchedAt + 5));
-      // The prompt's response reaches the observer like any collected request.
-      void observe({ collector, archive, observers, target: engine.target, timing: clock.timing });
+      // The prompt's response reaches the observer like any captured request.
+      void observe({ sessionUploader, archive, observers, target: engine.target, timing: clock.timing });
     });
     clock.at(3 * 60_000, () => engine.control.messages.push(at("msg_assistant_0002", "assistant", start + 179_000)));
 
-    await observe({ collector, archive, observers, target: engine.target, timing: clock.timing });
+    await observe({ sessionUploader, archive, observers, target: engine.target, timing: clock.timing });
 
-    expect(collector.labels()).toEqual([
+    expect(sessionUploader.labels()).toEqual([
       // Turn 1's end snapshot is taken as prompt 2 goes out (ahead of prompt 2's own snapshot).
       "snapshot:turn_completed",
       "session.idle", "flush:turn",
       "session.idle", "snapshot:turn_completed", "flush:turn",
     ]);
-    expect(collector.turnMessageIds()).toEqual([
+    expect(sessionUploader.turnMessageIds()).toEqual([
       ["msg_user_0001", "msg_assistant_0001"],
       ["msg_user_0002", "msg_assistant_0002"],
     ]);
-    expect(collector.checkpoint).toBe("msg_assistant_0002");
+    expect(sessionUploader.checkpoint).toBe("msg_assistant_0002");
     expect(archive.calls).toEqual(["followed", "completed", "followed", "completed"]);
     expect(archive.turns.map((turn) => turn?.length)).toEqual([2, 4]);
   });
@@ -542,7 +542,7 @@ describe("collector observer across engine rollovers and queued prompts", () => 
   test("a prompt sent into a turn still answering waits for that answer to finish before the turn settles", async () => {
     const clock = fakeClock();
     const engine = startEngine();
-    const collector = new FakeCollector();
+    const sessionUploader = new FakeUploader();
     const archive = fakeArchive();
     const observers = createSessionObservers();
     const start = clock.timing.now!();
@@ -553,25 +553,25 @@ describe("collector observer across engine rollovers and queued prompts", () => 
     engine.control.status = () => (clock.elapsed() < 5 * 60_000 ? "busy" : "idle");
     clock.at(30_000, () => {
       const dispatchedAt = clock.timing.now!();
-      promptDispatched(observers, collector, SESSION, dispatchedAt);
+      promptDispatched(observers, sessionUploader, SESSION, dispatchedAt);
       engine.control.messages.push(at("msg_user_0002", "user", dispatchedAt + 5));
     });
     // Turn 1's answer ends a minute later; turn 2 answers after it.
     clock.at(90_000, () => { answering.info.time = { created: start + 1_000, completed: start + 90_000 }; answering.info.finish = "stop"; });
     clock.at(5 * 60_000, () => engine.control.messages.push(at("msg_assistant_0002", "assistant", start + 200_000)));
 
-    await observe({ collector, archive, observers, target: engine.target, timing: clock.timing });
+    await observe({ sessionUploader, archive, observers, target: engine.target, timing: clock.timing });
 
-    expect(collector.turnMessageIds()).toEqual([
+    expect(sessionUploader.turnMessageIds()).toEqual([
       ["msg_user_0001", "msg_assistant_0001"],
       ["msg_user_0002", "msg_assistant_0002"],
     ]);
-    expect(collector.labels().filter((label) => label === "snapshot:turn_completed")).toHaveLength(2);
+    expect(sessionUploader.labels().filter((label) => label === "snapshot:turn_completed")).toHaveLength(2);
     expect(archive.calls).toEqual(["followed", "completed", "followed", "completed"]);
   });
 });
 
-describe("collector observer with the project archive", () => {
+describe("session upload observer with the project archive", () => {
   const user = (id: string) => message(`msg_user_${id}`, "user");
   const answer = (id: string) => message(`msg_assistant_${id}`, "assistant");
 
@@ -584,12 +584,12 @@ describe("collector observer with the project archive", () => {
     engine.control.status = () => (clock.elapsed() < 3 * HOUR ? "busy" : "idle");
     clock.at(3 * HOUR, () => engine.control.messages.push(answer("0001")));
 
-    const collector = new FakeCollector();
-    await observe({ collector, archive, observers: createSessionObservers(), target: engine.target, timing: clock.timing });
+    const sessionUploader = new FakeUploader();
+    await observe({ sessionUploader, archive, observers: createSessionObservers(), target: engine.target, timing: clock.timing });
     await archive.settled();
 
     expect(clock.elapsed()).toBeGreaterThanOrEqual(3 * HOUR);
-    expect(collector.labels()).toEqual(["session.idle", "snapshot:turn_completed", "flush:turn"]);
+    expect(sessionUploader.labels()).toEqual(["session.idle", "snapshot:turn_completed", "flush:turn"]);
     expect(archiver.calls).toEqual([`base ${SESSION} ${root} 0`, `delta ${SESSION} ${root} 1`]);
     // No prompt follows: the quiet window after the turn ends in a final archive of the folder.
     await Bun.sleep(250);
@@ -606,12 +606,12 @@ describe("collector observer with the project archive", () => {
     engine.control.status = () => "busy";
     clock.at(5 * HOUR, () => engine.control.messages.push(answer("0001")));
 
-    const collector = new FakeCollector();
-    await observe({ collector, archive, observers: createSessionObservers(), target: engine.target, timing: clock.timing });
+    const sessionUploader = new FakeUploader();
+    await observe({ sessionUploader, archive, observers: createSessionObservers(), target: engine.target, timing: clock.timing });
     await archive.settled();
 
     expect(clock.elapsed()).toBeGreaterThanOrEqual(24 * HOUR);
-    expect(collector.labels()).toEqual(["session.observer_timeout", "snapshot:turn_completed", "flush"]);
+    expect(sessionUploader.labels()).toEqual(["session.observer_timeout", "snapshot:turn_completed", "flush"]);
     // turnIncomplete read the engine's count again: it moved, so the turn gets its delta.
     expect(archiver.calls).toEqual([`base ${SESSION} ${root} 0`, `delta ${SESSION} ${root} 1`]);
     await Bun.sleep(250);
@@ -624,7 +624,7 @@ describe("collector observer with the project archive", () => {
     const engine = startEngine();
     engine.control.messages = [user("0001")];
     const { root, archiver, archive } = await archivedSession(engine, 100);
-    const collector = new FakeCollector();
+    const sessionUploader = new FakeUploader();
     const observers = createSessionObservers();
     let busyUntil = 2 * 60_000;
     engine.control.status = () => (clock.elapsed() < busyUntil ? "busy" : "idle");
@@ -637,15 +637,15 @@ describe("collector observer with the project archive", () => {
       engine.control.messages.push(user("0002"));
       clock.at(busyUntil, () => engine.control.messages.push(answer("0002")));
       archive.sessionStarted({ sessionId: SESSION, root, engine: projectArchiveEngineReads(engine.target, SESSION) });
-      void observe({ collector, archive, observers, target: engine.target, timing: clock.timing });
+      void observe({ sessionUploader, archive, observers, target: engine.target, timing: clock.timing });
       // Turn 2's first status answer takes longer than the quiet window.
       engine.control.statusDelaysMs = [300];
     };
 
-    await observe({ collector, archive, observers, target: engine.target, timing: clock.timing });
+    await observe({ sessionUploader, archive, observers, target: engine.target, timing: clock.timing });
     await archive.settled();
 
-    expect(collector.turnMessageIds()).toEqual([["msg_user_0001", "msg_assistant_0001"], ["msg_user_0002", "msg_assistant_0002"]]);
+    expect(sessionUploader.turnMessageIds()).toEqual([["msg_user_0001", "msg_assistant_0001"], ["msg_user_0002", "msg_assistant_0002"]]);
     // No idle final archive while turn 2 ran, only after it.
     expect(archiver.calls).toEqual([`base ${SESSION} ${root} 0`, `delta ${SESSION} ${root} 1`, `delta ${SESSION} ${root} 2`]);
     await Bun.sleep(250);
@@ -659,7 +659,7 @@ describe("collector observer with the project archive", () => {
   });
 });
 
-describe("collector observer with the collector", () => {
+describe("session upload observer with the session uploader", () => {
   type Envelope = {
     snapshot_type: string;
     files: Array<{ path: string; content: string }>;
@@ -671,7 +671,7 @@ describe("collector observer with the collector", () => {
     cleanups.push(() => rm(root, { recursive: true, force: true }));
     await writeFile(join(root, "app.txt"), "hello\n");
     const uploads: Envelope[] = [];
-    const collector = new WorkspaceCollector({
+    const sessionUploader = new SessionUploader({
       upload: async (_sessionId, compressed) => {
         uploads.push(JSON.parse(zstdDecompressSync(compressed).toString("utf8")) as Envelope);
         return Response.json({ ok: true }, { status: 201 });
@@ -679,8 +679,8 @@ describe("collector observer with the collector", () => {
       changeDebounceMs: 60_000,
       fallbackScanMs: 60_000,
     });
-    cleanups.push(() => collector.stop());
-    collector.startSession(SESSION, "workspace-observer", root);
+    cleanups.push(() => sessionUploader.stop());
+    sessionUploader.startSession(SESSION, "workspace-observer", root);
     const engine = startEngine();
     const archive = fakeArchive();
     const observers = createSessionObservers();
@@ -694,14 +694,14 @@ describe("collector observer with the collector", () => {
       clock = fakeClock();
       const current = clock;
       engine.control.status = () => (current.elapsed() < busyMs ? "busy" : "idle");
-      await observe({ collector, archive, observers, target: engine.target, timing: { ...current.timing, ...(maxTurnMs ? { maxTurnMs } : {}) } });
-      await collector.idle(SESSION);
+      await observe({ sessionUploader, archive, observers, target: engine.target, timing: { ...current.timing, ...(maxTurnMs ? { maxTurnMs } : {}) } });
+      await sessionUploader.idle(SESSION);
     };
 
     // Turn 1 settles normally: the checkpoint is its answer.
     engine.control.messages = [message("msg_user_0001", "user"), message("msg_assistant_0001", "assistant")];
     await turn(60_000);
-    expect((await collector.sessionCheckpoint(SESSION)).lastMessageId).toBe("msg_assistant_0001");
+    expect((await sessionUploader.sessionCheckpoint(SESSION)).lastMessageId).toBe("msg_assistant_0001");
 
     // Turn 2 is still running when the observer's safety bound (two hours here) runs out.
     engine.control.messages.push(message("msg_user_0002", "user", "Continue"));
@@ -715,7 +715,7 @@ describe("collector observer with the collector", () => {
     // The project archive hears the turn ended without completing (its delta, or a final archive).
     expect(archive.calls).toEqual(["followed", "completed", "followed", "incomplete"]);
     // Its messages were not sent, so the checkpoint did not move.
-    expect((await collector.sessionCheckpoint(SESSION)).lastMessageId).toBe("msg_assistant_0001");
+    expect((await sessionUploader.sessionCheckpoint(SESSION)).lastMessageId).toBe("msg_assistant_0001");
 
     // Turn 3 ("continue") settles: 24 MiB of turn 2 plus its own messages go out in four traces of at most 8 MiB of messages.
     const sent = traces().length;
@@ -736,7 +736,7 @@ describe("collector observer with the collector", () => {
       expect(document(envelope)).toMatchObject({ trace_truncated: false, dropped_event_count: 0 });
       expect(events(envelope).map((event) => event.type)).not.toContain("session.messages_omitted");
     }
-    expect((await collector.sessionCheckpoint(SESSION)).lastMessageId).toBe("msg_assistant_0003");
+    expect((await sessionUploader.sessionCheckpoint(SESSION)).lastMessageId).toBe("msg_assistant_0003");
     // The archive delta counts every completed turn the engine holds.
     expect(archive.turns.at(-1)).toHaveLength(13);
 

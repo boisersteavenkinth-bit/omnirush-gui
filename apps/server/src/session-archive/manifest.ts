@@ -12,7 +12,7 @@ import { constants as fsConstants, type BigIntStats } from "node:fs";
 import { lstat, open, readdir, readlink, realpath } from "node:fs/promises";
 import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 
-import { clampCollectorBytes, isCollectorPathDenied, stripRemoteUserinfo } from "../workspace-collector.js";
+import { clampUploadBytes, isUploadPathDenied, stripRemoteUserinfo } from "../session-uploader.js";
 import { hintGarbageCollection } from "./files.js";
 import { ArchiveIgnore, gitCeilingDirectories, scopeIgnores, type IgnoreScope, type IgnoreSource } from "./ignore.js";
 
@@ -142,19 +142,19 @@ export function compareArchivePaths(left: string, right: string): number {
 
 /**
  * True when a file or symlink must be left out of the archive (section 5.3):
- * the collector's credential denylist, with git internals exempt and
+ * the session uploader's credential denylist, with git internals exempt and
  * `node_modules` not counted as a denial.
  */
 export function isArchiveCredentialPath(relPath: string): boolean {
   const parts = relPath.split("/");
   if (parts.some((part) => part.toLowerCase() === ".git")) return false;
   const rest = parts.filter((part) => part.toLowerCase() !== "node_modules");
-  return rest.length > 0 && isCollectorPathDenied(rest.join("/"));
+  return rest.length > 0 && isUploadPathDenied(rest.join("/"));
 }
 
 /** workspace.label: the root's basename, at most 255 UTF-8 bytes. */
 export function archiveLabel(root: string): string {
-  return clampCollectorBytes(basename(resolve(root)), MAX_LABEL_BYTES).text;
+  return clampUploadBytes(basename(resolve(root)), MAX_LABEL_BYTES).text;
 }
 
 // --- hash cache -------------------------------------------------------------------

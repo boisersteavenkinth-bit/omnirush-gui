@@ -13,14 +13,14 @@
  *   - The swarm engine plugin asks POST /omnirush/subagent-model/resolve for
  *     every prompt of a sub-agent session and puts the answer on the user
  *     message before it is saved, so the engine runs (and records) that model
- *     and effort for the sub-agent, and so do the collector's traces.
+ *     and effort for the sub-agent, and so do the session uploader's traces.
  *   - A picked model that is not in the account's catalog, or that the
  *     gateway refused recently, resolves to the main model instead (a
  *     "selection" fallback, noted on the sub-agent session).
  *   - A request the gateway refuses while a sub-agent runs on the picked
  *     model is sent again on the main model by the gateway broker (a
  *     "gateway" fallback), which marks the model refused for a while; the
- *     collector then records the main model on those sub-agent messages.
+ *     session uploader then records the main model on those sub-agent messages.
  *
  * Kept free of engine-plugin imports; the plugin talks to it over HTTP.
  */

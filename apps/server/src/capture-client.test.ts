@@ -12,7 +12,7 @@ import { FakeArchiveServer, slowPartTwo } from "./session-archive/fake-archive-s
 import { openArchive } from "./session-archive/test-helpers.js";
 
 /**
- * The capture worker: the collector's and the archiver's work runs off the
+ * The capture worker: the session uploader's and the archiver's work runs off the
  * main event loop, a resumed session starts with the whole workspace, and
  * shutdown with work in flight settles in bounded time with archive uploads
  * aborted first.
@@ -80,7 +80,7 @@ function uploadSink() {
   };
 }
 
-function service(options: Partial<CaptureServiceOptions> & Pick<CaptureServiceOptions, "stateDir" | "collector">): CaptureService {
+function service(options: Partial<CaptureServiceOptions> & Pick<CaptureServiceOptions, "stateDir" | "sessionUploader">): CaptureService {
   const capture = startCaptureService({
     appVersion: "0.0.0-test",
     engineVersion: "0.0.0-test",
@@ -120,7 +120,7 @@ describe("capture worker", () => {
   test("a 6,000-file start snapshot is read, scrubbed, compressed and uploaded without a main-loop stall over 100 ms", async () => {
     const root = await syntheticWorkspace(6_000);
     const sink = uploadSink();
-    const capture = service({ stateDir: await tempDir("state"), collector: { upload: sink.upload } });
+    const capture = service({ stateDir: await tempDir("state"), sessionUploader: { upload: sink.upload } });
     const monitor = loopMonitor();
     const started = performance.now();
     capture.startSession("session-offload-0001", "workspace-offload", root);
@@ -149,14 +149,14 @@ describe("capture worker", () => {
     const stateDir = await tempDir("state");
     const sessionId = "session-resume-0001";
     const firstSink = uploadSink();
-    const first = service({ stateDir, collector: { upload: firstSink.upload } });
+    const first = service({ stateDir, sessionUploader: { upload: firstSink.upload } });
     first.startSession(sessionId, "workspace-resume", root);
     await first.stop();
     expect(firstSink.envelopes().map((item) => [item.snapshot_type, item.files_scope])).toEqual([["start", "full"], ["end", "changed"]]);
 
     await writeFile(join(root, "src", "m7", "file7.ts"), "export const edited = true;\n");
     const secondSink = uploadSink();
-    const second = service({ stateDir, collector: { upload: secondSink.upload } });
+    const second = service({ stateDir, sessionUploader: { upload: secondSink.upload } });
     second.startSession(sessionId, "workspace-resume", root);
     await second.idle();
     const [resumed] = secondSink.envelopes();
@@ -172,7 +172,7 @@ describe("capture worker", () => {
   test("stopping with a start snapshot in flight finishes it and the session's end snapshot, then ends the worker", async () => {
     const root = await syntheticWorkspace(3_000);
     const sink = uploadSink();
-    const capture = service({ stateDir: await tempDir("state"), collector: { upload: sink.upload } });
+    const capture = service({ stateDir: await tempDir("state"), sessionUploader: { upload: sink.upload } });
     capture.startSession("session-stop-00001", "workspace-stop", root);
     await capture.diagnostics();
     const stopping = performance.now();
@@ -203,7 +203,7 @@ describe("capture worker", () => {
     const sink = uploadSink();
     const capture = service({
       stateDir: await tempDir("state"),
-      collector: { upload: sink.upload },
+      sessionUploader: { upload: sink.upload },
       archive: {
         enabled: true,
         excludedDirs: [],
@@ -225,11 +225,11 @@ describe("capture worker", () => {
     await capture.stop();
     expect(slow.puts).toEqual([{ part: 2, bytes: 256, abortedAfterMs: expect.any(Number), completed: false }]);
     expect(slow.puts[0]!.abortedAfterMs!).toBeLessThan(1_000);
-    // The collector still delivered the session's end snapshot on the way out.
+    // The session uploader still delivered the session's end snapshot on the way out.
     expect(sink.envelopes().map((item) => item.snapshot_type)).toContain("end");
   }, 60_000);
 
-  test("a stop that runs out of time aborts the collector upload this thread still serves for the worker, and does not wait for it", async () => {
+  test("a stop that runs out of time aborts the session upload this thread still serves for the worker, and does not wait for it", async () => {
     const root = await syntheticWorkspace(5);
     const signals: AbortSignal[] = [];
     let started!: () => void;
@@ -237,7 +237,7 @@ describe("capture worker", () => {
     const capture = service({
       stateDir: await tempDir("state"),
       stopTimeoutMs: 300,
-      collector: {
+      sessionUploader: {
         // The gateway never answers and this hook ignores its signal, as a stalled upload on the main thread would.
         upload: (_sessionId, _bytes, signal) => {
           signals.push(signal!);
@@ -268,7 +268,7 @@ describe("capture worker", () => {
       stateDir,
       worker: false,
       stopTimeoutMs: 300,
-      collector: {
+      sessionUploader: {
         upload: (_sessionId, _bytes, signal) => {
           signals.push(signal!);
           started();
@@ -283,7 +283,7 @@ describe("capture worker", () => {
     expect(performance.now() - stopping).toBeLessThan(5_000);
     expect(signals[0]!.aborted).toBe(true);
     // The start snapshot and the session's end snapshot wait in the spool, the end one never sent.
-    const spoolDir = join(stateDir, "omnirush-collector-spool");
+    const spoolDir = join(stateDir, "omnirush-upload-spool");
     const spooledTypes = async () => (await Promise.all((await readdir(spoolDir).catch(() => [] as string[]))
       .filter((name) => name.endsWith(".json"))
       .map(async (name) => (JSON.parse(await readFile(join(spoolDir, name), "utf8")) as { snapshot_type: string }).snapshot_type))).sort();
@@ -310,7 +310,7 @@ describe("capture worker", () => {
       const stateDir = await tempDir("state");
       const capture = service({
         stateDir,
-        collector: { upload: uploadSink().upload },
+        sessionUploader: { upload: uploadSink().upload },
         archive: {
           enabled: true,
           excludedDirs: [],
@@ -354,7 +354,7 @@ describe("capture worker", () => {
       const refreshFlags: unknown[] = [];
       const capture = service({
         stateDir: await tempDir("state"),
-        collector: { upload: uploadSink().upload },
+        sessionUploader: { upload: uploadSink().upload },
         archive: {
           enabled: true,
           excludedDirs: [],
@@ -389,7 +389,7 @@ describe("capture worker", () => {
     }
   }, 60_000);
 
-  test("on the worker, the paths the collector sees a session touch reach the touched-files archive: a folder without .git gets only those files", async () => {
+  test("on the worker, the paths the session uploader sees a session touch reach the touched-files archive: a folder without .git gets only those files", async () => {
     const sessionId = "ses_touched_0001";
     const engine = Bun.serve({
       hostname: "127.0.0.1",
@@ -408,7 +408,7 @@ describe("capture worker", () => {
     const stateDir = await tempDir("state");
     const capture = service({
       stateDir,
-      collector: { upload: uploadSink().upload },
+      sessionUploader: { upload: uploadSink().upload },
       archive: {
         enabled: true,
         excludedDirs: [],
@@ -449,7 +449,7 @@ describe("capture worker", () => {
     const results: Array<Array<[string, string, number]>> = [];
     for (const worker of [true, false]) {
       const sink = uploadSink();
-      const capture = service({ stateDir: await tempDir("state"), collector: { upload: sink.upload }, worker });
+      const capture = service({ stateDir: await tempDir("state"), sessionUploader: { upload: sink.upload }, worker });
       expect(capture.mode()).toBe(worker ? "starting" : "local");
       capture.startSession("session-modes-0001", "workspace-modes", root);
       expect(capture.hasSession("session-modes-0001")).toBe(true);

@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { zstdDecompressSync } from "node:zlib";
 
 import { MAX_TURN_DIFF_EVENT_BYTES, MAX_TURN_DIFF_FILE_BYTES, MAX_TURN_DIFF_MS, TurnBaseStore, TurnDiffBuilder, unifiedDiff, type TurnDiffEvent, type TurnDiffInput } from "./turn-diff.js";
-import { WorkspaceCollector } from "./workspace-collector.js";
+import { SessionUploader } from "./session-uploader.js";
 
 type Envelope = { snapshot_type: string; trace?: Array<{ type: string; data?: unknown }> };
 
@@ -37,7 +37,7 @@ function traceEventBytes(event: TurnDiffEvent): number {
   return Buffer.byteLength(JSON.stringify({ at: new Date().toISOString(), type: "turn.diff", data: event }));
 }
 
-/** A text of short lines, all numbered from `prefix`, just under 4 MiB (the collector's per-file cap). */
+/** A text of short lines, all numbered from `prefix`, just under 4 MiB (the session uploader's per-file cap). */
 function shortLines(prefix: string): string {
   const lines: string[] = [];
   for (let bytes = 0; bytes < 4 * 1024 * 1024 - 16;) {
@@ -53,14 +53,14 @@ function turnDiffEvents(uploads: Envelope[]): TurnDiffEvent[] {
 }
 
 /**
- * A collector over `root` that records every envelope it uploads; `hold`
+ * A session uploader over `root` that records every envelope it uploads; `hold`
  * sees each one first and may keep the upload (and the session's queue
  * behind it) waiting.
  */
-function recordingCollector(options: { stateDir?: string; snapshotMaxBytes?: number; hold?: (envelope: Envelope) => Promise<void> } = {}): { collector: WorkspaceCollector; uploads: Envelope[] } {
+function recordingUploader(options: { stateDir?: string; snapshotMaxBytes?: number; hold?: (envelope: Envelope) => Promise<void> } = {}): { sessionUploader: SessionUploader; uploads: Envelope[] } {
   const { hold, ...rest } = options;
   const uploads: Envelope[] = [];
-  const collector = new WorkspaceCollector({
+  const sessionUploader = new SessionUploader({
     upload: async (_sessionId, compressed) => {
       const envelope = JSON.parse(zstdDecompressSync(compressed).toString("utf8")) as Envelope;
       uploads.push(envelope);
@@ -71,21 +71,21 @@ function recordingCollector(options: { stateDir?: string; snapshotMaxBytes?: num
     fallbackScanMs: 60_000,
     ...rest,
   });
-  return { collector, uploads };
+  return { sessionUploader, uploads };
 }
 
-/** Runs one turn (prompt, `edit`, turn end) on a collector over `root` and returns the turn's "turn.diff" event. */
-async function turnDiff(root: string, edit: (collector: WorkspaceCollector, sessionId: string) => Promise<void>, options: { stateDir?: string; snapshotMaxBytes?: number } = {}): Promise<TurnDiffEvent> {
-  const { collector, uploads } = recordingCollector(options);
+/** Runs one turn (prompt, `edit`, turn end) on a session uploader over `root` and returns the turn's "turn.diff" event. */
+async function turnDiff(root: string, edit: (sessionUploader: SessionUploader, sessionId: string) => Promise<void>, options: { stateDir?: string; snapshotMaxBytes?: number } = {}): Promise<TurnDiffEvent> {
+  const { sessionUploader, uploads } = recordingUploader(options);
   const sessionId = `session-turn-diff-${Math.random().toString(36).slice(2, 10)}`;
-  collector.startSession(sessionId, "workspace-turn-diff", root);
-  collector.captureSnapshot(sessionId, "prompt");
-  await collector.idle(sessionId);
-  await edit(collector, sessionId);
-  collector.captureSnapshot(sessionId, "turn_completed");
-  collector.flushTrace(sessionId, { messages: [] });
-  await collector.idle(sessionId);
-  await collector.stop();
+  sessionUploader.startSession(sessionId, "workspace-turn-diff", root);
+  sessionUploader.captureSnapshot(sessionId, "prompt");
+  await sessionUploader.idle(sessionId);
+  await edit(sessionUploader, sessionId);
+  sessionUploader.captureSnapshot(sessionId, "turn_completed");
+  sessionUploader.flushTrace(sessionId, { messages: [] });
+  await sessionUploader.idle(sessionId);
+  await sessionUploader.stop();
   const events = turnDiffEvents(uploads);
   expect(events).toHaveLength(1);
   return events[0]!;
@@ -278,11 +278,11 @@ describe("turn.diff events", () => {
     const root = await tempDir("omnirush-turn-diff-read-");
     await writeFile(join(root, "logo.png"), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 0, 0, 13, 0xff]));
     await writeFile(join(root, "dump.log"), "x".repeat(5 * 1024 * 1024));
-    const event = await turnDiff(root, async (collector, sessionId) => {
+    const event = await turnDiff(root, async (sessionUploader, sessionId) => {
       // Traced reads journal the paths as edits do.
-      collector.recordTrace(sessionId, "tool.read", { path: join(root, "logo.png") });
-      collector.recordTrace(sessionId, "tool.read", { file_path: join(root, "dump.log") });
-      await collector.idle(sessionId);
+      sessionUploader.recordTrace(sessionId, "tool.read", { path: join(root, "logo.png") });
+      sessionUploader.recordTrace(sessionId, "tool.read", { file_path: join(root, "dump.log") });
+      await sessionUploader.idle(sessionId);
     });
     expect(event).toEqual({ schema_version: 1, files: [], file_count: 0, omitted_file_count: 0, truncated: false });
   });
@@ -330,7 +330,7 @@ describe("turn.diff events", () => {
     ]);
   });
 
-  test("marks a file the turn wrote before the collector first read it as no_base", async () => {
+  test("marks a file the turn wrote before the session uploader first read it as no_base", async () => {
     const root = await tempDir("omnirush-turn-diff-unseen-");
     await writeFile(join(root, "early.txt"), "written by the turn\n");
     await writeFile(join(root, "steady.txt"), "untouched\n");
@@ -350,7 +350,7 @@ describe("turn.diff events", () => {
     const uploading = new Promise<void>((resolve) => { startUploading = resolve; });
     let release!: () => void;
     const released = new Promise<void>((resolve) => { release = resolve; });
-    const { collector, uploads } = recordingCollector({
+    const { sessionUploader, uploads } = recordingUploader({
       hold: async (envelope) => {
         if (envelope.snapshot_type !== "start") return;
         startUploading();
@@ -358,18 +358,18 @@ describe("turn.diff events", () => {
       },
     });
     const sessionId = "session-turn-diff-queued";
-    collector.startSession(sessionId, "workspace-turn-diff", root);
+    sessionUploader.startSession(sessionId, "workspace-turn-diff", root);
     await uploading;
     // The prompt goes out while the start snapshot is in flight; its own snapshot waits behind it.
-    collector.captureSnapshot(sessionId, "prompt");
+    sessionUploader.captureSnapshot(sessionId, "prompt");
     await delay(5);
     await writeFile(join(root, "app.txt"), "after\n");
     release();
-    await collector.idle(sessionId);
-    collector.captureSnapshot(sessionId, "turn_completed");
-    collector.flushTrace(sessionId, { messages: [] });
-    await collector.idle(sessionId);
-    await collector.stop();
+    await sessionUploader.idle(sessionId);
+    sessionUploader.captureSnapshot(sessionId, "turn_completed");
+    sessionUploader.flushTrace(sessionId, { messages: [] });
+    await sessionUploader.idle(sessionId);
+    await sessionUploader.stop();
     expect(turnDiffEvents(uploads)).toEqual([{
       schema_version: 1,
       files: [{
@@ -397,7 +397,7 @@ describe("turn.diff events", () => {
     let release!: () => void;
     const released = new Promise<void>((resolve) => { release = resolve; });
     let held = false;
-    const { collector, uploads } = recordingCollector({
+    const { sessionUploader, uploads } = recordingUploader({
       hold: async (envelope) => {
         if (envelope.snapshot_type !== "trace" || held) return;
         held = true;
@@ -406,27 +406,27 @@ describe("turn.diff events", () => {
       },
     });
     const sessionId = "session-turn-diff-late";
-    collector.startSession(sessionId, "workspace-turn-diff", root);
-    collector.captureSnapshot(sessionId, "prompt");
-    await collector.idle(sessionId);
+    sessionUploader.startSession(sessionId, "workspace-turn-diff", root);
+    sessionUploader.captureSnapshot(sessionId, "prompt");
+    await sessionUploader.idle(sessionId);
     await delay(5);
     await writeFile(join(root, "first.txt"), "one edited\n");
     // A trace upload holds the queue: the first turn's snapshot waits behind it...
-    collector.flushTrace(sessionId);
+    sessionUploader.flushTrace(sessionId);
     await uploading;
-    collector.captureSnapshot(sessionId, "turn_completed");
+    sessionUploader.captureSnapshot(sessionId, "turn_completed");
     // ...while the next prompt goes out and its turn writes.
     await delay(5);
-    collector.captureSnapshot(sessionId, "prompt");
+    sessionUploader.captureSnapshot(sessionId, "prompt");
     await delay(5);
     await writeFile(join(root, "second.txt"), "two edited\n");
     await writeFile(join(root, "third.txt"), "three\n");
     release();
-    await collector.idle(sessionId);
-    collector.captureSnapshot(sessionId, "turn_completed");
-    collector.flushTrace(sessionId, { messages: [] });
-    await collector.idle(sessionId);
-    await collector.stop();
+    await sessionUploader.idle(sessionId);
+    sessionUploader.captureSnapshot(sessionId, "turn_completed");
+    sessionUploader.flushTrace(sessionId, { messages: [] });
+    await sessionUploader.idle(sessionId);
+    await sessionUploader.stop();
     const events = turnDiffEvents(uploads);
     expect(events.map((event) => event.files.map((file) => [file.path, file.status]))).toEqual([
       [["first.txt", "modified"]],
@@ -440,7 +440,7 @@ describe("turn.diff events", () => {
     const stateDir = await tempDir("omnirush-turn-diff-state-");
     await writeFile(join(root, "app.txt"), "first\n");
     await turnDiff(root, async () => undefined, { stateDir });
-    expect((await readdir(join(stateDir, "omnirush-collector-bases"))).sort()).toEqual([sha256("first\n"), "index.json"].sort());
+    expect((await readdir(join(stateDir, "omnirush-upload-bases"))).sort()).toEqual([sha256("first\n"), "index.json"].sort());
     // The next process sends no content at all: the base can only come from disk.
     const event = await turnDiff(root, async () => {
       await writeFile(join(root, "app.txt"), "second\n");
@@ -448,10 +448,10 @@ describe("turn.diff events", () => {
     expect(event.files).toMatchObject([{ path: "app.txt", status: "modified", diff: "--- a/app.txt\n+++ b/app.txt\n@@ -1 +1 @@\n-first\n+second\n" }]);
 
     // A sign-out deletes the bases with the spool.
-    const signedOut = new WorkspaceCollector({ upload: async () => Response.json({ ok: true }, { status: 201 }), stateDir });
+    const signedOut = new SessionUploader({ upload: async () => Response.json({ ok: true }, { status: 201 }), stateDir });
     await signedOut.clearSpool();
     await signedOut.stop();
-    expect(await readdir(stateDir)).not.toContain("omnirush-collector-bases");
+    expect(await readdir(stateDir)).not.toContain("omnirush-upload-bases");
   });
 
   test("cuts a file diff at 256 KiB and the event at its cap, marked truncated", async () => {

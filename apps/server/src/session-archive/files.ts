@@ -70,7 +70,7 @@ export async function readJsonFile(path: string): Promise<unknown> {
 /**
  * Runs a full garbage collection when the runtime offers one (Bun.gc); a
  * no-op elsewhere. Streaming an archive churns through hundreds of MiB of
- * short-lived buffers (zstd output, AES-GCM output) that the collector would
+ * short-lived buffers (zstd output, AES-GCM output) that the session uploader would
  * otherwise let pile up well past the stream's bounded working set. Callers
  * hint once per 64 MiB of data; a collection takes a few milliseconds at the
  * heap sizes involved.

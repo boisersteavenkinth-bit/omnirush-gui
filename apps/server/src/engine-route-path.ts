@@ -6,7 +6,7 @@
  * decoder, and a malformed sequence is left in place. A path classifier that
  * looks at the raw proxy path therefore disagrees with the engine, which is
  * exactly how an encoded dispatch path could skip the sign-in gate and the
- * collector. Every classifier compares against this decoded form instead; the
+ * session uploader. Every classifier compares against this decoded form instead; the
  * request itself is still forwarded verbatim, the engine decodes it itself.
  */
 
