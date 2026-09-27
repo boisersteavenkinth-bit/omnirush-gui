@@ -2846,7 +2846,7 @@ const browserLoginSync = createBrowserLoginSync({
 browserLoginSync.registerIpc(ipcMain, { evalSeam: browserLoginEvalSeam });
 
 registerMigrationIpc({ app, ipcMain });
-const { ensureAutoUpdater } = registerUpdaterIpc({
+const { ensureAutoUpdater, prepareInstallOnQuit } = registerUpdaterIpc({
   app,
   ipcMain,
   getMainWindow: () => mainWindow,
@@ -2885,6 +2885,10 @@ or use: pnpm dev:worktree`);
     desktopAutomationRunner.stop();
     browserLoginSync.shutdown();
     runDetachedTask("stop services before quit", async () => {
+      // Re-check the update feed while services stop, so a download staged
+      // before newer releases shipped is replaced by the newest one instead
+      // of installing on quit.
+      const updateInstall = prepareInstallOnQuit();
       try {
         await Promise.all([
           disposeRuntimeBeforeQuit(),
@@ -2893,7 +2897,9 @@ or use: pnpm dev:worktree`);
         ]);
       } finally {
         scheduleBlankSlateProfileCleanup();
-        app.quit();
+        const installUpdateAndQuit = await updateInstall;
+        if (installUpdateAndQuit) installUpdateAndQuit();
+        else app.quit();
       }
     });
   });

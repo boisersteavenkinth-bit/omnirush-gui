@@ -8,6 +8,7 @@ import path from "node:path";
 
 import {
   detectDeveloperIdSignature,
+  loopbackDevFeedUrl,
   developerIdSignatureFromCodesignOutput,
   electronUpdaterFeedUrl,
   macAppBundlePath,
@@ -87,7 +88,7 @@ async function registerFakeUpdaterIpc({ version, files = undefined, ...options }
     getPath: (key) => path.join(tempDir, key),
     quit: () => harness.calls.push("quit"),
   };
-  registerIsolatedUpdaterIpc({
+  const registered = registerIsolatedUpdaterIpc({
     app,
     ipcMain: { handle: (name, handler) => handlers.set(name, handler) },
     getMainWindow: () => ({
@@ -100,7 +101,7 @@ async function registerFakeUpdaterIpc({ version, files = undefined, ...options }
     isDeveloperIdSigned: async () => true,
     ...options,
   });
-  return { tempDir, handlers, sent, app, ...harness };
+  return { tempDir, handlers, sent, app, ...registered, ...harness };
 }
 
 describe("staleUpdaterStatePaths", () => {
@@ -566,7 +567,7 @@ describe("downloaded update lifecycle", () => {
       assert.equal(checked.installMode, "in-place");
       assert.equal(checked.alphaChannelSupported, false);
       assert.deepEqual(await download(), { ok: true, mode: "in-place" });
-      assert.equal(updater.autoInstallOnAppQuit, true);
+      assert.equal(updater.autoInstallOnAppQuit, false, "only installNewest may install the staged download");
       assert.deepEqual(calls, ["download"], "downloading must not quit the app");
       updater.checkForUpdates = async () => {
         throw new Error("network flake");
@@ -969,5 +970,189 @@ describe("release channel changes", () => {
     } finally {
       await rm(tempDir, { recursive: true, force: true });
     }
+  });
+});
+
+// A mutable feed: tests publish releases while an older download is staged.
+async function publishingFeedHarness(options = {}) {
+  const harness = await registerFakeUpdaterIpc({ version: "2.2.1", ...options });
+  harness.app.getVersion = () => "2.2.0";
+  const feed = { version: "2.2.1", failDownloadOf: null, failCheck: false };
+  const downloaded = [];
+  const installs = [];
+  let lastChecked = null;
+  harness.updater.checkForUpdates = async () => {
+    if (feed.failCheck) throw new Error("feed unreachable");
+    lastChecked = feed.version;
+    return { updateInfo: { version: feed.version } };
+  };
+  harness.updater.downloadUpdate = async () => {
+    if (lastChecked === feed.failDownloadOf) throw new Error(`HTTP 503 for ${lastChecked}`);
+    downloaded.push(lastChecked);
+  };
+  harness.updater.quitAndInstall = (isSilent, isForceRunAfter) => {
+    installs.push({ version: downloaded.at(-1), isSilent, isForceRunAfter });
+  };
+  return { ...harness, feed, downloaded, installs };
+}
+
+describe("installing the newest published release", () => {
+  it("downloads 2.2.3 and installs it when 2.2.1 is staged and 2.2.3 was published since", async () => {
+    const { tempDir, handlers, feed, downloaded, installs, updater } = await publishingFeedHarness();
+    try {
+      assert.equal((await handlers.get("omnirush:updater:check")(null, "stable")).latestVersion, "2.2.1");
+      assert.deepEqual(await handlers.get("omnirush:updater:download")(), { ok: true, mode: "in-place" });
+      assert.equal(updater.autoInstallOnAppQuit, false, "the staged 2.2.1 must not install behind the updater's back");
+      feed.version = "2.2.3";
+      assert.deepEqual(await handlers.get("omnirush:updater:installAndRestart")(), { ok: true, mode: "in-place" });
+      assert.deepEqual(downloaded, ["2.2.1", "2.2.3"]);
+      assert.deepEqual(installs, [{ version: "2.2.3", isSilent: false, isForceRunAfter: true }]);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("installs the staged download without re-downloading when it is still the newest", async () => {
+    const { tempDir, handlers, downloaded, installs } = await publishingFeedHarness();
+    try {
+      await handlers.get("omnirush:updater:check")(null, "stable");
+      await handlers.get("omnirush:updater:download")();
+      assert.deepEqual(await handlers.get("omnirush:updater:installAndRestart")(), { ok: true, mode: "in-place" });
+      assert.deepEqual(downloaded, ["2.2.1"]);
+      assert.deepEqual(installs.map((install) => install.version), ["2.2.1"]);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("reports no update and installs nothing when the feed has nothing newer", async () => {
+    const { tempDir, handlers, feed, downloaded, installs } = await publishingFeedHarness();
+    try {
+      feed.version = "2.2.0";
+      const checked = await handlers.get("omnirush:updater:check")(null, "stable");
+      assert.equal(checked.available, false);
+      assert.deepEqual(await handlers.get("omnirush:updater:download")(), { ok: false, reason: "No update available." });
+      assert.deepEqual(await handlers.get("omnirush:updater:installAndRestart")(), { ok: false, reason: "update-not-downloaded" });
+      assert.deepEqual(downloaded, []);
+      assert.deepEqual(installs, []);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("never falls back to the stale download when the newer one fails to download", async () => {
+    const { tempDir, handlers, feed, downloaded, installs } = await publishingFeedHarness();
+    try {
+      await handlers.get("omnirush:updater:check")(null, "stable");
+      await handlers.get("omnirush:updater:download")();
+      feed.version = "2.2.3";
+      feed.failDownloadOf = "2.2.3";
+      const failed = await handlers.get("omnirush:updater:installAndRestart")();
+      assert.equal(failed.ok, false);
+      assert.match(failed.reason, /2\.2\.3 is available but could not be downloaded: HTTP 503/);
+      assert.deepEqual(installs, [], "2.2.1 must not install once 2.2.3 is on the feed");
+      // The renderer's retry path: nothing staged, so it re-checks and downloads again.
+      assert.deepEqual(await handlers.get("omnirush:updater:installAndRestart")(), { ok: false, reason: "update-not-downloaded" });
+      feed.failDownloadOf = null;
+      assert.equal((await handlers.get("omnirush:updater:check")(null, "stable")).latestVersion, "2.2.3");
+      assert.deepEqual(await handlers.get("omnirush:updater:download")(), { ok: true, mode: "in-place" });
+      assert.deepEqual(await handlers.get("omnirush:updater:installAndRestart")(), { ok: true, mode: "in-place" });
+      assert.deepEqual(downloaded, ["2.2.1", "2.2.3"]);
+      assert.deepEqual(installs.map((install) => install.version), ["2.2.3"]);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("installs the staged download when the feed cannot be reached", async () => {
+    const { tempDir, handlers, feed, installs } = await publishingFeedHarness();
+    try {
+      await handlers.get("omnirush:updater:check")(null, "stable");
+      await handlers.get("omnirush:updater:download")();
+      feed.failCheck = true;
+      assert.deepEqual(await handlers.get("omnirush:updater:installAndRestart")(), { ok: true, mode: "in-place" });
+      assert.deepEqual(installs.map((install) => install.version), ["2.2.1"]);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("a periodic check replaces the staged download with the newer release", async () => {
+    const { tempDir, handlers, feed, downloaded, installs } = await publishingFeedHarness();
+    try {
+      await handlers.get("omnirush:updater:check")(null, "stable");
+      await handlers.get("omnirush:updater:download")();
+      feed.version = "2.2.2";
+      assert.equal((await handlers.get("omnirush:updater:check")(null, "stable")).latestVersion, "2.2.2");
+      await handlers.get("omnirush:updater:download")();
+      assert.deepEqual(await handlers.get("omnirush:updater:installAndRestart")(), { ok: true, mode: "in-place" });
+      assert.deepEqual(downloaded, ["2.2.1", "2.2.2"]);
+      assert.deepEqual(installs.map((install) => install.version), ["2.2.2"]);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("on quit, re-checks the feed and silently installs the newest release", async () => {
+    const { tempDir, handlers, feed, downloaded, installs, updater, prepareInstallOnQuit } = await publishingFeedHarness({
+      quitInstallFallbackMs: 0,
+    });
+    try {
+      assert.equal(await prepareInstallOnQuit(), null, "nothing staged: plain quit");
+      await handlers.get("omnirush:updater:check")(null, "stable");
+      await handlers.get("omnirush:updater:download")();
+      feed.version = "2.2.3";
+      const installAndQuit = await prepareInstallOnQuit();
+      assert.equal(typeof installAndQuit, "function");
+      installAndQuit();
+      assert.deepEqual(downloaded, ["2.2.1", "2.2.3"]);
+      assert.deepEqual(installs, [{ version: "2.2.3", isSilent: true, isForceRunAfter: false }]);
+      assert.equal(updater.autoRunAppAfterInstall, false);
+      assert.equal(await prepareInstallOnQuit(), null, "an install already started");
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("on quit, skips the stale download when the newer release cannot be fetched", async () => {
+    const { tempDir, handlers, feed, installs, prepareInstallOnQuit } = await publishingFeedHarness();
+    try {
+      await handlers.get("omnirush:updater:check")(null, "stable");
+      await handlers.get("omnirush:updater:download")();
+      feed.version = "2.2.3";
+      feed.failDownloadOf = "2.2.3";
+      assert.equal(await prepareInstallOnQuit(), null);
+      assert.deepEqual(installs, []);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("on quit, gives up on a slow feed instead of holding the app open", async () => {
+    const { tempDir, handlers, updater, installs, prepareInstallOnQuit } = await publishingFeedHarness({
+      quitUpdateTimeoutMs: 20,
+      installCheckTimeoutMs: 20,
+    });
+    try {
+      await handlers.get("omnirush:updater:check")(null, "stable");
+      await handlers.get("omnirush:updater:download")();
+      updater.checkForUpdates = () => new Promise(() => {});
+      assert.equal(await prepareInstallOnQuit(), null);
+      assert.deepEqual(installs, []);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("dev update feed override", () => {
+  it("honors only loopback URLs", () => {
+    assert.equal(loopbackDevFeedUrl("http://127.0.0.1:8765/feed/"), "http://127.0.0.1:8765/feed");
+    assert.equal(loopbackDevFeedUrl("http://localhost:8765"), "http://localhost:8765");
+    assert.equal(loopbackDevFeedUrl("https://updates.example.com/feed"), null);
+    assert.equal(loopbackDevFeedUrl("file:///tmp/feed"), null);
+    assert.equal(loopbackDevFeedUrl(undefined), null);
+    assert.equal(updaterFeedOptions({ devFeedUrl: "http://127.0.0.1:1/f" }).stableFeedUrl, "http://127.0.0.1:1/f");
+    assert.equal(updaterFeedOptions({ devFeedUrl: "https://evil.example/f" }).stableFeedUrl, STABLE_FEED);
   });
 });

@@ -59,12 +59,35 @@ export const STABLE_UPDATER_FEED_URL = "https://github.com/omnirush-ai/omnirush-
  * can enable the Alpha channel. Without it a persisted or requested "alpha"
  * normalizes back to stable instead of probing a feed that does not exist.
  */
-export function updaterFeedOptions({ manifestChannel = "latest", alphaFeedUrl = null } = {}) {
+export function updaterFeedOptions({
+  manifestChannel = "latest",
+  alphaFeedUrl = null,
+  devFeedUrl = null,
+} = {}) {
   const normalizedAlphaFeedUrl = typeof alphaFeedUrl === "string" ? alphaFeedUrl.trim().replace(/\/+$/, "") : "";
   return Object.freeze({
     manifestChannel,
     alphaFeedUrl: manifestChannel === "latest" && normalizedAlphaFeedUrl ? normalizedAlphaFeedUrl : null,
+    stableFeedUrl: loopbackDevFeedUrl(devFeedUrl) ?? STABLE_UPDATER_FEED_URL,
   });
+}
+
+/**
+ * OMNIRUSH_UPDATER_DEV_FEED_URL lets a local update rig serve latest*.yml to a
+ * packaged build. Only a loopback http(s) URL is honored, so the variable can
+ * never point a real install at a remote feed.
+ */
+export function loopbackDevFeedUrl(value) {
+  if (typeof value !== "string" || !value.trim()) return null;
+  let url;
+  try {
+    url = new URL(value.trim());
+  } catch {
+    return null;
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+  if (!["127.0.0.1", "localhost", "[::1]"].includes(url.hostname)) return null;
+  return url.toString().replace(/\/+$/, "");
 }
 
 function alphaChannelSupported(feedOptions) {
@@ -105,7 +128,7 @@ async function writeElectronUpdaterChannel(app, channel, feedOptions) {
 export function electronUpdaterFeedUrl(channel, feedOptions = updaterFeedOptions()) {
   return normalizeElectronUpdaterChannel(channel, feedOptions) === "alpha"
     ? feedOptions.alphaFeedUrl
-    : STABLE_UPDATER_FEED_URL;
+    : feedOptions.stableFeedUrl;
 }
 
 function normalizeStableTargetVersion(value) {
@@ -256,6 +279,16 @@ async function applyElectronUpdaterFeed(
     });
   }
   return state;
+}
+
+function withTimeout(promise, timeoutMs, label) {
+  let timer;
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`${label} timed out after ${timeoutMs} ms.`)), timeoutMs);
+    }),
+  ]).finally(() => clearTimeout(timer));
 }
 
 function runDefaults(args) {
@@ -436,8 +469,18 @@ export function registerUpdaterIpc({
   execPath = process.execPath,
   isDeveloperIdSigned = () => detectDeveloperIdSignature(execPath),
   quitDelayMs = 1500,
+  // Bounds on the feed re-check that runs right before an install, and on the
+  // whole quit-time refresh (check plus any newer download).
+  installCheckTimeoutMs = 15_000,
+  quitUpdateTimeoutMs = 120_000,
+  // Quits anyway if the updater never quits the app after a quit-time install.
+  quitInstallFallbackMs = 30_000,
 }) {
-  const feedOptions = updaterFeedOptions({ manifestChannel, alphaFeedUrl });
+  const feedOptions = updaterFeedOptions({
+    manifestChannel,
+    alphaFeedUrl,
+    devFeedUrl: env.OMNIRUSH_UPDATER_DEV_FEED_URL,
+  });
   let autoUpdaterInstance = null;
   let autoUpdaterLoadPromise = null;
   let installModePromise = null;
@@ -447,6 +490,12 @@ export function registerUpdaterIpc({
   let checkedInstallerArtifact = null;
   let downloadedInstallerPath = null;
   let updateDownloaded = false;
+  // The version and channel of the staged download. The feed can move past it
+  // before it installs, so every install re-checks against the feed first.
+  let downloadedUpdateVersion = null;
+  let downloadedUpdateChannel = null;
+  let installTriggered = false;
+  let quitInstallInProgress = false;
   let recoveryReleases = [];
   const recoveryWitness = { installRequests: [], openedArtifactUrls: [], quitRequested: false };
   let updaterOperationQueue = Promise.resolve();
@@ -492,6 +541,13 @@ export function registerUpdaterIpc({
     };
   }
 
+  function clearDownloadedUpdate() {
+    updateDownloaded = false;
+    downloadedInstallerPath = null;
+    downloadedUpdateVersion = null;
+    downloadedUpdateChannel = null;
+  }
+
   function clearCheckedUpdate() {
     checkedUpdateVersion = null;
     checkedUpdateTargetVersion = null;
@@ -520,7 +576,12 @@ export function registerUpdaterIpc({
           autoUpdaterInstance = mod.autoUpdater ?? mod.default?.autoUpdater ?? null;
           if (autoUpdaterInstance) {
             autoUpdaterInstance.autoDownload = false;
-            autoUpdaterInstance.autoInstallOnAppQuit = true;
+            // Nothing installs behind the updater's back: electron-updater's own
+            // quit hook (and Squirrel.Mac, which stages at download time when
+            // this is true) would install whatever was downloaded first, even
+            // after a newer release was published. Quit and restart both go
+            // through ensureNewestDownloaded(), which re-checks the feed first.
+            autoUpdaterInstance.autoInstallOnAppQuit = false;
             // Differential (blockmap) downloads reconstruct the update zip from the
             // installed app + a diff. On macOS that reconstructed bundle is what
             // feeds Squirrel's fragile move-based install, and is a common trigger
@@ -535,9 +596,12 @@ export function registerUpdaterIpc({
               // A later transient check failure does not delete the downloaded
               // update; quitAndInstall reports a descriptive failure if it is gone.
               console.warn("[updater] error", err);
+              // A failed quit-time install must not leave the app running.
+              if (quitInstallInProgress) app.quit();
             });
-            autoUpdaterInstance.on("update-downloaded", () => {
+            autoUpdaterInstance.on("update-downloaded", (info) => {
               updateDownloaded = true;
+              if (typeof info?.version === "string") downloadedUpdateVersion = info.version;
             });
             // Forward download progress to the renderer so the UI can show
             // incremental bytes instead of staying stuck at 0.
@@ -804,6 +868,7 @@ export function registerUpdaterIpc({
         }
         updater.autoInstallOnAppQuit = true;
         await updater.downloadUpdate();
+        installTriggered = true;
         updater.quitAndInstall(false, true);
         return { ok: true, action: "install" };
       } catch (error) {
@@ -851,8 +916,7 @@ export function registerUpdaterIpc({
   ipcMain.handle("omnirush:updater:setChannel", async (_event, rawChannel) => queueUpdaterOperation(async () => {
     const channel = await writeElectronUpdaterChannel(app, rawChannel, feedOptions);
     clearCheckedUpdate();
-    downloadedInstallerPath = null;
-    updateDownloaded = false;
+    clearDownloadedUpdate();
     const installMode = await resolveInstallMode();
     const updater = await ensureAutoUpdater();
     if (updater) {
@@ -893,10 +957,7 @@ export function registerUpdaterIpc({
         throw new Error(`Target update manifest did not resolve to v${targetVersion}.`);
       }
       const available = recordCheckedUpdate(info, channelState, targetVersion, installMode);
-      if (!available) {
-        updateDownloaded = false;
-        downloadedInstallerPath = null;
-      }
+      if (!available) clearDownloadedUpdate();
       return {
         available,
         currentVersion,
@@ -947,36 +1008,141 @@ export function registerUpdaterIpc({
       await cacheCurrentHealthyRelease().catch((error) => {
         console.warn("[updater] could not cache the current healthy installer", error);
       });
-      if (installMode === "manual-dmg") {
-        // Squirrel.Mac would refuse the zip electron-updater downloads for an
-        // ad-hoc signed app, so fetch the DMG the same manifest lists instead.
-        // The download is plain HTTPS plus the manifest's sha512.
-        if (!checkedInstallerArtifact || checkedInstallerArtifact.version !== checkedUpdateVersion) {
-          throw new Error("The release manifest does not list a macOS installer for this update.");
-        }
-        downloadedInstallerPath = await downloadManualInstaller(checkedInstallerArtifact);
-        updateDownloaded = true;
-        return { ok: true, mode: "manual-dmg" };
-      }
-      // Clear any stuck ShipIt state from a prior aborted install so this
-      // download applies cleanly on quit.
-      await cleanStaleUpdaterState(app, shipItDefaultsDomain);
-      updater.autoInstallOnAppQuit = true;
-      await updater.downloadUpdate();
-      updateDownloaded = true;
-      return { ok: true, mode: "in-place" };
+      await downloadCheckedUpdate(updater, installMode);
+      return { ok: true, mode: installMode };
     } catch (error) {
-      updateDownloaded = false;
-      downloadedInstallerPath = null;
+      clearDownloadedUpdate();
       return { ok: false, reason: String(error?.message ?? error) };
     }
   }));
+
+  /** Downloads the version the last successful check recorded. */
+  async function downloadCheckedUpdate(updater, installMode) {
+    const version = checkedUpdateVersion;
+    if (installMode === "manual-dmg") {
+      // Squirrel.Mac would refuse the zip electron-updater downloads for an
+      // ad-hoc signed app, so fetch the DMG the same manifest lists instead.
+      // The download is plain HTTPS plus the manifest's sha512.
+      if (!checkedInstallerArtifact || checkedInstallerArtifact.version !== version) {
+        throw new Error("The release manifest does not list a macOS installer for this update.");
+      }
+      downloadedInstallerPath = await downloadManualInstaller(checkedInstallerArtifact);
+    } else {
+      // Clear any stuck ShipIt state from a prior aborted install so this
+      // download applies cleanly.
+      await cleanStaleUpdaterState(app, shipItDefaultsDomain);
+      preventPendingUpdaterInstall(updater);
+      await updater.downloadUpdate();
+    }
+    updateDownloaded = true;
+    downloadedUpdateVersion = version;
+    downloadedUpdateChannel = checkedUpdateChannel;
+  }
+
+  /**
+   * Re-reads the feed right before an install. A staged download can be
+   * several releases behind the feed (it was fetched at launch, the app stayed
+   * open while more releases shipped), and installing it would only make the
+   * next launch find the next release. When the feed has moved on, the newest
+   * release is downloaded now so a single restart lands on it.
+   *
+   * Resolves { ok: true } when the staged download is the version to install.
+   * An unreachable feed keeps the staged download: it is the newest release
+   * this app knows of. A newer release that cannot be downloaded never falls
+   * back to the stale one.
+   */
+  async function ensureNewestDownloaded(updater, installMode) {
+    // A Den-selected target is the exact version the organization allows.
+    if (checkedUpdateTargetVersion) return { ok: true };
+    let info;
+    let channelState;
+    try {
+      channelState = {
+        ...(await applyElectronUpdaterFeed(
+          app,
+          updater,
+          null,
+          feedOptions,
+          false,
+          downloadedUpdateChannel ?? undefined,
+        )),
+        installMode,
+      };
+      const result = await withTimeout(updater.checkForUpdates(), installCheckTimeoutMs, "The update check");
+      info = result?.updateInfo ?? null;
+    } catch (error) {
+      console.warn("[updater] pre-install check failed; installing the staged update", error?.message ?? error);
+      return { ok: true };
+    }
+    if (!info?.version || !isVersionNewer(info.version, resolveAppVersion(app))) {
+      // The feed no longer offers an update (the release was pulled).
+      clearCheckedUpdate();
+      clearDownloadedUpdate();
+      return { ok: false, reason: "update-not-downloaded" };
+    }
+    if (downloadedUpdateVersion && compareVersions(info.version, downloadedUpdateVersion) === 0) {
+      return { ok: true };
+    }
+    console.info(`[updater] feed moved from v${downloadedUpdateVersion ?? "?"} to v${info.version}; downloading it before install`);
+    recordCheckedUpdate(info, channelState, null, installMode);
+    try {
+      await downloadCheckedUpdate(updater, installMode);
+      return { ok: true };
+    } catch (error) {
+      clearDownloadedUpdate();
+      return {
+        ok: false,
+        reason: `Version ${info.version} is available but could not be downloaded: ${String(error?.message ?? error)}`,
+      };
+    }
+  }
+
+  /**
+   * Called from the app's before-quit teardown. Re-checks the feed while
+   * services stop and resolves to a function that installs the newest release
+   * and quits, or to null when nothing should install (no staged download, a
+   * restart already installed it, or a newer release could not be fetched in
+   * time: the stale download is then skipped and the next launch updates).
+   * Never rejects.
+   */
+  async function prepareInstallOnQuit() {
+    try {
+      const updater = autoUpdaterInstance;
+      if (!updater || !updateDownloaded || installTriggered) return null;
+      const installMode = await resolveInstallMode();
+      if (installMode !== "in-place") return null;
+      const newest = await withTimeout(
+        queueUpdaterOperation(() => ensureNewestDownloaded(updater, installMode)),
+        quitUpdateTimeoutMs,
+        "The quit-time update refresh",
+      );
+      if (!newest.ok || !updateDownloaded || installTriggered) return null;
+      return () => {
+        installTriggered = true;
+        quitInstallInProgress = true;
+        // Quit means quit: install silently without relaunching.
+        updater.autoRunAppAfterInstall = false;
+        setTimeout(() => app.quit(), quitInstallFallbackMs);
+        try {
+          updater.quitAndInstall(true, false);
+        } catch (error) {
+          console.warn("[updater] install on quit failed", error?.message ?? error);
+          app.quit();
+        }
+      };
+    } catch (error) {
+      console.warn("[updater] could not prepare the update for quit", error?.message ?? error);
+      return null;
+    }
+  }
 
   ipcMain.handle("omnirush:updater:installAndRestart", async () => queueUpdaterOperation(async () => {
     if (!updateDownloaded) return { ok: false, reason: "update-not-downloaded" };
     const updater = await ensureAutoUpdater();
     if (!updater) return { ok: false, reason: "unavailable" };
     const installMode = await resolveInstallMode();
+    const newest = await ensureNewestDownloaded(updater, installMode);
+    if (!newest.ok) return newest;
     if (installMode === "manual-dmg") {
       if (!downloadedInstallerPath || !checkedInstallerArtifact) {
         return { ok: false, reason: "update-not-downloaded" };
@@ -984,8 +1150,7 @@ export function registerUpdaterIpc({
       if (!shell?.openPath) return { ok: false, reason: "This package cannot open the downloaded installer." };
       try {
         if (!(await fileMatchesSha512(downloadedInstallerPath, checkedInstallerArtifact.sha512))) {
-          updateDownloaded = false;
-          downloadedInstallerPath = null;
+          clearDownloadedUpdate();
           return { ok: false, reason: "The downloaded installer could not be verified. Download it again." };
         }
         const openError = await shell.openPath(downloadedInstallerPath);
@@ -1002,6 +1167,7 @@ export function registerUpdaterIpc({
       // Re-assert the in-place-write default right before the swap; the ShipIt
       // defaults domain may have been wiped when stale state was cleaned.
       await enableSquirrelDirectContentsWrite();
+      installTriggered = true;
       updater.quitAndInstall(false, true);
       return { ok: true, mode: "in-place" };
     } catch (error) {
@@ -1009,5 +1175,5 @@ export function registerUpdaterIpc({
     }
   }));
 
-  return { ensureAutoUpdater };
+  return { ensureAutoUpdater, prepareInstallOnQuit };
 }
