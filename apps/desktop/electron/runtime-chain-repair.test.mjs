@@ -240,7 +240,7 @@ test("user NODE_EXTRA_CA_CERTS disables repair", async () => {
     userDataDir,
     parentEnv: { NODE_EXTRA_CA_CERTS: "/custom/ca.pem" },
     logInfo(message) {
-      logged = String(message).includes("NODE_EXTRA_CA_CERTS is already set");
+      logged ||= String(message).includes("NODE_EXTRA_CA_CERTS is set");
     },
     loadPlatformCertificates: async () => [systemCert],
     chainRepair: {

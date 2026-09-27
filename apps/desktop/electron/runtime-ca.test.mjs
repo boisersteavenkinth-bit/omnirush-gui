@@ -191,32 +191,50 @@ test("keeps NODE_EXTRA_CA_CERTS from user env file over generated bundle", () =>
   assert.equal(childEnv.NODE_EXTRA_CA_CERTS, "/user/file-ca.pem");
 });
 
-test("respects user-set NODE_EXTRA_CA_CERTS", async () => {
+test("merges a user-set NODE_EXTRA_CA_CERTS with the OS store, in process and for children", async () => {
   const userDataDir = await mkdtemp(path.join(tmpdir(), "omnirush-runtime-ca-"));
-  let called = false;
+  const configured = path.join(userDataDir, "custom-ca.pem");
+  await writeFile(configured, `${CERT_THREE}\n`);
   let logged = false;
+  const setDefaultCalls = [];
 
   const env = await resolveSystemCaEnv({
     tlsModule: {
-      getCACertificates() {
-        called = true;
-        return [CERT_ONE];
+      getCACertificates(scope) {
+        return scope === "default" ? ["default-root"] : [CERT_ONE];
+      },
+      setDefaultCACertificates(certs) {
+        setDefaultCalls.push(certs);
       },
     },
     userDataDir,
-    parentEnv: { NODE_EXTRA_CA_CERTS: "/custom/ca.pem" },
+    parentEnv: { NODE_EXTRA_CA_CERTS: configured },
     logInfo(message) {
-      logged = String(message).includes("NODE_EXTRA_CA_CERTS is already set");
+      logged ||= String(message).includes("NODE_EXTRA_CA_CERTS is already set");
     },
-    loadPlatformCertificates: async () => {
-      called = true;
-      return [CERT_TWO];
-    },
+    loadPlatformCertificates: async () => [CERT_TWO],
   });
 
-  assert.deepEqual(env, {});
-  assert.equal(called, false);
+  const bundlePath = path.join(userDataDir, "system-ca-bundle.pem");
+  assert.deepEqual(env, { NODE_EXTRA_CA_CERTS: bundlePath });
+  assert.equal(await readFile(bundlePath, "utf8"), `${CERT_THREE}\n${CERT_ONE}\n${CERT_TWO}\n`);
   assert.equal(logged, true);
+  assert.deepEqual(setDefaultCalls, [["default-root", CERT_THREE, CERT_ONE, CERT_TWO]]);
+  // The bundle replaces the user's value only while it is the file it was built from.
+  assert.equal(mergeSystemCaChildEnv({ NODE_EXTRA_CA_CERTS: configured }, env, {}, configured).NODE_EXTRA_CA_CERTS, bundlePath);
+  assert.equal(mergeSystemCaChildEnv({ NODE_EXTRA_CA_CERTS: "/changed/ca.pem" }, env, {}, configured).NODE_EXTRA_CA_CERTS, "/changed/ca.pem");
+});
+
+test("keeps an unreadable user-set NODE_EXTRA_CA_CERTS for children as is", async () => {
+  const userDataDir = await mkdtemp(path.join(tmpdir(), "omnirush-runtime-ca-"));
+  const env = await resolveSystemCaEnv({
+    tlsModule: { getCACertificates: () => [CERT_ONE] },
+    userDataDir,
+    parentEnv: { NODE_EXTRA_CA_CERTS: path.join(userDataDir, "missing.pem") },
+    logInfo: () => {},
+    loadPlatformCertificates: async () => [],
+  });
+  assert.deepEqual(env, {});
 });
 
 test("no-ops when tls.getCACertificates is unavailable", async () => {

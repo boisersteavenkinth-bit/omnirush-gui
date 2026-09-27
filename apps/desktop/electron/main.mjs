@@ -84,6 +84,7 @@ import { readSkillFolder } from "./skill-folder.mjs";
 import { createDesktopVaultKeyProvider } from "./secure-vault-key.mjs";
 import { applyLinuxPasswordStore, recordLinuxPasswordStore } from "./linux-password-store.mjs";
 import { createDesktopOmniRushAccountStore, legacyKeychainAllowed } from "./omnirush-account.mjs";
+import { createExternalFetch } from "./external-fetch.mjs";
 import {
   clearOmniRushSentrySession,
   initOmniRushSentry,
@@ -118,6 +119,9 @@ const {
   systemPreferences,
 } = require("electron");
 const pty = require(["node", "pty"].join("-"));
+// Chromium's network stack (OS trust store, system proxy) for the main
+// process's own requests off the machine; see external-fetch.mjs.
+const desktopExternalFetch = createExternalFetch({ net: electronNet, isReady: () => app.isReady() });
 const NATIVE_DEEP_LINK_EVENT = "omnirush:deep-link-native";
 const AUTOMATION_RUNNER_CREDENTIAL_REJECTED_EVENT = "omnirush:automation-runner:credential-rejected";
 const isDevMode = process.env.OMNIRUSH_DEV_MODE === "1";
@@ -1328,6 +1332,8 @@ function validateSkillName(raw) {
 
 const omnirushAccountStore = createDesktopOmniRushAccountStore({
   filePath: path.join(app.getPath("userData"), "omnirush-account.bin"),
+  // Sign-in, device code, token refresh, profile and sign-out.
+  fetchImpl: desktopExternalFetch,
   loadSafeStorage: () => require("electron").safeStorage,
   // Linux without a usable keyring only; unencrypted at rest, owner-only.
   fallbackFilePath: path.join(app.getPath("userData"), "private-credentials", "omnirush-account.json"),
@@ -1353,6 +1359,7 @@ function omnirushUiMcpLaunch() {
 const runtimeManager = createRuntimeManager({
   app,
   desktopRoot: path.resolve(__dirname, ".."),
+  externalFetch: desktopExternalFetch,
   // Rewrites persisted `npx -y omnirush-ui-mcp` entries to the bundled launch
   // before the engine starts. Null (bundle missing) removes them instead.
   omnirushUiMcpLaunch: () => {
@@ -1388,6 +1395,8 @@ const legacyRunnerBaseUrls = [
   DEFAULT_DEN_BASE_URL ? `${DEFAULT_DEN_BASE_URL}/api/den` : null,
 ].map((value) => normalizeRunnerBaseUrl(value)).filter(Boolean);
 const desktopAutomationRunner = createDesktopAutomationRunner({
+  // Den polling leaves the machine; the local runtime calls stay on loopback.
+  fetchImpl: desktopExternalFetch,
   // v1 credentials predate token audiences. Keep them usable during the Den
   // rollout only for endpoints trusted before the renderer starts issuing IPC.
   legacyBaseUrls: legacyRunnerBaseUrls,
