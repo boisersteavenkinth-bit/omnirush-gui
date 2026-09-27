@@ -296,7 +296,22 @@ export default {
     // Sub-agents run in the foreground, as the 1.x task tool did (the swarm counts running
     // sub-agents and the task result carries the sub-agent's answer).
     await ctx.tool.hook("execute.before", async (event: any) => {
-      if (event.tool === "subagent" && isRec(event.input) && event.input.background === true) event.input = { ...event.input, background: false };
+      if (event.tool !== "subagent" || !isRec(event.input)) return;
+      // The sub-agent's model comes from the app's sub-agent setting (or the caller's), as with
+      // the 1.x task tool, never from the model's own pick.
+      const { model: _model, background: _background, ...input } = event.input;
+      event.input = input;
+    });
+    // …so the subagent tool is offered without its `model` and `background` parameters.
+    await ctx.session.hook("context", async (event: any) => {
+      const input = event?.tools?.subagent?.input;
+      if (!isRec(input) || !isRec(input.properties)) return;
+      const { model: _model, background: _background, ...properties } = input.properties as Rec;
+      event.tools.subagent.input = {
+        ...input,
+        properties,
+        ...(Array.isArray(input.required) ? { required: input.required.filter((key: unknown) => key !== "model" && key !== "background") } : {}),
+      };
     });
     const before = hooks("tool.execute.before");
     if (before.length) {
