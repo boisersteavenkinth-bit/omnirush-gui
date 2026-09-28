@@ -504,6 +504,50 @@ export async function modelPicker(seed: Seed) {
   return { app, den, session };
 }
 
+export async function providerCatalogNotifications(seed: Seed) {
+  const den = await seed.den();
+  const app = await seed.desktop({ den, signIn: false, name: "provider-catalog-notifications" });
+  const workspace = await seed.workspace(app, seed.tmpPath("provider-catalog-notifications"));
+  const providerId = "catalog-notifications-fixture";
+  const modelIds = Array.from({ length: 41 }, (_, index) => "catalog-model-" + index);
+  const catalog = (ids: string[], revision: number, disabled: boolean) => ({
+    disabled_providers: disabled ? [providerId] : [],
+    provider: {
+      [providerId]: {
+        name: "Catalog Notification Models",
+        npm: "@ai-sdk/openai-compatible",
+        options: { baseURL: "http://127.0.0.1:9/v1", apiKey: "local-catalog-fixture" },
+        models: Object.fromEntries(ids.map((id) => [id, {
+          name: id + " revision " + revision,
+          limit: { context: 100_000, output: 10_000 },
+          cost: { input: revision, output: 0 },
+        }])),
+      },
+    },
+  });
+  await configureProvider(seed, app, workspace.workspaceId, providerId, modelIds[0], catalog(modelIds, 0, false));
+  const session = await seedSessionRetry(seed, app);
+
+  const updateCatalog = async (ids: string[], revision: number, disabled = false) => {
+    const result = await seed.evalIn(app, browserScript(async (workspaceId, configJson) => {
+      const port = localStorage.getItem("omnirush.server.port");
+      const token = localStorage.getItem("omnirush.server.token");
+      if (!port || !token) return "missing local server credentials";
+      const base = "http://127.0.0.1:" + port + "/workspace/" + encodeURIComponent(workspaceId);
+      const headers = { Authorization: "Bearer " + token, "Content-Type": "application/json" };
+      const patched = await fetch(base + "/config", {
+        method: "PATCH", headers, body: JSON.stringify({ opencode: JSON.parse(configJson) }),
+      });
+      if (!patched.ok) return "config patch failed: " + patched.status;
+      const reloaded = await fetch(base + "/engine/reload", { method: "POST", headers });
+      return reloaded.ok || reloaded.status === 504 ? "ok" : "engine reload failed: " + reloaded.status;
+    }, [workspace.workspaceId, JSON.stringify(catalog(ids, revision, disabled))]), { awaitPromise: true, timeoutMs: 120_000 });
+    if (result !== "ok") throw new Error("Catalog fixture update failed: " + String(result));
+  };
+
+  return { app, den, workspace, session, providerId, modelIds, updateCatalog };
+}
+
 export async function connectionsMenu(seed: Seed) {
   const connector = seed.mock();
   const den = await seed.den({ mocks: { connector } });

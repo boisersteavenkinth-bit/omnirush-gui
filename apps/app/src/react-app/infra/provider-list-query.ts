@@ -28,6 +28,9 @@ export type ConnectedProviderSnapshotChange = {
 const CONNECTED_PROVIDER_SNAPSHOT_LIMIT = 16;
 const connectedProviderSnapshots = new Map<string, ConnectedProviderSnapshot>();
 const connectedProviderSnapshotChanges = new Map<string, ConnectedProviderSnapshotChange>();
+// Discovery history survives temporary catalog shrinkage while the current
+// snapshot still reflects availability for model recovery.
+const observedProviderModels = new Map<string, Map<string, Set<string>>>();
 
 export function providerListQueryKey(input: {
   baseUrl?: string | null;
@@ -50,6 +53,7 @@ export function clearProviderListQueries(queryClient: QueryClient) {
   queryClient.removeQueries({ queryKey: PROVIDER_LIST_QUERY_ROOT });
   connectedProviderSnapshots.clear();
   connectedProviderSnapshotChanges.clear();
+  observedProviderModels.clear();
 }
 
 export async function fetchProviderList(input: {
@@ -126,9 +130,10 @@ function recordConnectedProviderSnapshot(
     if (oldest === undefined) break;
     connectedProviderSnapshots.delete(oldest);
     connectedProviderSnapshotChanges.delete(oldest);
+    observedProviderModels.delete(oldest);
   }
-  if (changed) {
-    dispatchConnectedProviderChanges(previous, next);
+  if (changed || previous === null) {
+    dispatchConnectedProviderChanges(key, next);
   }
 }
 
@@ -140,34 +145,44 @@ function connectedProviderSnapshotKey(input: {
 }
 
 function dispatchConnectedProviderChanges(
-  previous: ConnectedProviderSnapshot | null,
+  key: string,
   next: ConnectedProviderSnapshot,
 ) {
-  if (!previous) return;
-  const previousById = new Map(previous.map((provider) => [provider.id, provider]));
-  const newProviders = next.filter((provider) => !previousById.has(provider.id));
-  const changedProviders = new Map<string, ConnectedProviderSnapshot[number]>();
+  const observed = observedProviderModels.get(key);
+  if (!observed) {
+    // Startup can briefly return an empty catalog. The first populated
+    // response establishes the baseline without announcing existing models.
+    if (next.length > 0) {
+      observedProviderModels.set(
+        key,
+        new Map(next.map((provider) => [provider.id, new Set(Object.keys(provider.models))])),
+      );
+    }
+    return;
+  }
+
+  const changedProviders: ConnectedProviderSnapshot = [];
+  let newProviderCount = 0;
   let newModelCount = 0;
 
   for (const provider of next) {
-    const before = previousById.get(provider.id);
-    if (!before) {
-      newModelCount += Object.keys(provider.models).length;
-      changedProviders.set(provider.id, provider);
-      continue;
+    let modelIds = observed.get(provider.id);
+    const newProvider = !modelIds;
+    if (!modelIds) {
+      modelIds = new Set<string>();
+      observed.set(provider.id, modelIds);
+      newProviderCount += 1;
     }
-    for (const [id, model] of Object.entries(provider.models)) {
-      if (JSON.stringify(before.models[id]) !== JSON.stringify(model)) {
-        newModelCount += 1;
-        changedProviders.set(provider.id, provider);
-      }
-    }
+    const addedModelIds = Object.keys(provider.models).filter((id) => !modelIds.has(id));
+    for (const id of addedModelIds) modelIds.add(id);
+    newModelCount += addedModelIds.length;
+    if (newProvider || addedModelIds.length > 0) changedProviders.push(provider);
   }
 
-  if (newProviders.length === 0 && newModelCount === 0) return;
+  if (newProviderCount === 0 && newModelCount === 0) return;
 
   dispatchNewProviders({
-    providers: [...changedProviders.values()].map((provider) => {
+    providers: changedProviders.map((provider) => {
       const firstModelId = Object.keys(provider.models)[0];
       return {
         id: provider.id,
@@ -179,7 +194,7 @@ function dispatchConnectedProviderChanges(
           : undefined,
       };
     }),
-    newProviderCount: newProviders.length,
+    newProviderCount,
     newModelCount,
     source: "models_refresh",
   });

@@ -95,9 +95,17 @@ export function NewProvidersListener() {
   const showProviders = useCallback((detail: NewProvidersEventDetail) => {
     const seen = readSeenProviderIds();
     const genuinelyNew = detail.providers.filter((p) => !seen.has(p.id));
-    const newProviderCount = detail.newProviderCount ?? genuinelyNew.length;
+    const newProviderCount = Math.min(
+      detail.newProviderCount ?? genuinelyNew.length,
+      genuinelyNew.length,
+    );
     const newModelCount = detail.newModelCount ?? 0;
-    if (genuinelyNew.length === 0 && newModelCount === 0) return;
+    if (newProviderCount === 0 && newModelCount === 0) return;
+
+    // Remember synchronously so duplicate sync sources cannot both announce
+    // a provider before React writes the notification. Onboarding owns sign-in.
+    markProvidersSeen(detail.providers.map((provider) => provider.id));
+    if (detail.source === "sign_in") return;
 
     setState((prev) => ({
       active: true,
@@ -150,8 +158,6 @@ export function NewProvidersListener() {
     if (!state.active || (state.providers.length === 0 && state.newModelCount === 0)) {
       return;
     }
-
-    markProvidersSeen(state.providers.map((p) => p.id));
 
     const parts: string[] = [];
     if (state.newProviderCount > 0) {
