@@ -510,8 +510,7 @@ export async function providerCatalogNotifications(seed: Seed) {
   const workspace = await seed.workspace(app, seed.tmpPath("provider-catalog-notifications"));
   const providerId = "openai";
   const modelIds = Array.from({ length: 41 }, (_, index) => "catalog-model-" + index);
-  const catalog = (ids: string[], revision: number, disabled: boolean) => ({
-    disabled_providers: disabled ? [providerId] : [],
+  const catalog = (ids: string[], revision: number) => ({
     provider: {
       [providerId]: {
         name: "Catalog Notification Models",
@@ -523,13 +522,19 @@ export async function providerCatalogNotifications(seed: Seed) {
           cost: { input: revision, output: 0 },
         }])),
       },
+      google: {
+        name: "Catalog Control Models",
+        npm: "@ai-sdk/openai-compatible",
+        options: { baseURL: "http://127.0.0.1:9/v1", apiKey: "local-catalog-control" },
+        models: { "catalog-control-model": { name: "Catalog control model" } },
+      },
     },
   });
-  await configureProvider(seed, app, workspace.workspaceId, providerId, modelIds[0], catalog(modelIds, 0, false));
+  await configureProvider(seed, app, workspace.workspaceId, providerId, modelIds[0], catalog(modelIds, 0));
   const session = await seedSessionRetry(seed, app);
 
   const updateCatalog = async (ids: string[], revision: number, disabled = false) => {
-    const result = await seed.evalIn(app, browserScript(async (workspaceId, configJson) => {
+    const result = await seed.evalIn(app, browserScript(async (workspaceId, configJson, providerId, disabled) => {
       const port = localStorage.getItem("omnirush.server.port");
       const token = localStorage.getItem("omnirush.server.token");
       if (!port || !token) return "missing local server credentials";
@@ -539,9 +544,13 @@ export async function providerCatalogNotifications(seed: Seed) {
         method: "PATCH", headers, body: JSON.stringify({ opencode: JSON.parse(configJson) }),
       });
       if (!patched.ok) return "config patch failed: " + patched.status;
+      const disabledResult = await fetch(base + "/runtime-config/disabled-providers", {
+        method: "POST", headers, body: JSON.stringify({ providers: disabled ? [providerId] : [] }),
+      });
+      if (!disabledResult.ok) return "disabled provider update failed: " + disabledResult.status;
       const reloaded = await fetch(base + "/engine/reload", { method: "POST", headers });
       return reloaded.ok || reloaded.status === 504 ? "ok" : "engine reload failed: " + reloaded.status;
-    }, [workspace.workspaceId, JSON.stringify(catalog(ids, revision, disabled))]), { awaitPromise: true, timeoutMs: 120_000 });
+    }, [workspace.workspaceId, JSON.stringify(catalog(ids, revision)), providerId, disabled]), { awaitPromise: true, timeoutMs: 120_000 });
     if (result !== "ok") throw new Error("Catalog fixture update failed: " + String(result));
   };
 
