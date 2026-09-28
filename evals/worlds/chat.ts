@@ -508,7 +508,7 @@ export async function providerCatalogNotifications(seed: Seed) {
   const den = await seed.den();
   const app = await seed.desktop({ den, signIn: false, name: "provider-catalog-notifications" });
   const workspace = await seed.workspace(app, seed.tmpPath("provider-catalog-notifications"));
-  const providerId = "catalog-notifications-fixture";
+  const providerId = "openai";
   const modelIds = Array.from({ length: 41 }, (_, index) => "catalog-model-" + index);
   const catalog = (ids: string[], revision: number, disabled: boolean) => ({
     disabled_providers: disabled ? [providerId] : [],

@@ -13,10 +13,11 @@ function providerNotifications(value: unknown) {
 test("catalog refreshes announce new models once and keep metadata updates and reconnects quiet", async ({ world, user, step, evidence }) => {
   const notifications = async () => providerNotifications(await control(world.app, "notifications.list"));
   const models = () => readAvailableModels(world.app);
-  await eventually(async () => {
-    const rows = await models();
-    return rows.some((model) => model.id === world.modelIds[0]);
-  }, { within: 60_000, label: "baseline catalog available", until: (value) => value === true });
+  await eventually(models, {
+    within: 60_000,
+    label: "baseline catalog available",
+    until: (rows) => rows.some((model) => model.id === world.modelIds[0]),
+  });
   await user.press("Escape");
   await user.click({ role: "button", label: /^Notifications/ });
   if ((await notifications()).length > 0) await user.click({ role: "button", label: "Clear all" });
