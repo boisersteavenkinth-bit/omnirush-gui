@@ -70,11 +70,12 @@ interface BinaryHTMLPreviewProps {
 type HTMLPreviewProps = { className?: string } & (TextHTMLPreviewProps | BinaryHTMLPreviewProps);
 
 export function HTMLPreview({ className, ...props }: HTMLPreviewProps) {
+  // Keep artifact scripts in an opaque origin so they cannot access the app or its desktop bridge.
   if (props.type === "text") {
-    return <iframe srcDoc={props.content} title={props.title} className={cn("h-full w-full border-0", className)} sandbox="allow-scripts allow-same-origin" />;
+    return <iframe srcDoc={props.content} title={props.title} className={cn("h-full w-full border-0", className)} sandbox="allow-scripts" />;
   }
 
-  return <iframe src={props.url} title={props.title} className={cn("h-full w-full border-0", className)} sandbox="allow-scripts allow-same-origin" />;
+  return <iframe src={props.url} title={props.title} className={cn("h-full w-full border-0", className)} sandbox="allow-scripts" />;
 }
 
 interface PdfPreviewProps {
