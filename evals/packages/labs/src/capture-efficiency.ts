@@ -1,5 +1,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { createReadStream } from "node:fs";
+import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { Readable } from "node:stream";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -176,7 +178,7 @@ function capability(actor: Actor, calls: Record<Actor, number>): () => Promise<T
   };
 }
 
-export async function startCaptureEfficiencyLab(): Promise<CaptureEfficiencyLab> {
+async function startCaptureEfficiencyLabRuntime(): Promise<CaptureEfficiencyLab> {
   const tempRoot = await mkdtemp(join(tmpdir(), "omnirush-capture-efficiency-"));
   const stateRoot = join(tempRoot, "state");
   const workspaceRoot = join(tempRoot, "workspaces");
@@ -300,7 +302,8 @@ export async function startCaptureEfficiencyLab(): Promise<CaptureEfficiencyLab>
   collectorUrl = `http://127.0.0.1:${port}`;
   const uploadFile = async (sessionId: string, path: string, size: number, signal?: AbortSignal): Promise<Response> => {
     const stream = createReadStream(path, { highWaterMark: 64 * 1024 });
-    const body = Readable.toWeb(stream);
+    // Node and DOM stream declarations differ; the runtime accepts this web stream.
+    const body = Readable.toWeb(stream) as unknown as ReadableStream<Uint8Array>;
     try {
       const options = {
         method: "POST",
@@ -317,72 +320,149 @@ export async function startCaptureEfficiencyLab(): Promise<CaptureEfficiencyLab>
     } finally { stream.destroy(); }
   };
 
-  services = ACTORS.map((actor) => startCaptureService({
-    stateDir: join(stateRoot, actor),
-    appVersion: "capture-efficiency-lab",
-    engineVersion: "capture-efficiency-lab",
-    log: () => undefined,
-    worker: true,
-    sessionUploader: {
-      uploadFile,
-      capabilities: capability(actor, capabilityCalls),
-    },
-    archive: {
-      enabled: false,
-      excludedDirs: [],
-    },
-  }));
+  try {
+    services = ACTORS.map((actor) => startCaptureService({
+      stateDir: join(stateRoot, actor),
+      appVersion: "capture-efficiency-lab",
+      engineVersion: "capture-efficiency-lab",
+      log: () => undefined,
+      worker: true,
+      sessionUploader: {
+        uploadFile,
+        capabilities: capability(actor, capabilityCalls),
+      },
+      archive: {
+        enabled: false,
+        excludedDirs: [],
+      },
+    }));
+  } catch (error) {
+    await close(server);
+    await rm(tempRoot, { recursive: true, force: true });
+    throw error;
+  }
 
   const stop = async (): Promise<void> => {
     if (stopped) return;
     stopped = true;
-    await Promise.all(services.map((service) => service.stop({ archiveFinals: false })));
-    await close(server);
-    await rm(tempRoot, { recursive: true, force: true });
+    try {
+      await Promise.all(services.map((service) => service.stop({ archiveFinals: false })));
+    } finally {
+      await close(server);
+      await rm(tempRoot, { recursive: true, force: true });
+    }
   };
 
   return {
     baseUrl: collectorUrl,
     controlToken: CONTROL_TOKEN,
-    witness: async () => {
-      const response = await fetch(`${collectorUrl}/witness`, {
-        headers: { authorization: `Bearer ${CONTROL_TOKEN}` },
-      });
-      if (!response.ok) throw new Error(`witness request failed with ${response.status}`);
-      const body: unknown = await response.json();
-      if (!isRecord(body) || !Array.isArray(body.attempts) || !isRecord(body.capabilityCalls)) {
-        throw new Error("invalid capture-efficiency witness");
-      }
-      const witnessAttempts: CaptureEfficiencyAttempt[] = [];
-      for (const attempt of body.attempts) {
-        if (!isRecord(attempt)) throw new Error("invalid capture-efficiency attempt");
-        witnessAttempts.push({
-          sessionId: stringValue(attempt, "sessionId"),
-          status: numberValue(attempt, "status") ?? 0,
-          snapshotType: stringValue(attempt, "snapshotType"),
-          schemaVersion: numberValue(attempt, "schemaVersion"),
-          workspaceRoot: optionalString(attempt.workspaceRoot),
-          filePaths: Array.isArray(attempt.filePaths) ? attempt.filePaths.filter((path): path is string => typeof path === "string") : [],
-          traceTypes: Array.isArray(attempt.traceTypes) ? attempt.traceTypes.filter((type): type is string => typeof type === "string") : [],
-          traceFileEventTypes: Array.isArray(attempt.traceFileEventTypes)
-            ? attempt.traceFileEventTypes.filter((type): type is string => typeof type === "string")
-            : [],
-          traceFileCount: numberValue(attempt, "traceFileCount") ?? 0,
-          actorMarkers: Array.isArray(attempt.actorMarkers) ? attempt.actorMarkers.filter((actor): actor is string => typeof actor === "string") : [],
-        });
-      }
-      const calls: Record<Actor, number> = {
-        "actor-a": numberValue(body.capabilityCalls, "actor-a") ?? 0,
-        "actor-b": numberValue(body.capabilityCalls, "actor-b") ?? 0,
-      };
-      const modes: CaptureEfficiencyWitness["modes"] = [];
-      if (!Array.isArray(body.modes)) throw new Error("missing worker modes");
-      for (const mode of body.modes) {
-        if (mode !== "starting" && mode !== "worker" && mode !== "local" && mode !== "down") throw new Error("invalid worker mode");
-        modes.push(mode);
-      }
-      return { attempts: witnessAttempts, capabilityCalls: calls, modes };
-    },
+    witness: () => readWitness(collectorUrl, CONTROL_TOKEN),
     stop,
   };
+}
+
+async function readWitness(baseUrl: string, controlToken: string): Promise<CaptureEfficiencyWitness> {
+  const response = await fetch(`${baseUrl}/witness`, {
+    headers: { authorization: `Bearer ${controlToken}` },
+    signal: AbortSignal.timeout(5_000),
+  });
+  if (!response.ok) throw new Error(`witness request failed with ${response.status}`);
+  const body: unknown = await response.json();
+  if (!isRecord(body) || !Array.isArray(body.attempts) || !isRecord(body.capabilityCalls)) {
+    throw new Error("invalid capture-efficiency witness");
+  }
+  const witnessAttempts: CaptureEfficiencyAttempt[] = [];
+  for (const attempt of body.attempts) {
+    if (!isRecord(attempt)) throw new Error("invalid capture-efficiency attempt");
+    witnessAttempts.push({
+      sessionId: stringValue(attempt, "sessionId"),
+      status: numberValue(attempt, "status") ?? 0,
+      snapshotType: stringValue(attempt, "snapshotType"),
+      schemaVersion: numberValue(attempt, "schemaVersion"),
+      workspaceRoot: optionalString(attempt.workspaceRoot),
+      filePaths: Array.isArray(attempt.filePaths) ? attempt.filePaths.filter((path): path is string => typeof path === "string") : [],
+      traceTypes: Array.isArray(attempt.traceTypes) ? attempt.traceTypes.filter((type): type is string => typeof type === "string") : [],
+      traceFileEventTypes: Array.isArray(attempt.traceFileEventTypes)
+        ? attempt.traceFileEventTypes.filter((type): type is string => typeof type === "string")
+        : [],
+      traceFileCount: numberValue(attempt, "traceFileCount") ?? 0,
+      actorMarkers: Array.isArray(attempt.actorMarkers) ? attempt.actorMarkers.filter((actor): actor is string => typeof actor === "string") : [],
+    });
+  }
+  const calls: Record<Actor, number> = {
+    "actor-a": numberValue(body.capabilityCalls, "actor-a") ?? 0,
+    "actor-b": numberValue(body.capabilityCalls, "actor-b") ?? 0,
+  };
+  const modes: CaptureEfficiencyWitness["modes"] = [];
+  if (!Array.isArray(body.modes)) throw new Error("missing worker modes");
+  for (const mode of body.modes) {
+    if (mode !== "starting" && mode !== "worker" && mode !== "local" && mode !== "down") throw new Error("invalid worker mode");
+    modes.push(mode);
+  }
+  return { attempts: witnessAttempts, capabilityCalls: calls, modes };
+
+}
+
+/** Boot the real Bun capture worker; Vitest's Node transform is not a worker loader. */
+export async function startCaptureEfficiencyLab(): Promise<CaptureEfficiencyLab> {
+  if (process.versions.bun) return startCaptureEfficiencyLabRuntime();
+  const modulePath = fileURLToPath(import.meta.url);
+  const program = [
+    "import { startCaptureEfficiencyLab } from " + JSON.stringify(modulePath) + ";",
+    "const lab = await startCaptureEfficiencyLab();",
+    "console.log(JSON.stringify({ captureLabReady: true, baseUrl: lab.baseUrl, controlToken: lab.controlToken }));",
+    "let stopping = false;",
+    'process.on("SIGTERM", async () => { if (stopping) return; stopping = true; await lab.stop(); process.exit(0); });',
+  ].join("\n");
+  const child = spawn("bun", ["--conditions=development", "--eval", program], {
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let stderr = "";
+  child.stderr?.on("data", (chunk: Buffer) => { stderr = (stderr + chunk.toString("utf8")).slice(-16_384); });
+  const exited = new Promise<void>(resolve => child.once("exit", () => resolve()));
+  let stopped = false;
+  const stop = async () => {
+    if (stopped) return;
+    stopped = true;
+    if (!child.pid || child.exitCode !== null || child.signalCode !== null) return;
+    child.kill("SIGTERM");
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        exited,
+        new Promise<void>(resolve => { timer = setTimeout(() => { child.kill("SIGKILL"); resolve(); }, 15_000); }),
+      ]);
+      await exited;
+    } finally { if (timer) clearTimeout(timer); }
+  };
+  try {
+    const ready = await new Promise<{ baseUrl: string; controlToken: string }>((resolve, reject) => {
+      let stdout = "";
+      const timer = setTimeout(() => reject(new Error("Bun capture lab startup timed out: " + stderr)), 10_000);
+      const finish = (error?: Error, value?: { baseUrl: string; controlToken: string }) => {
+        clearTimeout(timer);
+        if (error) reject(error);
+        else if (value) resolve(value);
+      };
+      child.once("error", error => finish(error));
+      child.once("exit", () => finish(new Error("Bun capture lab exited before readiness: " + stderr)));
+      child.stdout?.on("data", (chunk: Buffer) => {
+        stdout += chunk.toString("utf8");
+        const newline = stdout.indexOf("\n");
+        if (newline === -1) return;
+        const lines = stdout.slice(0, stdout.lastIndexOf("\n")).split("\n");
+        stdout = stdout.slice(stdout.lastIndexOf("\n") + 1);
+        for (const line of lines) {
+          try {
+            const value: unknown = JSON.parse(line);
+            if (isRecord(value) && value.captureLabReady === true
+                && typeof value.baseUrl === "string" && typeof value.controlToken === "string") {
+              finish(undefined, { baseUrl: value.baseUrl, controlToken: value.controlToken });
+            }
+          } catch {}
+        }
+      });
+    });
+    return { ...ready, witness: () => readWitness(ready.baseUrl, ready.controlToken), stop };
+  } catch (error) { await stop(); throw error; }
 }

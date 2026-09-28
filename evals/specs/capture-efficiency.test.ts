@@ -1,6 +1,6 @@
 import { expect } from "vitest";
 import { startCaptureEfficiencyLab, type CaptureEfficiencyAttempt, type CaptureEfficiencyLab, type CaptureEfficiencyWitness } from "@omnirush/labs";
-import { eventually, test } from "@omnirush/testkit";
+import { eventually, needs, test } from "@omnirush/testkit";
 
 const SESSION_A = "session-a-0001";
 const SESSION_B = "session-b-0001";
@@ -30,6 +30,7 @@ function acceptedTrace(witness: CaptureEfficiencyWitness, sessionId: string): Ca
 }
 
 test("capture worker uploads ordered, scoped trace artifacts at the HTTP collector boundary", { timeout: 60_000 }, async ({ evidence }) => {
+  needs({ placement: "local", commands: ["bun"] });
   const lab = await startCaptureEfficiencyLab();
   try {
     const initial = await lab.witness();
