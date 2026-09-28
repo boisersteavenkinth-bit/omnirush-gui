@@ -1,6 +1,7 @@
 /** @jsxImportSource react */
 import { useCallback, useEffect, useState } from "react";
 import { resolveProviderDisplayName } from "@/app/utils";
+import { isSupportedModelProvider } from "@/app/lib/provider-catalog";
 import {
   newProvidersEvent,
   readSeenProviderIds,
@@ -109,15 +110,21 @@ export function NewProvidersListener() {
   useEffect(() => {
     const handler = (event: Event) => {
       const detail = (event as CustomEvent<NewProvidersEventDetail>).detail;
-      if (detail.providers.length === 0 && !detail.newModelCount) return;
+      // Cloud sync uses Den IDs; its imports become supported lpr_* providers.
+      // Local catalog sources use engine IDs and must obey the picker allowlist.
+      const providers = detail.source === "cloud_sync" || detail.source === "sign_in"
+        ? detail.providers
+        : detail.providers.filter((provider) => isSupportedModelProvider(provider.id));
+      if (detail.providers.length > 0 && providers.length === 0) return;
+      if (providers.length === 0 && !detail.newModelCount) return;
       if (orgOnboardingVisible) {
         setPendingProviders((current) => [
           ...current,
-          ...detail.providers.filter((p) => !current.some((existing) => existing.id === p.id)),
+          ...providers.filter((p) => !current.some((existing) => existing.id === p.id)),
         ]);
         return;
       }
-      showProviders(detail);
+      showProviders({ ...detail, providers });
     };
     window.addEventListener(newProvidersEvent, handler);
     return () => window.removeEventListener(newProvidersEvent, handler);
