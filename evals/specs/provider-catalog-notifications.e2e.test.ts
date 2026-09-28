@@ -13,7 +13,7 @@ function providerNotifications(value: unknown) {
 test("catalog refreshes announce new models once and keep metadata updates and reconnects quiet", async ({ world, user, step, evidence }) => {
   const notifications = async () => providerNotifications(await control(world.app, "notifications.list"));
   const models = () => readAvailableModels(world.app);
-  await eventually(models, {
+  const baseline = await eventually(models, {
     within: 60_000,
     label: "baseline catalog available",
     until: (rows) => rows.some((model) => model.id === world.modelIds[0]),
@@ -42,11 +42,17 @@ test("catalog refreshes announce new models once and keep metadata updates and r
     });
     await user.press("Escape");
     await world.updateCatalog(world.modelIds, 1);
-    await eventually(async () => (await models()).some((model) => model.id === world.modelIds[0]), {
-      within: 60_000, label: "provider reconnected", until: (value) => value === true,
+    const restored = await eventually(models, {
+      within: 60_000, label: "provider reconnected", until: (rows) => rows.some((model) => model.id === world.modelIds[0]),
     });
+    const before = new Set(baseline.map((model) => model.providerName + "/" + model.id));
+    const after = new Set(restored.map((model) => model.providerName + "/" + model.id));
+    const added = [...after].filter((id) => !before.has(id));
+    const removed = [...before].filter((id) => !after.has(id));
     const entries = await notifications();
-    evidence.recordAssertionEvidence("Reconnecting does not announce the same provider and models", "The existing model disappeared and returned; notifications=" + JSON.stringify(entries), entries.length === 0);
+    evidence.recordAssertionEvidence("Reconnecting does not announce the same provider and models", "Restored catalog additions=" + JSON.stringify(added) + "; removals=" + JSON.stringify(removed) + "; notifications=" + JSON.stringify(entries), entries.length === 0 && added.length === 0 && removed.length === 0);
+    expect(added).toHaveLength(0);
+    expect(removed).toHaveLength(0);
     expect(entries).toHaveLength(0);
     await user.press("Escape");
   });

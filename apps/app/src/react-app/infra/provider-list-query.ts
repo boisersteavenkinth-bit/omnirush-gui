@@ -2,6 +2,7 @@ import { useQuery, type QueryClient } from "@tanstack/react-query";
 
 import type { Client, ModelRef, ProviderListItem } from "../../app/types";
 import { unwrap } from "../../app/lib/opencode";
+import { isSupportedModelProvider } from "../../app/lib/provider-catalog";
 import { dispatchNewProviders, markProvidersSeen } from "../../app/lib/provider-events";
 import type { ProviderListResponse } from "@opencode-ai/sdk/v2/client";
 import { resolveModelDisplayName } from "../../app/utils";
@@ -146,8 +147,10 @@ function connectedProviderSnapshotKey(input: {
 
 function dispatchConnectedProviderChanges(
   key: string,
-  next: ConnectedProviderSnapshot,
+  snapshot: ConnectedProviderSnapshot,
 ) {
+  // Discovery should only advertise providers that the model picker exposes.
+  const next = snapshot.filter((provider) => isSupportedModelProvider(provider.id));
   const observed = observedProviderModels.get(key);
   if (!observed) {
     // Startup can briefly return an empty catalog. The first populated

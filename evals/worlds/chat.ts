@@ -516,6 +516,7 @@ export async function providerCatalogNotifications(seed: Seed) {
         name: "Catalog Notification Models",
         npm: "@ai-sdk/openai-compatible",
         options: { baseURL: "http://127.0.0.1:9/v1", apiKey: "local-catalog-fixture" },
+        whitelist: ids,
         models: Object.fromEntries(ids.map((id) => [id, {
           name: id + " revision " + revision,
           limit: { context: 100_000, output: 10_000 },
@@ -526,6 +527,7 @@ export async function providerCatalogNotifications(seed: Seed) {
         name: "Catalog Control Models",
         npm: "@ai-sdk/openai-compatible",
         options: { baseURL: "http://127.0.0.1:9/v1", apiKey: "local-catalog-control" },
+        whitelist: ["catalog-control-model"],
         models: { "catalog-control-model": { name: "Catalog control model" } },
       },
     },
@@ -544,8 +546,14 @@ export async function providerCatalogNotifications(seed: Seed) {
         method: "PATCH", headers, body: JSON.stringify({ opencode: JSON.parse(configJson) }),
       });
       if (!patched.ok) return "config patch failed: " + patched.status;
+      const configResponse = await fetch(base + "/opencode/config", { headers });
+      if (!configResponse.ok) return "config read failed: " + configResponse.status;
+      const currentConfig = await configResponse.json();
+      const otherDisabledProviders = Array.isArray(currentConfig.disabled_providers)
+        ? currentConfig.disabled_providers.filter((id: unknown): id is string => typeof id === "string" && id !== providerId)
+        : [];
       const disabledResult = await fetch(base + "/runtime-config/disabled-providers", {
-        method: "POST", headers, body: JSON.stringify({ providers: disabled ? [providerId] : [] }),
+        method: "POST", headers, body: JSON.stringify({ providers: disabled ? [...otherDisabledProviders, providerId] : otherDisabledProviders }),
       });
       if (!disabledResult.ok) return "disabled provider update failed: " + disabledResult.status;
       const reloaded = await fetch(base + "/engine/reload", { method: "POST", headers });

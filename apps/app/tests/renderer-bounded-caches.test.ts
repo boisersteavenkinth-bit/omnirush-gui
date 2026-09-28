@@ -128,7 +128,7 @@ test("provider discovery stays quiet through startup, metadata refreshes, and re
   const client = createClient(server.url.toString(), "/tmp/catalog-regression");
   const input = { client, baseUrl: server.url.toString(), directory: "/tmp/catalog-regression" };
   const modelIds = Array.from({ length: 41 }, (_, index) => "model-" + index);
-  const baseline = [{ id: "catalog-provider", modelIds }];
+  const baseline = [{ id: "lpr_catalog-provider", modelIds }];
   const refresh = async (entries: Array<{ id: string; modelIds: string[] }>, revision = 0) => {
     response = providerCatalog(entries, revision);
     await fetchProviderList(input);
@@ -136,7 +136,7 @@ test("provider discovery stays quiet through startup, metadata refreshes, and re
   try {
     await refresh([]);
     await refresh(baseline);
-    expect(readSeenProviderIds().has("catalog-provider")).toBe(true);
+    expect(readSeenProviderIds().has("lpr_catalog-provider")).toBe(true);
     await refresh(baseline, 1);
     expect(discoveries).toHaveLength(0);
 
@@ -147,7 +147,7 @@ test("provider discovery stays quiet through startup, metadata refreshes, and re
     await refresh(baseline, 2);
     expect(discoveries).toHaveLength(0);
 
-    const expanded = [{ id: "catalog-provider", modelIds: [...modelIds, "new-model"] }];
+    const expanded = [{ id: "lpr_catalog-provider", modelIds: [...modelIds, "new-model"] }];
     await refresh(expanded, 3);
     expect(discoveries).toHaveLength(1);
     expect(discoveries[0]).toMatchObject({ newProviderCount: 0, newModelCount: 1, source: "models_refresh" });
@@ -157,12 +157,16 @@ test("provider discovery stays quiet through startup, metadata refreshes, and re
     await refresh(expanded);
     expect(discoveries).toHaveLength(1);
 
-    const newProvider = { id: "second-provider", modelIds: ["second-a", "second-b"] };
+    const newProvider = { id: "lpr_second-provider", modelIds: ["second-a", "second-b"] };
     await refresh([...expanded, newProvider]);
     expect(discoveries).toHaveLength(2);
     expect(discoveries[1]).toMatchObject({ newProviderCount: 1, newModelCount: 2 });
     await refresh(expanded);
     await refresh([...expanded, newProvider], 5);
+    expect(discoveries).toHaveLength(2);
+
+    const hiddenProvider = { id: "opencode", modelIds: Array.from({ length: 69 }, (_, index) => "hidden-model-" + index) };
+    await refresh([...expanded, newProvider, hiddenProvider]);
     expect(discoveries).toHaveLength(2);
 
     clearProviderListQueries(new QueryClient());
