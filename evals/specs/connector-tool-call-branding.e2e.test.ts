@@ -6,8 +6,15 @@ const test = spec.world(connectorBranding, { timeout: 420_000 });
 
 test("connector-backed tool calls show first-class branding and human-readable labels", async ({ world, user, probe, step }) => {
   const sinceIso = new Date().toISOString();
+  const runTask = async () => {
+    await probe.eventually(() => probe.eval(() => {
+      const button = document.querySelector<HTMLButtonElement>('button[aria-label="Run task"]');
+      return Boolean(button && !button.disabled);
+    }), { within: 30_000, label: "Run task enabled after model synchronization", until: value => value === true });
+    await user.click("Run task");
+  };
   await user.type("composer", world.prompt);
-  await user.click("Run task");
+  await runTask();
 
   await step("the real search and connector action are readable while the tool runs", async () => {
     await user.see({ text: /Searched your connections for.*Slack list_channels/ }, { timeoutMs: 60_000 });
@@ -51,7 +58,7 @@ test("connector-backed tool calls show first-class branding and human-readable l
 
   await step("a failed connector action stays identifiable and is not shown as successful", async () => {
     await user.type("composer", world.failurePrompt);
-    await user.click("Run task");
+    await runTask();
     await user.see({ text: /^Reading history$/ }, { timeoutMs: 30_000 });
     await user.see({ role: "button", label: /Read history failed/ }, { timeoutMs: 60_000 });
     await user.see("Run task");

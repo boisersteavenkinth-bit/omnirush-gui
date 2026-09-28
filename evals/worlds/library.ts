@@ -353,9 +353,31 @@ export async function connectorBranding(seed: Seed) {
     ] }),
   });
   if (!workloads.ok) throw new Error("Could not arrange connector model turns.");
-  const providerId = "connector-display";
   const modelId = "connector-display-model";
-  const app = await seed.desktop({ den, as: "admin", model: `${providerId}/${modelId}` });
+  const provider = await seed.api(den.admin, "/v1/llm-providers", {
+    method: "POST",
+    body: JSON.stringify({
+      name: "Connector display model", source: "custom", allMembers: true, memberIds: [], teamIds: [],
+      apiKey: "sk-connector-display-fixture",
+      customConfig: {
+        id: "connector-display", name: "Connector display model", npm: "@ai-sdk/openai-compatible",
+        options: { baseURL: `${den.mocks.connector.url}/v1` }, env: ["CONNECTOR_DISPLAY_API_KEY"],
+        models: [{ id: modelId, name: "Connector display model", tool_call: true }],
+      },
+    }),
+  });
+  const llmProvider = isRecord(provider.body) && isRecord(provider.body.llmProvider) ? provider.body.llmProvider : null;
+  if (provider.response.status !== 201 || typeof llmProvider?.id !== "string") {
+    throw new Error(`Connector fixture model setup failed: HTTP ${provider.response.status}`);
+  }
+  const providerId = llmProvider.id;
+  const connected = await seed.api(den.admin, `/v1/llm-providers/${encodeURIComponent(providerId)}/connect`);
+  if (!connected.response.ok) throw new Error(`Connector fixture model connection failed: HTTP ${connected.response.status}`);
+  const app = await seed.desktop({
+    den, as: "admin", model: `${providerId}/${modelId}`,
+    // The isolated Den fixture has no production trace-upload account.
+    env: { OMNIRUSH_DEV_MODE: "1", OMNIRUSH_SESSION_UPLOAD_OPTIONAL: "1" },
+  });
   const workspace = await seed.workspace(app, seed.tmpPath("connector-tool-call-branding"));
   await seed.evalIn(app, browserScript(async () => {
     const info = await window.__OMNIRUSH_ELECTRON__?.invokeDesktop?.("omnirushServerInfo");
