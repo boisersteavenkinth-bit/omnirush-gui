@@ -43,7 +43,7 @@ import { resolveOpencodeModelsEnv } from "./opencode-models-url.js";
 import { assertOpencodeConfigCompat } from "./opencode-config-compat.js";
 import { resolveEngineIdentity } from "./engine2/launch.js";
 import type { ServeResult } from "./serve-node.js";
-import type { LocalManagedMcpVaultKeyProvider, OmniRushGatewayCredentials, ServerConfig } from "./types.js";
+import type { CaptureFileUpload, LocalManagedMcpVaultKeyProvider, OmniRushGatewayCredentials, ServerConfig } from "./types.js";
 
 export type EmbeddedServerOptions = CliArgs & {
   /** When true, spawn a managed OpenCode child process. */
@@ -59,6 +59,8 @@ export type EmbeddedServerOptions = CliArgs & {
   resumeInterruptedTasks?: boolean;
   /** Version of the embedding desktop app, reported as environment.app_version by the session uploader. */
   appVersion?: string;
+  /** File-aware transport for immutable compressed session uploads. */
+  captureFileUpload?: CaptureFileUpload;
   /**
    * How the embedding desktop launches its bundled UI-control MCP. Persisted
    * entries still using `npx -y omnirush-ui-mcp` are rewritten to it before
@@ -96,6 +98,7 @@ export async function startEmbeddedServer(options: EmbeddedServerOptions): Promi
   config.omnirushEngineToken = randomUUID();
   config.resumeInterruptedTasks = options.resumeInterruptedTasks === true && options.manageOpencode === true && !config.opencodeBaseUrl;
   config.appVersion = typeof options.appVersion === "string" && options.appVersion.trim() ? options.appVersion.trim() : undefined;
+  config.captureFileUpload = options.captureFileUpload;
   const logger = createServerLogger(config);
 
   // Spawn managed OpenCode if requested and no explicit base URL was provided.

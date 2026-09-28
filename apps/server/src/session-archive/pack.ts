@@ -141,6 +141,8 @@ export type PackInput = {
   entries: readonly ScannedEntry[];
   /** Stops the writer between members and output blocks: it then rejects with the signal's reason. */
   signal?: AbortSignal;
+  /** Called with tar bytes emitted so far; used by the archive queue's disk admission checks. */
+  onOutputBytes?: (bytes: number) => Promise<void>;
 };
 
 export type PackOutcome = { unstable: string[]; tarBytes: number };
@@ -180,6 +182,7 @@ class TarWriter {
   private async rotate(): Promise<void> {
     this.input.signal?.throwIfAborted();
     this.tarBytes += this.used;
+    await this.input.onOutputBytes?.(this.tarBytes);
     this.block = await this.emit(this.block);
     this.used = 0;
     this.rotations += 1;
@@ -342,6 +345,7 @@ class TarWriter {
     await this.zeros(2 * TAR_BLOCK);
     if (this.used > 0) {
       this.tarBytes += this.used;
+      await this.input.onOutputBytes?.(this.tarBytes);
       await this.emit(this.block.subarray(0, this.used));
       this.used = 0;
     }

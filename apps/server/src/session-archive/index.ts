@@ -13,7 +13,7 @@
  * lifecycle.ts; see README.md.
  */
 import { randomBytes, randomUUID } from "node:crypto";
-import { mkdir, readdir, readFile, rename, rm, stat } from "node:fs/promises";
+import { mkdir, readdir, readFile, rename, rm, stat, statfs } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { z } from "zod";
 
@@ -83,6 +83,9 @@ const SIGN_OUT_ABORT_TIMEOUT_MS = 5_000;
 const START_FINAL_WINDOW_MS = 7 * 24 * 60 * 60_000;
 /** At most this many sessions are scanned for a final archive at app start. */
 const MAX_START_FINALS = 10;
+const DEFAULT_PENDING_BYTE_BUDGET = 256 * 1024 * 1024;
+const DEFAULT_MIN_FREE_DISK_BYTES = 512 * 1024 * 1024;
+const ARCHIVE_PACK_RESERVE_BYTES = 1024 * 1024;
 /**
  * How long a folder policy answer (4.4: all folders, touched files) is
  * reused for folders without `.git`: sessions started meanwhile send no
@@ -119,6 +122,12 @@ export type SessionArchiverOptions = {
   retry?: Partial<RetryPolicy>;
   /** Tests: how soon reported touched paths are written (2 s). */
   touchedFlushMs?: number;
+  /** Conservative bound for queued plus currently packing archive bytes. */
+  pendingByteBudget?: number;
+  /** Required free space before and during packing. */
+  minimumFreeDiskBytes?: number;
+  /** Tests and diagnostics: override the filesystem free-space probe. */
+  freeDiskBytes?: (path: string) => Promise<number>;
 };
 
 export type CaptureSkipReason =
@@ -136,9 +145,11 @@ export type CaptureSkipReason =
   | "cancelled"
   /** Final archives only: the server refused one (a backend without them); none until the app restarts. */
   | "unsupported";
+  /** Packing paused before commit because the configured disk budget is full. */
 
 export type CaptureResult =
   | { status: "queued"; archiveId: string; kind: ArchiveKind; sequence: number; size: number }
+  | { status: "paused"; reason: "disk_budget"; requiredBytes: number; pendingBytes: number; freeBytes: number | null }
   | { status: "skipped"; reason: CaptureSkipReason };
 
 export type DrainResult = {
@@ -252,6 +263,18 @@ function errorSummary(error: unknown): string {
   return "unknown error";
 }
 
+function archiveDiskBytes(value: number | undefined, setting: string, fallback: number): number {
+  const configured = value ?? (process.env[setting] === undefined ? fallback : Number(process.env[setting]));
+  return Number.isSafeInteger(configured) && configured >= 0 ? configured : fallback;
+}
+
+class DiskBudgetPause extends Error {
+  constructor(readonly requiredBytes: number, readonly pendingBytes: number, readonly freeBytes: number | null) {
+    super("archive disk budget is full");
+    this.name = "DiskBudgetPause";
+  }
+}
+
 /** Whether `policy` lets a chain with this marker capture: a plain folder needs all_folders, touched files touched_files, git nothing. */
 function markerAllowed(marker: string, policy: ArchivePolicy): boolean {
   if (marker === FOLDER_MARKER) return policy.allFolders;
@@ -282,6 +305,11 @@ export class SessionArchiver {
   private readonly now: () => Date;
   private readonly random: { uuid(): string; bytes(n: number): Buffer };
   private readonly retry: RetryPolicy;
+  private readonly pendingByteBudget: number;
+  private readonly minimumFreeDiskBytes: number;
+  private readonly freeDiskBytes: (path: string) => Promise<number>;
+  private packingReservedBytes = 0;
+  private budgetTail: Promise<void> = Promise.resolve();
   private started: Promise<void> | null = null;
   private key: ArchiveKey | null = null;
   private disabled: string | null = null;
@@ -327,6 +355,12 @@ export class SessionArchiver {
       random: () => this.random.bytes(4).readUInt32BE(0) / 2 ** 32,
       ...options.retry,
     };
+    this.pendingByteBudget = archiveDiskBytes(options.pendingByteBudget, "OMNIRUSH_ARCHIVE_PENDING_BYTE_BUDGET", DEFAULT_PENDING_BYTE_BUDGET);
+    this.minimumFreeDiskBytes = archiveDiskBytes(options.minimumFreeDiskBytes, "OMNIRUSH_ARCHIVE_MIN_FREE_DISK_BYTES", DEFAULT_MIN_FREE_DISK_BYTES);
+    this.freeDiskBytes = options.freeDiskBytes ?? (async (path) => {
+      const filesystem = await statfs(path);
+      return Number(filesystem.bavail) * Number(filesystem.bsize);
+    });
     this.uploader = new ArchiveUploader({
       gatewayUrl: options.gatewayUrl ?? process.env.OMNIRUSH_GATEWAY_URL,
       ...(options.accessToken !== undefined ? { accessToken: options.accessToken } : {}),
@@ -846,6 +880,58 @@ export class SessionArchiver {
     }
   }
 
+  private budgetLocked<T>(task: () => Promise<T>): Promise<T> {
+    const run = this.budgetTail.catch(() => undefined).then(task);
+    this.budgetTail = run.then(() => undefined, () => undefined);
+    return run;
+  }
+
+  private estimateArchiveOutput(entries: readonly ScannedEntry[]): number {
+    const tarBytes = ARCHIVE_PACK_RESERVE_BYTES
+      + entries.reduce((total, entry) => total + Math.max(0, entry.size) + 2048, 0);
+    // Account for incompressible zstd output and seal framing.
+    return Math.ceil(tarBytes * 1.01);
+  }
+
+  private reserveDiskBudget(requiredBytes: number): Promise<{ bytes: number; release(): void } | null> {
+    return this.budgetLocked(async () => {
+      const records = await this.listQueue();
+      const pendingBytes = records.reduce((total, record) => total + record.request.size, 0);
+      const freeBytes = await this.freeDiskBytes(this.dir).catch(() => null);
+      if (freeBytes === null
+        || pendingBytes + this.packingReservedBytes + requiredBytes > this.pendingByteBudget
+        || freeBytes < this.minimumFreeDiskBytes + requiredBytes) return null;
+      this.packingReservedBytes += requiredBytes;
+      let released = false;
+      const reservation = {
+        bytes: requiredBytes,
+        release: () => {
+          if (released) return;
+          released = true;
+          this.packingReservedBytes = Math.max(0, this.packingReservedBytes - reservation.bytes);
+        },
+      };
+      return reservation;
+    });
+  }
+
+  private checkDiskBudget(reservation: { bytes: number }, outputBytes: number, final = false): Promise<void> {
+    return this.budgetLocked(async () => {
+      const records = await this.listQueue();
+      const pendingBytes = records.reduce((total, record) => total + record.request.size, 0);
+      const freeBytes = await this.freeDiskBytes(this.dir).catch(() => null);
+      const boundedOutput = final ? outputBytes : Math.ceil(outputBytes * 1.01) + ARCHIVE_PACK_RESERVE_BYTES;
+      const extra = Math.max(0, boundedOutput - reservation.bytes);
+      if (freeBytes === null
+        || pendingBytes + this.packingReservedBytes + extra > this.pendingByteBudget
+        || freeBytes < this.minimumFreeDiskBytes + Math.max(ARCHIVE_PACK_RESERVE_BYTES, reservation.bytes + extra - boundedOutput)) {
+        throw new DiskBudgetPause(reservation.bytes + extra, pendingBytes, freeBytes);
+      }
+      this.packingReservedBytes += extra;
+      reservation.bytes += extra;
+    });
+  }
+
   /** Pass 1, delta, pass 2 and the commit protocol of section 13.4. */
   private async captureArchiveOnce(state: SessionState, kind: ArchiveKind, turn: number, key: ArchiveKey, generation: number, options: CaptureOptions): Promise<CaptureResult> {
     const sessionId = state.session_id;
@@ -932,91 +1018,146 @@ export class SessionArchiver {
       excluded,
     });
     const partial = join(this.dirs.tmp, `${archiveId}.partial`);
-    let sealed: Awaited<ReturnType<typeof writeSealedArchive>>;
+    const requiredBytes = this.estimateArchiveOutput(files);
+    const reservation = await this.reserveDiskBudget(requiredBytes);
+    if (!reservation) {
+      let freeBytes: number | null = null;
+      try {
+        freeBytes = await this.freeDiskBytes(this.dir);
+      } catch {
+        freeBytes = null;
+      }
+      const pendingBytes = (await this.listQueue()).reduce((total, record) => total + record.request.size, 0);
+      this.log("info", "OmniRush project archive paused by disk budget", {
+        sessionId,
+        kind,
+        requiredBytes,
+        pendingBytes,
+        ...(freeBytes === null ? {} : { freeBytes }),
+      });
+      return { status: "paused", reason: "disk_budget", requiredBytes, pendingBytes, freeBytes };
+    }
+    let checkedBytes = 0;
+    let checkedAt = Date.now();
     try {
-      sealed = await writeSealedArchive(
-        { root: state.root, manifest, createdAtSeconds: Math.floor(createdAt.getTime() / 1000), entries: files, ...(signal ? { signal } : {}) },
-        { publicKey: key.publicKey },
-        partial,
-      );
+      const sealed = await writeSealedArchive(
+          {
+            root: state.root,
+            manifest,
+            createdAtSeconds: Math.floor(createdAt.getTime() / 1000),
+            entries: files,
+            ...(signal ? { signal } : {}),
+            onOutputBytes: async (bytes) => {
+              // Keep filesystem probes bounded; still grow an underestimated reservation before writing.
+              if (bytes - checkedBytes < 8 * 1024 * 1024 && Date.now() - checkedAt < 250
+                && Math.ceil(bytes * 1.01) + ARCHIVE_PACK_RESERVE_BYTES <= reservation.bytes) return;
+              await this.checkDiskBudget(reservation, bytes);
+              checkedBytes = bytes;
+              checkedAt = Date.now();
+            },
+          },
+          { publicKey: key.publicKey },
+          partial,
+        );
+      await this.checkDiskBudget(reservation, sealed.size, true);
+      if (generation !== this.generation || this.disabled || this.stoppedSessions.has(sessionId) || signal?.aborted) {
+        await rm(partial, { force: true });
+        if (this.disabled) return { status: "skipped", reason: "disabled" };
+        return { status: "skipped", reason: generation !== this.generation || this.stoppedSessions.has(sessionId) ? "stopped" : "cancelled" };
+      }
+      // 1-2: the sealed file and its queue record.
+      const sealedFile = `${archiveId}.orseal`;
+      const request: ArchiveCreateRequest = {
+        archive_id: archiveId,
+        session_id: sessionId,
+        kind,
+        sequence,
+        turn,
+        parent_archive_id: kind === "base" ? null : state.last_archive_id,
+        size: sealed.size,
+        sha256: sealed.sha256,
+        kid: sealed.kid,
+        content: SEAL_CONTENT,
+        marker: state.marker,
+      };
+      const record: QueueRecord = {
+        v: 1,
+        archive_id: archiveId,
+        session_key: sessionKey,
+        request,
+        sealed_file: sealedFile,
+        ...(kind === "delta" && options.trigger ? { trigger: options.trigger } : {}),
+        created_at: createdAt.toISOString(),
+        attempts: 0,
+        next_attempt_at: null,
+        recreates: 0,
+        upload: null,
+      };
+      await this.budgetLocked(async () => {
+        const pending = join(this.dirs.pending, sealedFile);
+        await rename(partial, pending);
+        try {
+          await writeJsonAtomic(join(this.dirs.queue, `${archiveId}.json`), record);
+        } catch (error) {
+          await rm(pending, { force: true });
+          throw error;
+        }
+        // A reservation becomes a queue record while the accounting lock is held.
+        reservation.release();
+      });
+      // 3: the new baseline is the full scan (touched files: the chain's files); entries that changed while packing get a null hash so the next delta sends them again.
+      const unstable = new Set(sealed.unstable);
+      for (const path of unstable) cache.forget(path);
+      const baselineName = `${sessionKey}-${sequence}.json`;
+      await writeChunksAtomic(join(this.dirs.baselines, baselineName), baselineChunks(next, unstable));
+      // 4: commit. Until the server has accepted a final archive, the first
+      // one keeps the chain point before it, baseline included.
+      const previousBaseline = state.baseline;
+      const rewind = state.rewind ?? (kind === "delta" && options.trigger === "final" && !this.finalsAccepted
+        ? { next_sequence: state.next_sequence, last_archive_id: state.last_archive_id, last_turn: state.last_turn, baseline: state.baseline }
+        : null);
+      await this.saveSession({
+        ...state,
+        next_sequence: sequence + 1,
+        last_archive_id: archiveId,
+        last_turn: turn,
+        baseline: baselineName,
+        rewind,
+        final_due: options.trigger !== "final",
+        ...(options.ended ? { ended: this.now().toISOString() } : {}),
+        updated_at: this.now().toISOString(),
+      });
+      if (previousBaseline && previousBaseline !== baselineName && previousBaseline !== rewind?.baseline) await rm(join(this.dirs.baselines, previousBaseline), { force: true });
+      await this.saveHashCache(rootKey, cache);
+      this.log("info", "OmniRush project archive queued", {
+        sessionId,
+        archiveId,
+        kind,
+        sequence,
+        turn,
+        ...(options.trigger === "final" ? { trigger: "final", reason: options.reason } : {}),
+        ...(touched ? { scope: "touched" } : {}),
+        bytes: sealed.size,
+        files: files.length,
+        ...(deleted ? { deleted: deleted.length } : {}),
+        ...(ignored > 0 ? { gitignored: ignored } : {}),
+        ...(unstable.size > 0 ? { unstable: unstable.size } : {}),
+      });
+      return { status: "queued", archiveId, kind, sequence, size: sealed.size };
     } catch (error) {
       await rm(partial, { force: true });
+      if (error instanceof DiskBudgetPause) return {
+        status: "paused", reason: "disk_budget", requiredBytes: error.requiredBytes,
+        pendingBytes: error.pendingBytes, freeBytes: error.freeBytes,
+      };
+      if (error instanceof Error && "code" in error && (error.code === "ENOSPC" || error.code === "EDQUOT")) {
+        return { status: "paused", reason: "disk_budget", requiredBytes: reservation.bytes,
+          pendingBytes: (await this.listQueue()).reduce((sum, record) => sum + record.request.size, 0), freeBytes: 0 };
+      }
       throw error;
+    } finally {
+      reservation.release();
     }
-    if (generation !== this.generation || this.disabled || this.stoppedSessions.has(sessionId) || signal?.aborted) {
-      await rm(partial, { force: true });
-      if (this.disabled) return { status: "skipped", reason: "disabled" };
-      return { status: "skipped", reason: generation !== this.generation || this.stoppedSessions.has(sessionId) ? "stopped" : "cancelled" };
-    }
-    // 1-2: the sealed file and its queue record.
-    const sealedFile = `${archiveId}.orseal`;
-    await rename(partial, join(this.dirs.pending, sealedFile));
-    const request: ArchiveCreateRequest = {
-      archive_id: archiveId,
-      session_id: sessionId,
-      kind,
-      sequence,
-      turn,
-      parent_archive_id: kind === "base" ? null : state.last_archive_id,
-      size: sealed.size,
-      sha256: sealed.sha256,
-      kid: sealed.kid,
-      content: SEAL_CONTENT,
-      marker: state.marker,
-    };
-    const record: QueueRecord = {
-      v: 1,
-      archive_id: archiveId,
-      session_key: sessionKey,
-      request,
-      sealed_file: sealedFile,
-      ...(kind === "delta" && options.trigger ? { trigger: options.trigger } : {}),
-      created_at: createdAt.toISOString(),
-      attempts: 0,
-      next_attempt_at: null,
-      recreates: 0,
-      upload: null,
-    };
-    await writeJsonAtomic(join(this.dirs.queue, `${archiveId}.json`), record);
-    // 3: the new baseline is the full scan (touched files: the chain's files); entries that changed while packing get a null hash so the next delta sends them again.
-    const unstable = new Set(sealed.unstable);
-    for (const path of unstable) cache.forget(path);
-    const baselineName = `${sessionKey}-${sequence}.json`;
-    await writeChunksAtomic(join(this.dirs.baselines, baselineName), baselineChunks(next, unstable));
-    // 4: commit. Until the server has accepted a final archive, the first
-    // one keeps the chain point before it, baseline included.
-    const previousBaseline = state.baseline;
-    const rewind = state.rewind ?? (kind === "delta" && options.trigger === "final" && !this.finalsAccepted
-      ? { next_sequence: state.next_sequence, last_archive_id: state.last_archive_id, last_turn: state.last_turn, baseline: state.baseline }
-      : null);
-    await this.saveSession({
-      ...state,
-      next_sequence: sequence + 1,
-      last_archive_id: archiveId,
-      last_turn: turn,
-      baseline: baselineName,
-      rewind,
-      final_due: options.trigger !== "final",
-      ...(options.ended ? { ended: this.now().toISOString() } : {}),
-      updated_at: this.now().toISOString(),
-    });
-    if (previousBaseline && previousBaseline !== baselineName && previousBaseline !== rewind?.baseline) await rm(join(this.dirs.baselines, previousBaseline), { force: true });
-    await this.saveHashCache(rootKey, cache);
-    this.log("info", "OmniRush project archive queued", {
-      sessionId,
-      archiveId,
-      kind,
-      sequence,
-      turn,
-      ...(options.trigger === "final" ? { trigger: "final", reason: options.reason } : {}),
-      ...(touched ? { scope: "touched" } : {}),
-      bytes: sealed.size,
-      files: files.length,
-      ...(deleted ? { deleted: deleted.length } : {}),
-      ...(ignored > 0 ? { gitignored: ignored } : {}),
-      ...(unstable.size > 0 ? { unstable: unstable.size } : {}),
-    });
-    return { status: "queued", archiveId, kind, sequence, size: sealed.size };
   }
 
   /** The entry list after the chain's last archive; null when it cannot be read (the chain cannot go on). */

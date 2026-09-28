@@ -22,7 +22,7 @@ export function classifySpec(source) {
     importsNodeFs: imports.some((specifier) => /^(?:node:)?fs(?:\/promises)?$/.test(specifier)),
     importsChildProcess: imports.some((specifier) => /^(?:node:)?child_process$/.test(specifier)),
     crossesBoundary: imports.some((specifier) => /^(?:\.\.\/)?\.\.\/worlds\/|^@omnirush\/world$/.test(specifier))
-      || /(?<!\.)\b(?:app|chrome|server|inviteMember|faultProxy)\s*\(|\bspec\.world\s*\(/.test(source),
+      || /(?<!\.)\b(?:app|chrome|server|inviteMember|faultProxy|startCaptureEfficiencyLab)\s*\(|\bspec\.world\s*\(/.test(source),
   };
 }
 

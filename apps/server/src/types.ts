@@ -83,6 +83,14 @@ export interface ApprovalConfig {
 
 export type LocalManagedMcpVaultKeyProvider = () => Promise<Uint8Array>;
 
+export type CaptureFileUpload = (url: string, init: {
+  method: "POST";
+  headers: Record<string, string>;
+  path: string;
+  size: number;
+  signal?: AbortSignal;
+}) => Promise<Response>;
+
 export type OmniRushGatewayCredentialBundle = {
   gatewayUrl: string;
   accessToken: string;
@@ -141,6 +149,8 @@ export interface ServerConfig {
   resumeInterruptedTasks?: boolean;
   /** Version of the embedding desktop app (Electron app.getVersion()), reported in session uploader envelopes. */
   appVersion?: string;
+  /** Embedding-owned transport for immutable session upload files. */
+  captureFileUpload?: CaptureFileUpload;
 }
 
 export interface Capabilities {

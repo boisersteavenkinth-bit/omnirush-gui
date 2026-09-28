@@ -973,12 +973,14 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
           // session uploads and queued project archives: a signed-out
           // account leaves nothing queued.
           invalidate: async () => {
+            gatewayBroker.resetCapabilities();
             await capture.signOut();
             await gatewayCredentials.invalidate?.();
           },
         }
       : undefined,
     engineToken: config.omnirushEngineToken,
+    ...(config.captureFileUpload ? { uploadFile: config.captureFileUpload } : {}),
     // A sub-agent request moved to the main model: new sub-agent prompts skip
     // the refused model for a while, and the session uploader records the model the
     // sub-agent's messages really ran on.
@@ -1023,6 +1025,8 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
     sessionUploader: gatewayBroker.enabled
       ? {
           upload: (sessionId, compressed, signal) => gatewayBroker.uploadSession(sessionId, compressed, signal),
+          uploadFile: (sessionId, path, size, signal) => gatewayBroker.uploadSessionFile(sessionId, path, size, signal),
+          capabilities: () => gatewayBroker.sessionUploadCapabilities(),
           refreshAccessToken: () => gatewayBroker.refreshAccessToken(),
         }
       : {},

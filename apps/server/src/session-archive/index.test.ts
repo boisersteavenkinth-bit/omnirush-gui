@@ -1262,3 +1262,91 @@ describe("SessionArchiver touched files", () => {
     expect(server.callPaths().at(-1)).toBe("GET archives/key 200");
   });
 });
+
+
+test("archive disk budget pauses a base and resumes the same sequence after restart", async () => {
+  const server = new FakeArchiveServer();
+  const { root, blend } = await project();
+  const state = await tempDir("budget-state");
+  const low = archiver(server, state, { minimumFreeDiskBytes: 0, freeDiskBytes: async () => 0 });
+  expect(await low.captureBase("ses_budget_restart", root)).toMatchObject({ status: "paused", reason: "disk_budget" });
+  expect(await readdir(join(state, ARCHIVE_STATE_DIRECTORY, "queue"))).toEqual([]);
+  expect(await readdir(join(state, ARCHIVE_STATE_DIRECTORY, "tmp"))).toEqual([]);
+
+  const resumed = archiver(server, state, { minimumFreeDiskBytes: 0, freeDiskBytes: async () => 1024 ** 3 });
+  expect(await resumed.captureBase("ses_budget_restart", root)).toMatchObject({ status: "queued", kind: "base", sequence: 0 });
+  expect((await resumed.drain()).uploaded).toBe(1);
+  const members = await openArchive(server.objects()[0]!.object!);
+  expect(members.find((member) => member.name === "assets/scene.blend")!.content.equals(blend)).toBe(true);
+});
+
+test("archive disk budget keeps the base and parent link when a delta is paused", async () => {
+  const server = new FakeArchiveServer();
+  const { root } = await project();
+  const state = await tempDir("budget-delta");
+  let available = 1024 ** 3;
+  const subject = archiver(server, state, { minimumFreeDiskBytes: 0, freeDiskBytes: async () => available });
+  const base = await subject.captureBase("ses_budget_chain", root);
+  expect(base.status).toBe("queued");
+  await subject.drain();
+  await writeFile(join(root, "src/app.ts"), "export const app = 2;\n");
+  await rm(join(root, "assets/scene.blend"));
+  available = 0;
+  expect(await subject.captureDelta("ses_budget_chain", root, 1)).toMatchObject({ status: "paused", reason: "disk_budget" });
+  expect(server.objects()).toHaveLength(1);
+
+  const resumed = archiver(server, state, { minimumFreeDiskBytes: 0, freeDiskBytes: async () => 1024 ** 3 });
+  expect(await resumed.captureDelta("ses_budget_chain", root, 1)).toMatchObject({ status: "queued", sequence: 1 });
+  await resumed.drain();
+  const delta = server.objects()[1]!;
+  expect(delta.request.parent_archive_id).toBe(base.status === "queued" ? base.archiveId : "");
+  const members = await openArchive(delta.object!);
+  expect(members.find((member) => member.name === "src/app.ts")!.content.toString()).toBe("export const app = 2;\n");
+  expect(manifestOf(members).deleted).toContain("assets/scene.blend");
+});
+
+test("archive disk budget removes only the uncommitted partial when space runs out during packing", async () => {
+  const server = new FakeArchiveServer();
+  server.partSize = 5 * 1024 * 1024;
+  const { root } = await project();
+  const state = await tempDir("budget-midpack");
+  const blob = randomBytes(10 * 1024 * 1024);
+  await writeFile(join(root, "assets/large.bin"), blob);
+  let probes = 0;
+  const subject = archiver(server, state, {
+    minimumFreeDiskBytes: 0,
+    freeDiskBytes: async () => ++probes === 1 ? 1024 ** 3 : 0,
+  });
+  expect(await subject.captureBase("ses_budget_midpack", root)).toMatchObject({ status: "paused", reason: "disk_budget" });
+  expect(probes).toBeGreaterThan(1);
+  expect(await readdir(join(state, ARCHIVE_STATE_DIRECTORY, "queue"))).toEqual([]);
+  expect(await readdir(join(state, ARCHIVE_STATE_DIRECTORY, "tmp"))).toEqual([]);
+  expect(server.objects()).toEqual([]);
+
+  const resumed = archiver(server, state, { minimumFreeDiskBytes: 0, freeDiskBytes: async () => 1024 ** 3 });
+  expect(await resumed.captureBase("ses_budget_midpack", root)).toMatchObject({ status: "queued", sequence: 0 });
+  await resumed.drain();
+  const members = await openArchive(server.objects()[0]!.object!);
+  expect(members.find((member) => member.name === "assets/large.bin")!.content.equals(blob)).toBe(true);
+});
+
+test("concurrent archive packing stays inside the shared pending byte budget", async () => {
+  const server = new FakeArchiveServer();
+  server.partSize = 5 * 1024 * 1024;
+  const { root } = await project();
+  const state = await tempDir("budget-concurrent");
+  await writeFile(join(root, "assets/large.bin"), randomBytes(12 * 1024 * 1024));
+  const budget = 20 * 1024 * 1024;
+  const subject = archiver(server, state, {
+    pendingByteBudget: budget, minimumFreeDiskBytes: 0, freeDiskBytes: async () => 1024 ** 3,
+  });
+  const results = await Promise.all([
+    subject.captureBase("ses_budget_parallel_01", root),
+    subject.captureBase("ses_budget_parallel_02", root),
+  ]);
+  expect(results.filter((result) => result.status === "queued")).toHaveLength(1);
+  expect(results.filter((result) => result.status === "paused")).toHaveLength(1);
+  const queue = await readdir(join(state, ARCHIVE_STATE_DIRECTORY, "queue"));
+  expect(queue).toHaveLength(1);
+  expect(results.reduce((sum, result) => sum + (result.status === "queued" ? result.size : 0), 0)).toBeLessThanOrEqual(budget);
+});

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { appendFile, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join, posix, win32 } from "node:path";
 import { promisify } from "node:util";
@@ -467,6 +467,52 @@ describe("session uploader envelope v2", () => {
     expect(Array.isArray(trace.trace)).toBe(true);
     expect(trace.trace?.map((event) => event.type)).toContain("file.read");
     expect(trace.manifest).toEqual([]);
+  });
+
+  test("uses canonical trace schema 3, then retries the same batch as schema 2 on an explicit 422", async () => {
+    const root = await mkdtemp(join(tmpdir(), "omnirush-upload-trace-schema-"));
+    roots.push(root);
+    const attempts: Envelope[] = [];
+    let capabilityCalls = 0;
+    let rejectSchema3 = true;
+    const sessionUploader = new SessionUploader({
+      capabilities: async () => {
+        capabilityCalls += 1;
+        return { schema_versions: [1, 2, 3], canonical_trace: true };
+      },
+      upload: async (_sessionId, compressed) => {
+        const envelope = JSON.parse(zstdDecompressSync(compressed).toString("utf8")) as Envelope;
+        attempts.push(envelope);
+        if (envelope.schema_version === 3 && rejectSchema3) {
+          rejectSchema3 = false;
+          return Response.json({ error: "unsupported_schema", schema_version: 3 }, { status: 422 });
+        }
+        return Response.json({ ok: true }, { status: 201 });
+      },
+      fallbackScanMs: 60_000,
+    });
+    const sessionId = "session-trace-schema-1";
+    sessionUploader.startSession(sessionId, "workspace-trace-schema", root);
+    await sessionUploader.idle(sessionId);
+    sessionUploader.recordTrace(sessionId, "engine.request", { path: "src/app.ts" });
+    sessionUploader.flushTrace(sessionId);
+    await sessionUploader.idle(sessionId);
+    await sessionUploader.stop();
+
+    expect(capabilityCalls).toBe(1);
+    expect(attempts.map((envelope) => [envelope.snapshot_type, envelope.schema_version])).toEqual([
+      ["start", 2],
+      ["trace", 3],
+      ["trace", 2],
+      ["end", 2],
+    ]);
+    const rejected = attempts[1]!;
+    const fallback = attempts[2]!;
+    expect(rejected.files).toEqual([]);
+    expect(rejected.trace?.map((event) => event.type)).toEqual(["engine.request"]);
+    expect(fallback.files.map((file) => file.path)).toEqual(["__omnirush__/trace.json"]);
+    expect(fallback.trace?.map((event) => event.type)).toEqual(rejected.trace?.map((event) => event.type));
+    expect(JSON.parse(fallback.files[0]!.content).events.map((event: { type: string }) => event.type)).toEqual(["engine.request"]);
   });
 
   test("summarises a git repository without shipping internals or remote credentials", async () => {
@@ -2549,7 +2595,11 @@ describe("session uploader snapshot cap", () => {
     return root;
   }
 
-  async function capture(root: string, options: { snapshotMaxBytes?: number; touched?: string[] }) {
+  async function capture(root: string, options: {
+    snapshotMaxBytes?: number;
+    touched?: string[];
+    traceEvents?: Array<{ type: string; data: unknown }>;
+  }) {
     const uploads: Envelope[] = [];
     const rawBytes: number[] = [];
     const warnings: string[] = [];
@@ -2567,6 +2617,7 @@ describe("session uploader snapshot cap", () => {
     const sessionId = "session-cap-1234";
     sessionUploader.startSession(sessionId, "workspace-cap", root);
     for (const path of options.touched ?? []) sessionUploader.recordTrace(sessionId, "file.read", { path });
+    for (const event of options.traceEvents ?? []) sessionUploader.recordTrace(sessionId, event.type, event.data);
     sessionUploader.flushTrace(sessionId);
     await sessionUploader.stop();
     const start = uploads.find((item) => item.snapshot_type === "start")!;
@@ -2605,6 +2656,27 @@ describe("session uploader snapshot cap", () => {
     expect(notes).toHaveLength(1);
     expect(notes[0]).toMatchObject({ data: { snapshot_type: "start", trigger: "session_start", omitted_count: omitted.length } });
     expect(notes[0]?.data?.budget_bytes).toBeLessThan(CAP);
+  });
+
+  test("prioritizes paths from real engine tool messages, including nested apply_patch input", async () => {
+    const root = await largeWorkspace();
+    const traceEvents = [{
+      type: "turn.messages",
+      data: {
+        messages: [{
+          parts: [
+            { type: "tool", tool: "edit", state: { input: { path: "file-19.txt" } } },
+            { type: "tool", tool: "apply_patch", state: { input: { patch: "*** Update File: file-17.txt\n@@\n-old\n+new\n" } } },
+            { type: "tool", tool: "read", state: { input: { filePath: "file-18.txt" } } },
+          ],
+        }],
+      },
+    }];
+    const { start, sent } = await capture(root, { snapshotMaxBytes: CAP, traceEvents });
+    for (const path of ["file-17.txt", "file-18.txt", "file-19.txt"]) {
+      expect(start.touched_paths).toContain(path);
+      expect(sent).toContain(path);
+    }
   });
 
   test("keeps the smallest touched files when the touched files alone exceed the cap", async () => {
@@ -2722,6 +2794,30 @@ describe("session uploader incremental snapshots", () => {
     expect(sessionUploader.cacheStatus()).toEqual({ roots: 1, entries: 32 });
     await sessionUploader.stop();
     expect(sessionUploader.cacheStatus()).toEqual({ roots: 0, entries: 0 });
+  });
+
+  test.skipIf(process.platform === "win32")("detects a same-size replacement after the old mtime is restored", async () => {
+    const root = await workspace("signature", 1);
+    const target = join(root, "src", "f00.txt");
+    const { uploads, upload } = makeUploads();
+    const sessionUploader = new SessionUploader({ upload, changeDebounceMs: 60_000, fallbackScanMs: 60_000 });
+    const sessionId = "session-signature-1234";
+    sessionUploader.startSession(sessionId, "workspace-signature", root);
+    await sessionUploader.idle(sessionId);
+    const before = await stat(target);
+    const original = await readFile(target);
+    const replacement = Buffer.from(original);
+    replacement[0] = replacement[0] === 115 ? 116 : 115;
+    await writeFile(target, replacement);
+    await utimes(target, before.atime, before.mtime);
+    sessionUploader.captureSnapshot(sessionId, "turn_completed");
+    await sessionUploader.idle(sessionId);
+
+    const change = changes(uploads)[0]!;
+    expect(contentPaths(change)).toEqual(["src/f00.txt"]);
+    expect(change.files.find((file) => file.path === "src/f00.txt")?.content).toBe(replacement.toString("utf8"));
+    expect(change.changed_paths).toEqual(["src/f00.txt"]);
+    await sessionUploader.stop();
   });
 
   test("skips a milestone capture outright when nothing is dirty, and rescans after a new directory appears", async () => {

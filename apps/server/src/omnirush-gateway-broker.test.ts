@@ -97,6 +97,84 @@ describe("OmniRush gateway broker", () => {
     expect(response.status).toBe(404);
   });
 
+  test("caches capabilities per credential pair, expires them, and falls back on a 404", async () => {
+    const originalNow = Date.now;
+    let now = originalNow();
+    let supported = true;
+    let probes = 0;
+    Date.now = () => now;
+    try {
+      const broker = new OmniRushGatewayBroker({
+        credentials: {
+          gatewayUrl: "https://gateway.example/omnirush/v1",
+          accessToken: "access-token",
+          refreshToken: "refresh-token",
+        },
+        engineToken: "local-engine-token",
+        fetch: async (input) => {
+          if (new URL(String(input)).pathname.endsWith("/collect/capabilities")) {
+            probes += 1;
+            return supported
+              ? Response.json({ schema_versions: [1, 2, 3], canonical_trace: true })
+              : new Response("not found", { status: 404 });
+          }
+          return Response.json({ output: [] });
+        },
+      });
+
+      const first = await Promise.all([broker.sessionUploadCapabilities(), broker.sessionUploadCapabilities()]);
+      expect(first).toEqual([
+        { schema_versions: [1, 2, 3], canonical_trace: true },
+        { schema_versions: [1, 2, 3], canonical_trace: true },
+      ]);
+      expect(probes).toBe(1);
+
+      now += 5 * 60_000 + 1;
+      supported = false;
+      expect(await broker.sessionUploadCapabilities()).toEqual({ schema_versions: [1, 2], canonical_trace: false });
+      expect(probes).toBe(2);
+
+      broker.resetCapabilities();
+      supported = true;
+      expect(await broker.sessionUploadCapabilities()).toEqual({ schema_versions: [1, 2, 3], canonical_trace: true });
+      expect(probes).toBe(3);
+    } finally {
+      Date.now = originalNow;
+    }
+  });
+
+  test("ends a file-aware upload callback promptly when its request is aborted", async () => {
+    let started!: () => void;
+    const uploadStarted = new Promise<void>((resolvePromise) => { started = resolvePromise; });
+    let callbackSignal: AbortSignal | undefined;
+    const broker = new OmniRushGatewayBroker({
+      credentials: {
+        gatewayUrl: "https://gateway.example/omnirush/v1",
+        accessToken: "access-token",
+        refreshToken: "refresh-token",
+      },
+      engineToken: "local-engine-token",
+      uploadFile: async (_url, init) => {
+        callbackSignal = init.signal;
+        started();
+        return new Promise<Response>(() => undefined);
+      },
+      fetch: async () => Response.json({ output: [] }),
+    });
+    const controller = new AbortController();
+    const pending = broker.uploadSessionFile("session-file-abort-1", "/tmp/synthetic-capture.zst", 64, controller.signal);
+    await uploadStarted;
+    controller.abort(new DOMException("test abort", "AbortError"));
+    let rejection: unknown;
+    try {
+      await pending;
+    } catch (error) {
+      rejection = error;
+    }
+    expect(rejection).toBeDefined();
+    expect(callbackSignal?.aborted).toBe(true);
+  });
+
   test("invalidates a revoked device session and returns a professional sign-in error", async () => {
     let invalidated = 0;
     const broker = new OmniRushGatewayBroker({
