@@ -30,8 +30,8 @@ test("catalog refreshes announce new models once and keep metadata updates and r
       within: 60_000, label: "updated model metadata visible", until: (value) => value === true,
     });
     const entries = await notifications();
-    expect(entries).toHaveLength(0);
     evidence.recordAssertionEvidence("Metadata updates do not announce existing models", "The picker shows revision 1; notifications=" + JSON.stringify(entries), entries.length === 0);
+    expect(entries).toHaveLength(0);
     await user.press("Escape");
   });
 
@@ -46,8 +46,8 @@ test("catalog refreshes announce new models once and keep metadata updates and r
       within: 60_000, label: "provider reconnected", until: (value) => value === true,
     });
     const entries = await notifications();
-    expect(entries).toHaveLength(0);
     evidence.recordAssertionEvidence("Reconnecting does not announce the same provider and models", "The existing model disappeared and returned; notifications=" + JSON.stringify(entries), entries.length === 0);
+    expect(entries).toHaveLength(0);
     await user.press("Escape");
   });
 

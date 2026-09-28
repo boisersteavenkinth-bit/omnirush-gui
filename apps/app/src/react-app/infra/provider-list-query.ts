@@ -2,7 +2,7 @@ import { useQuery, type QueryClient } from "@tanstack/react-query";
 
 import type { Client, ModelRef, ProviderListItem } from "../../app/types";
 import { unwrap } from "../../app/lib/opencode";
-import { dispatchNewProviders } from "../../app/lib/provider-events";
+import { dispatchNewProviders, markProvidersSeen } from "../../app/lib/provider-events";
 import type { ProviderListResponse } from "@opencode-ai/sdk/v2/client";
 import { resolveModelDisplayName } from "../../app/utils";
 
@@ -157,6 +157,9 @@ function dispatchConnectedProviderChanges(
         key,
         new Map(next.map((provider) => [provider.id, new Set(Object.keys(provider.models))])),
       );
+      // Other sync sources also use this baseline to avoid announcing a
+      // returning provider that never needed an initial notification.
+      markProvidersSeen(next.map((provider) => provider.id));
     }
     return;
   }

@@ -4,7 +4,7 @@ import type { ProviderListResponse } from "@opencode-ai/sdk/v2/client";
 
 import type { Client, ProviderListItem } from "../src/app/types";
 import { createClient } from "../src/app/lib/opencode";
-import { newProvidersEvent, type NewProvidersEventDetail } from "../src/app/lib/provider-events";
+import { newProvidersEvent, readSeenProviderIds, type NewProvidersEventDetail } from "../src/app/lib/provider-events";
 import {
   clearProviderListQueries,
   fetchProviderList,
@@ -82,6 +82,13 @@ beforeEach(() => {
   clearProviderListQueries(new QueryClient());
   discoveries = [];
   const events = new EventTarget();
+  const storage = new Map<string, string>();
+  Object.defineProperty(events, "localStorage", {
+    value: {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => { storage.set(key, value); },
+    },
+  });
   events.addEventListener(newProvidersEvent, (event) => {
     if (event instanceof CustomEvent) discoveries.push(event.detail);
   });
@@ -129,6 +136,7 @@ test("provider discovery stays quiet through startup, metadata refreshes, and re
   try {
     await refresh([]);
     await refresh(baseline);
+    expect(readSeenProviderIds().has("catalog-provider")).toBe(true);
     await refresh(baseline, 1);
     expect(discoveries).toHaveLength(0);
 
