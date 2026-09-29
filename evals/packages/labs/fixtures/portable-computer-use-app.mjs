@@ -18,7 +18,7 @@ createInterface({ input: process.stdin }).on("line", async (line) => {
     else if (request.method === "bounds") result = windows.map((w) => ({ bounds: w.getBounds(), contentBounds: w.getContentBounds(), scale: screen.getDisplayMatching(w.getBounds()).scaleFactor }));
     else if (request.method === "focus_other") { windows[1].focus(); result = {}; }
     else if (request.method === "cover") { windows[1].setBounds(windows[0].getBounds()); windows[1].setAlwaysOnTop(true); await windows[1].webContents.executeJavaScript('document.body.style.background="#ff00ff"'); windows[1].focus(); result = {}; }
-    else if (request.method === "image_pixel") { const image = nativeImage.createFromBuffer(Buffer.from(request.params.data, "base64")); const size = image.getSize(), pixels = image.toBitmap(); const offset = (Math.floor(size.height / 2) * size.width + Math.floor(size.width / 2)) * 4; result = { width: size.width, height: size.height, rgb: [pixels[offset + 2], pixels[offset + 1], pixels[offset]] }; }
+    else if (request.method === "image_pixel") { const image = nativeImage.createFromBuffer(Buffer.from(request.params.data, "base64")); const size = image.getSize(), pixels = image.toBitmap(); const offset = ((size.height - 50) * size.width + 20) * 4; result = { width: size.width, height: size.height, rgb: [pixels[offset + 2], pixels[offset + 1], pixels[offset]] }; }
     else if (request.method === "change") { await windows[0].webContents.executeJavaScript('document.getElementById("draft").value="Changed by person"; document.body.style.background="#eeeeee"'); result = {}; }
     else if (request.method === "minimize") { windows[0].minimize(); result = {}; }
     else if (request.method === "restore") { windows[0].restore(); result = {}; }
