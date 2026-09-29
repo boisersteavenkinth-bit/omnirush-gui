@@ -31,3 +31,22 @@ export function dispatchNewProviders(detail: NewProvidersEventDetail): void {
     new CustomEvent<NewProvidersEventDetail>(newProvidersEvent, { detail }),
   );
 }
+
+const SEEN_KEY = "omnirush.seenProviderIds";
+
+export function readSeenProviderIds(): Set<string> {
+  try {
+    const raw = window.localStorage.getItem(SEEN_KEY);
+    return new Set(raw ? JSON.parse(raw) : []);
+  } catch {
+    return new Set();
+  }
+}
+
+export function markProvidersSeen(ids: string[]): void {
+  try {
+    const existing = readSeenProviderIds();
+    for (const id of ids) existing.add(id);
+    window.localStorage.setItem(SEEN_KEY, JSON.stringify([...existing]));
+  } catch {}
+}
