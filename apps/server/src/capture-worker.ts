@@ -22,6 +22,7 @@ import {
   type ToWorker,
 } from "./capture-protocol.js";
 import type { ArchiveApiRequestInit } from "./session-archive/upload.js";
+import type { TraceCapabilities } from "./session-uploader.js";
 
 function mainThreadPort(): MessagePort {
   if (!parentPort) throw new Error("capture-worker runs as a worker thread only");
@@ -95,6 +96,16 @@ function refreshAccessToken(channel: RequestChannel) {
   return async (): Promise<string | null> => (await ask(channel, { type: "refreshAccessToken" })).token ?? null;
 }
 
+function capabilities(): Promise<TraceCapabilities> {
+  return ask("uploader", { type: "capabilities" }).then((result) => {
+    const value = result.value;
+    if (!value || !Array.isArray(value.schema_versions) || typeof value.canonical_trace !== "boolean") {
+      throw new Error("the main thread returned invalid capture capabilities");
+    }
+    return value;
+  });
+}
+
 const log = (level: "info" | "warn", message: string, attributes?: Record<string, unknown>) => {
   post({ kind: "log", level, message, ...(attributes ? { attributes } : {}) });
 };
@@ -115,6 +126,16 @@ const host = new CaptureHost({
           },
         }
       : {}),
+    ...(init.sessionUploader.uploadFile
+      ? {
+          uploadFile: async (sessionId: string, path: string, size: number, signal?: AbortSignal) => {
+            const result = await ask("uploader", { type: "uploadFile", sessionId, path, size }, signal);
+            if (!result.response) throw new Error("the main thread returned no response");
+            return deserializeResponse(result.response);
+          },
+        }
+      : {}),
+    ...(init.sessionUploader.capabilities ? { capabilities } : {}),
     ...(init.sessionUploader.refreshAccessToken ? { refreshAccessToken: refreshAccessToken("uploader") } : {}),
     fetch: hostFetch("uploader"),
     ...(init.sessionUploader.gatewayUrl !== undefined ? { gatewayUrl: init.sessionUploader.gatewayUrl } : {}),

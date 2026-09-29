@@ -1,13 +1,17 @@
 import { timingSafeEqual } from "node:crypto";
+import { createReadStream } from "node:fs";
 
 import { SESSION_UPLOAD_BUDGET, SESSION_UPLOAD_ENDPOINT_PATH, sessionUploadTimeoutMs, type SessionUploadBudget } from "./session-upload-budget.js";
 import { externalFetch } from "./server-fetch.js";
 import type { OmniRushGatewayCredentials } from "./types.js";
+import type { TraceCapabilities } from "./session-uploader.js";
 import {
   SUBAGENT_FALLBACK_EFFORT_HEADER,
   SUBAGENT_FALLBACK_MODEL_HEADER,
   SUBAGENT_ROOT_SESSION_HEADER,
 } from "./omnirush-swarm.js";
+
+const TRACE_CAPABILITY_TTL_MS = 5 * 60_000;
 
 /** A sub-agent request the gateway refused on the picked model and that was sent again on the main model. */
 export type SubagentModelFallbackEvent = {
@@ -32,6 +36,14 @@ type BrokerOptions = {
   credentials?: OmniRushGatewayCredentials;
   engineToken?: string;
   fetch?: typeof externalFetch;
+  /** Electron's file-aware transport. Standalone runtimes use the bounded Node stream fallback. */
+  uploadFile?: (url: string, init: {
+    method: "POST";
+    headers: Record<string, string>;
+    path: string;
+    size: number;
+    signal?: AbortSignal;
+  }) => Promise<Response>;
   log?: (level: "info" | "warn" | "error", message: string, attributes?: Record<string, unknown>) => void;
   /** uploadSession()'s deadline parameters; SESSION_UPLOAD_BUDGET unless a test shrinks it. */
   sessionUploadBudget?: SessionUploadBudget;
@@ -431,6 +443,34 @@ async function readableErrorResponse(response: Response): Promise<Response> {
   });
 }
 
+async function boundedText(response: Response, maxBytes: number): Promise<string | null> {
+  if (!response.body) return "";
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const result = await reader.read();
+      if (result.done) break;
+      total += result.value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel("response too large").catch(() => undefined);
+        return null;
+      }
+      chunks.push(result.value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const body = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(body);
+}
+
 type CredentialState = {
   gatewayUrl: string;
   accessToken: string;
@@ -494,6 +534,53 @@ function apiUrl(gatewayUrl: string, path: string): string {
   url.search = "";
   url.hash = "";
   return url.toString();
+}
+
+function untilAborted(response: Promise<Response>, signal: AbortSignal): Promise<Response> {
+  if (signal.aborted) return Promise.reject(signal.reason);
+  return new Promise((resolvePromise, reject) => {
+    const onAbort = () => reject(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+    response.then((value) => {
+      signal.removeEventListener("abort", onAbort);
+      if (signal.aborted) void value.body?.cancel().catch(() => undefined);
+      resolvePromise(value);
+    }, (error: unknown) => {
+      signal.removeEventListener("abort", onAbort);
+      reject(error);
+    });
+  });
+}
+
+function fileReadableBody(path: string, signal: AbortSignal): ReadableStream<Uint8Array> {
+  const source = createReadStream(path, { highWaterMark: 64 * 1024 });
+  const abort = () => source.destroy(signal.reason instanceof Error ? signal.reason : undefined);
+  const cleanup = () => signal.removeEventListener("abort", abort);
+  return new globalThis.ReadableStream<Uint8Array>({
+    start(controller) {
+      if (signal.aborted) {
+        abort();
+        return;
+      }
+      signal.addEventListener("abort", abort, { once: true });
+      source.on("data", (chunk: string | Buffer) => {
+        const bytes = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
+        controller.enqueue(new Uint8Array(bytes));
+      });
+      source.on("end", () => {
+        cleanup();
+        controller.close();
+      });
+      source.on("error", (error: Error) => {
+        cleanup();
+        controller.error(error);
+      });
+    },
+    cancel(reason) {
+      cleanup();
+      source.destroy(reason instanceof Error ? reason : undefined);
+    },
+  });
 }
 
 /** The backend's voice route, relative to the gateway URL (…/omnirush/v1/audio/transcriptions). */
@@ -717,6 +804,7 @@ export class OmniRushGatewayBroker {
   private readonly invalidate?: OmniRushGatewayCredentials["invalidate"];
   private readonly refreshOwner?: OmniRushGatewayCredentials["refresh"];
   private readonly fetcher: typeof externalFetch;
+  private readonly fileUploader?: BrokerOptions["uploadFile"];
   private readonly log?: BrokerOptions["log"];
   private readonly sessionUploadBudget: SessionUploadBudget;
   private readonly onSubagentFallback?: BrokerOptions["onSubagentFallback"];
@@ -725,6 +813,8 @@ export class OmniRushGatewayBroker {
   private refreshInFlight: Promise<boolean> | null = null;
   /** Whether the last failed refresh left the session as it was (unreachable, 5xx, contended). */
   private lastRefreshTransient = false;
+  private capabilityCache: { gatewayUrl: string; accountKey: string; version: 2 | 3; expiresAt: number } | null = null;
+  private capabilityProbe: { key: string; promise: Promise<2 | 3> } | null = null;
 
   constructor(options: BrokerOptions) {
     const gatewayUrl = options.credentials ? normalizedGatewayUrl(options.credentials.gatewayUrl) : null;
@@ -739,6 +829,7 @@ export class OmniRushGatewayBroker {
     this.invalidate = options.credentials?.invalidate;
     this.refreshOwner = options.credentials?.refresh;
     this.fetcher = options.fetch ?? externalFetch;
+    this.fileUploader = options.uploadFile;
     this.log = options.log;
     this.sessionUploadBudget = options.sessionUploadBudget ?? SESSION_UPLOAD_BUDGET;
     this.onSubagentFallback = options.onSubagentFallback;
@@ -844,6 +935,94 @@ export class OmniRushGatewayBroker {
       body: body.buffer.slice(body.byteOffset, body.byteOffset + body.byteLength) as ArrayBuffer,
       signal: signal ? AbortSignal.any([AbortSignal.timeout(timeoutMs), signal]) : AbortSignal.timeout(timeoutMs),
     }));
+  }
+
+  uploadSessionFile(sessionId: string, path: string, size: number, signal?: AbortSignal): Promise<Response> {
+    const timeoutMs = sessionUploadTimeoutMs(size, this.sessionUploadBudget);
+    return this.withDeviceBearer(async (state) => {
+      const requestSignal = signal ? AbortSignal.any([AbortSignal.timeout(timeoutMs), signal]) : AbortSignal.timeout(timeoutMs);
+      const url = apiUrl(state.gatewayUrl, SESSION_UPLOAD_ENDPOINT_PATH);
+      const headers = {
+        Authorization: `Bearer ${state.accessToken}`,
+        "Content-Type": "application/zstd",
+        "X-OmniRush-Session-ID": sessionId,
+      };
+      if (this.fileUploader) {
+        return untilAborted(this.fileUploader(url, { method: "POST", headers, path, size, signal: requestSignal }), requestSignal);
+      }
+      const bodyAbort = new AbortController();
+      const bodySignal = AbortSignal.any([requestSignal, bodyAbort.signal]);
+      const body = fileReadableBody(path, bodySignal);
+      try {
+        const init: RequestInit & { duplex: "half" } = {
+          method: "POST",
+          headers,
+          body,
+          duplex: "half",
+          signal: requestSignal,
+        };
+        return await this.fetcher(url, init);
+      } finally {
+        bodyAbort.abort(new DOMException("The upload response arrived", "AbortError"));
+      }
+    });
+  }
+
+  async sessionUploadCapabilities(): Promise<TraceCapabilities> {
+    if (!this.state) return { schema_versions: [1, 2, 3], canonical_trace: false };
+    const state = this.state;
+    const gatewayUrl = state.gatewayUrl;
+    const key = this.capabilityKey(state);
+    if (this.capabilityCache?.gatewayUrl === gatewayUrl
+      && this.capabilityCache.accountKey === key
+      && this.capabilityCache.expiresAt > Date.now()) {
+      return { schema_versions: this.capabilityCache.version === 3 ? [1, 2, 3] : [1, 2], canonical_trace: this.capabilityCache.version === 3 };
+    }
+    const pending = this.capabilityProbe?.key === key
+      ? this.capabilityProbe.promise
+      : this.probeSessionUploadCapabilities(gatewayUrl);
+    if (!this.capabilityProbe || this.capabilityProbe.key !== key) {
+      this.capabilityProbe = { key, promise: pending };
+      void pending.finally(() => {
+        if (this.capabilityProbe?.promise === pending) this.capabilityProbe = null;
+      }).catch(() => undefined);
+    }
+    const version = await pending;
+    if (this.state && this.capabilityKey(this.state) === key) {
+      this.capabilityCache = { gatewayUrl, accountKey: key, version, expiresAt: Date.now() + TRACE_CAPABILITY_TTL_MS };
+    }
+    return { schema_versions: version === 3 ? [1, 2, 3] : [1, 2], canonical_trace: version === 3 };
+  }
+
+  resetCapabilities(): void {
+    this.capabilityCache = null;
+    this.capabilityProbe = null;
+  }
+
+  private capabilityKey(state: CredentialState): string {
+    return `${state.gatewayUrl}\0${state.refreshToken}`;
+  }
+
+  private async probeSessionUploadCapabilities(gatewayUrl: string): Promise<2 | 3> {
+    try {
+      if (this.state?.gatewayUrl !== gatewayUrl) return 2;
+      const response = await this.withDeviceBearer((state) => this.fetcher(apiUrl(state.gatewayUrl, "collect/capabilities"), {
+        method: "GET",
+        headers: { Authorization: `Bearer ${state.accessToken}`, Accept: "application/json" },
+        signal: AbortSignal.timeout(8_000),
+      }));
+      if (!response.ok) {
+        await response.body?.cancel().catch(() => undefined);
+        return 2;
+      }
+      const text = await boundedText(response, 64 * 1024);
+      if (text === null) return 2;
+      const payload: unknown = JSON.parse(text);
+      if (!isRecord(payload) || payload.canonical_trace !== true || !Array.isArray(payload.schema_versions)) return 2;
+      return payload.schema_versions.some((version) => version === 3) ? 3 : 2;
+    } catch {
+      return 2;
+    }
   }
 
   /**
@@ -1132,6 +1311,7 @@ export class OmniRushGatewayBroker {
       accessToken: current.accessToken,
       refreshToken: current.refreshToken,
     };
+    if (this.state.gatewayUrl !== asked.gatewayUrl) this.resetCapabilities();
     return true;
   }
 
@@ -1150,6 +1330,7 @@ export class OmniRushGatewayBroker {
     if (outcome.kind !== "retired") return false;
     if (this.state !== spent) return Boolean(this.state);
     this.state = null;
+    this.resetCapabilities();
     void this.invalidate?.().catch(() => undefined);
     return false;
   }
@@ -1176,6 +1357,7 @@ export class OmniRushGatewayBroker {
     if (typeof accessToken !== "string" || typeof refreshToken !== "string" || !gatewayUrl) return { kind: "unavailable" };
     if (!this.state) return { kind: "unavailable" };
     this.state = { accessToken, refreshToken, gatewayUrl };
+    if (gatewayUrl !== from.gatewayUrl) this.resetCapabilities();
     return { kind: "rotated" };
   }
 }

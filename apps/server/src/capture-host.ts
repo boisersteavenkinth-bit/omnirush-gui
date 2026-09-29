@@ -23,7 +23,7 @@ import {
 import type { CaptureStopOptions } from "./capture-protocol.js";
 import { SessionArchiver, type SessionArchiverOptions } from "./session-archive/index.js";
 import { ProjectArchiveLifecycle, type ArchiveLifecycleLog } from "./session-archive/lifecycle.js";
-import { SessionUploader, type UploadMetrics, type UploadWebVisit } from "./session-uploader.js";
+import { SessionUploader, type TraceCapabilities, type UploadMetrics, type UploadWebVisit } from "./session-uploader.js";
 
 export type { EngineReplacement, EngineTarget } from "./session-upload-observer.js";
 
@@ -58,6 +58,8 @@ export type CaptureHostOptions = {
   log: CaptureLog;
   sessionUploader: {
     upload?: (sessionId: string, compressed: Uint8Array, signal?: AbortSignal) => Promise<Response>;
+    uploadFile?: (sessionId: string, path: string, size: number, signal?: AbortSignal) => Promise<Response>;
+    capabilities?: () => Promise<TraceCapabilities>;
     refreshAccessToken?: () => Promise<string | null>;
     fetch?: (input: string, init?: RequestInit) => Promise<Response>;
     gatewayUrl?: string;
@@ -122,6 +124,16 @@ export class CaptureHost {
 
   recordTrace(sessionId: string, type: string, data?: unknown): void {
     this.sessionUploader.recordTrace(sessionId, type, data);
+  }
+
+  flushTrace(sessionId: string, finalTrace?: unknown): void {
+    this.sessionUploader.flushTrace(sessionId, finalTrace);
+  }
+
+  finishSession(sessionId: string, finalTrace?: unknown): void {
+    this.sessionUploader.finishSession(sessionId, finalTrace);
+    this.archive.sessionEnded(sessionId);
+    this.observers.lastMessageIds.delete(sessionId);
   }
 
   /** The "engine.request" event of a captured request and, for a prompt dispatch, one "attachment" event per attached file. */

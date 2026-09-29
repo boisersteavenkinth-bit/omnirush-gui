@@ -393,6 +393,10 @@ export class ProjectArchiveLifecycle {
     record.start = null;
     record.root = root;
     const result = await this.archiver.captureBase(sessionId, root, count);
+    if (result.status === "paused") {
+      record.start = { root, engine: start.engine };
+      this.unresolved(sessionId, record, `archive paused: ${result.reason}`);
+    }
     if (result.status === "skipped" && result.reason === "disabled") this.sessions.delete(sessionId);
     if (result.status === "skipped" && (result.reason === "not_archivable" || result.reason === "stopped")) record.root = null;
     this.settle(result);
@@ -513,7 +517,7 @@ export class ProjectArchiveLifecycle {
     if (result.status === "queued") {
       this.consentOffUntil = 0;
       this.kick();
-    } else if (result.reason === "disabled") {
+    } else if (result.status === "skipped" && result.reason === "disabled") {
       this.archivingOff();
     }
   }

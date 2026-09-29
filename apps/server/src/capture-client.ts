@@ -11,6 +11,8 @@
  * number of times.
  */
 import { Worker } from "node:worker_threads";
+import { lstat } from "node:fs/promises";
+import { resolve } from "node:path";
 
 import { CaptureHost, type CaptureDiagnostics, type CaptureHostOptions, type EngineReplacement, type EngineTarget, type PromptRecord } from "./capture-host.js";
 import {
@@ -26,7 +28,7 @@ import {
   type ToWorker,
 } from "./capture-protocol.js";
 import { externalFetch } from "./server-fetch.js";
-import { isUploadableWebUrl, sessionUploaderEnabled, type UploadWebVisit } from "./session-uploader.js";
+import { isUploadableWebUrl, MAX_UPLOAD_COMPRESSED_BYTES, sessionUploaderEnabled, type UploadWebVisit } from "./session-uploader.js";
 
 /** A prompt body larger than this is not traced, so it is not copied to the worker either. */
 const MAX_TRACED_REQUEST_BYTES = 4 * 1024 * 1024;
@@ -54,6 +56,8 @@ export type CaptureService = {
   hasSession(sessionId: string): boolean;
   startSession(sessionId: string, workspaceId: string, root: string): void;
   recordTrace(sessionId: string, type: string, data?: unknown): void;
+  flushTrace(sessionId: string, finalTrace?: unknown): void;
+  finishSession(sessionId: string, finalTrace?: unknown): void;
   /** The "engine.request" event of a captured request (its body parsed off the main thread), plus a prompt's attachments. */
   recordPrompt(sessionId: string, prompt: Omit<PromptRecord, "body"> & { body: ArrayBuffer | undefined }): void;
   captureSnapshot(sessionId: string, trigger: "prompt" | "turn_completed"): void;
@@ -109,7 +113,7 @@ class CaptureClient implements CaptureService {
 
   constructor(private readonly options: CaptureServiceOptions) {
     this.uploadEnabled = sessionUploaderEnabled({
-      upload: Boolean(options.sessionUploader.upload),
+      upload: Boolean(options.sessionUploader.upload || options.sessionUploader.uploadFile),
       gatewayUrl: options.sessionUploader.gatewayUrl,
       accessToken: options.sessionUploader.accessToken,
     });
@@ -133,6 +137,15 @@ class CaptureClient implements CaptureService {
 
   recordTrace(sessionId: string, type: string, data?: unknown): void {
     this.send({ kind: "call", id: null, method: "recordTrace", args: data === undefined ? [sessionId, type] : [sessionId, type, data] });
+  }
+
+  flushTrace(sessionId: string, finalTrace?: unknown): void {
+    this.send({ kind: "call", id: null, method: "flushTrace", args: finalTrace === undefined ? [sessionId] : [sessionId, finalTrace] });
+  }
+
+  finishSession(sessionId: string, finalTrace?: unknown): void {
+    if (this.sessions.get(sessionId) === true) this.sessions.set(sessionId, false);
+    this.send({ kind: "call", id: null, method: "finishSession", args: finalTrace === undefined ? [sessionId] : [sessionId, finalTrace] });
   }
 
   recordPrompt(sessionId: string, prompt: Omit<PromptRecord, "body"> & { body: ArrayBuffer | undefined }): void {
@@ -272,6 +285,8 @@ class CaptureClient implements CaptureService {
       engineVersion: this.options.engineVersion,
       sessionUploader: {
         upload: Boolean(sessionUploader.upload),
+        uploadFile: Boolean(sessionUploader.uploadFile),
+        capabilities: Boolean(sessionUploader.capabilities),
         refreshAccessToken: Boolean(sessionUploader.refreshAccessToken),
         ...(sessionUploader.gatewayUrl !== undefined ? { gatewayUrl: sessionUploader.gatewayUrl } : {}),
         ...(sessionUploader.accessToken !== undefined ? { accessToken: sessionUploader.accessToken } : {}),
@@ -435,6 +450,26 @@ class CaptureClient implements CaptureService {
       case "upload": {
         if (!sessionUploader.upload) throw new Error("no session upload hook");
         return { kind: "result", id, ok: true, response: await serializeResponse(await sessionUploader.upload(request.sessionId, request.body, signal)) };
+      }
+      case "uploadFile": {
+        if (!sessionUploader.uploadFile) throw new Error("no session file upload hook");
+        const root = resolve(this.options.stateDir);
+        const path = resolve(request.path);
+        if (!path.startsWith(`${root}${process.platform === "win32" ? "\\" : "/"}`)) throw new Error("capture file is outside the state directory");
+        const file = await lstat(path);
+        if (!file.isFile() || file.size !== request.size || file.size > MAX_UPLOAD_COMPRESSED_BYTES) {
+          throw new Error("capture file descriptor is invalid");
+        }
+        return {
+          kind: "result",
+          id,
+          ok: true,
+          response: await serializeResponse(await sessionUploader.uploadFile(request.sessionId, path, request.size, signal)),
+        };
+      }
+      case "capabilities": {
+        if (!sessionUploader.capabilities) throw new Error("no session capability hook");
+        return { kind: "result", id, ok: true, response: null, value: await sessionUploader.capabilities() };
       }
       case "refreshAccessToken": {
         const refresh = channel === "archive" ? archive.refreshAccessToken : sessionUploader.refreshAccessToken;

@@ -84,7 +84,7 @@ import { readSkillFolder } from "./skill-folder.mjs";
 import { createDesktopVaultKeyProvider } from "./secure-vault-key.mjs";
 import { applyLinuxPasswordStore, recordLinuxPasswordStore } from "./linux-password-store.mjs";
 import { createDesktopOmniRushAccountStore, legacyKeychainAllowed } from "./omnirush-account.mjs";
-import { createExternalFetch } from "./external-fetch.mjs";
+import { createExternalFetch, createExternalFileUpload } from "./external-fetch.mjs";
 import {
   clearOmniRushSentrySession,
   initOmniRushSentry,
@@ -122,6 +122,7 @@ const pty = require(["node", "pty"].join("-"));
 // Chromium's network stack (OS trust store, system proxy) for the main
 // process's own requests off the machine; see external-fetch.mjs.
 const desktopExternalFetch = createExternalFetch({ net: electronNet, isReady: () => app.isReady() });
+const desktopExternalFileUpload = createExternalFileUpload({ net: electronNet, isReady: () => app.isReady() });
 const NATIVE_DEEP_LINK_EVENT = "omnirush:deep-link-native";
 const AUTOMATION_RUNNER_CREDENTIAL_REJECTED_EVENT = "omnirush:automation-runner:credential-rejected";
 const isDevMode = process.env.OMNIRUSH_DEV_MODE === "1";
@@ -1360,6 +1361,7 @@ const runtimeManager = createRuntimeManager({
   app,
   desktopRoot: path.resolve(__dirname, ".."),
   externalFetch: desktopExternalFetch,
+  captureFileUpload: desktopExternalFileUpload,
   // Rewrites persisted `npx -y omnirush-ui-mcp` entries to the bundled launch
   // before the engine starts. Null (bundle missing) removes them instead.
   omnirushUiMcpLaunch: () => {

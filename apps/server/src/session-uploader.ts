@@ -25,6 +25,7 @@ import { writeFileAtomic } from "./atomic-write.js";
 const execFileAsync = promisify(execFile);
 
 export const UPLOAD_SCHEMA_VERSION = 2;
+export const TRACE_SCHEMA_VERSION = 3;
 // Caps shared with the omnirush.ai session upload endpoint, /omnirush/collect (contract v2); the
 // backend enforces identical values, so a change here must land on both sides.
 // Every cap is per file or per request: there is no per-session storage cap, so
@@ -128,6 +129,8 @@ const UPLOAD_ATTEMPTS = 3;
 const UPLOAD_RETRY_DELAY_MS = 250;
 const RETRY_BASE_MS = 5_000;
 const RETRY_MAX_MS = 5 * 60_000;
+const TRACE_CAPABILITY_TTL_MS = 5 * 60_000;
+const MAX_RESPONSE_BODY_BYTES = 64 * 1024;
 // Spooled entries one drain may see fail before it leaves the rest to the
 // next one: enough to get past a stuck entry, few enough not to hammer a link
 // that is down for every entry in the spool.
@@ -294,7 +297,34 @@ export type UploadAttachment = {
   textTruncated?: boolean;
 };
 
-type ArtifactStat = { size: number; mtimeMs: number };
+type FileSignature = {
+  size: number;
+  mtimeMs: number;
+  ctimeMs: number;
+  ino: number;
+  dev: number;
+};
+
+type ArtifactStat = FileSignature;
+
+function fileSignature(file: { size: number; mtimeMs: number; ctimeMs: number; ino: number; dev: number }): FileSignature {
+  return {
+    size: file.size,
+    mtimeMs: file.mtimeMs,
+    ctimeMs: file.ctimeMs,
+    ino: file.ino,
+    dev: file.dev,
+  };
+}
+
+function sameFileSignature(left: FileSignature | undefined, right: FileSignature): boolean {
+  return Boolean(left
+    && left.size === right.size
+    && left.mtimeMs === right.mtimeMs
+    && left.ctimeMs === right.ctimeMs
+    && left.ino === right.ino
+    && left.dev === right.dev);
+}
 
 type SessionLedgerRecord = {
   segment: number;
@@ -319,6 +349,9 @@ type SessionLedger = {
 type HashCacheEntry = {
   size: number;
   mtimeMs: number;
+  ctimeMs: number;
+  ino: number;
+  dev: number;
   binary: boolean;
   sha256: string;
   /** UTF-8 bytes of the redacted content: the manifest size. */
@@ -396,6 +429,10 @@ type SessionState = {
    * cap, with their mtime: "skipped" in its "turn.diff".
    */
   turnSkipped: Map<string, number>;
+  /** Paths observed as changed during the current turn, even if their mtime was restored. */
+  turnWrittenPaths: Map<string, number>;
+  /** Lowest relevance rank observed from known tool trace events for a path. */
+  relevance: Map<string, number>;
   /** The per-root hash cache, shared with every other session open on the same root. */
   cache: Map<string, HashCacheEntry>;
   listing: { denied: number; truncated: boolean };
@@ -430,6 +467,10 @@ type SessionUploaderOptions = {
   fetch?: typeof externalFetch;
   /** Sends one envelope; `signal` aborts at the upload deadline (session-upload-budget.ts) or when the spool is cleared. */
   upload?: (sessionId: string, compressed: Uint8Array, signal?: AbortSignal) => Promise<Response>;
+  /** Sends an immutable compressed envelope directly from its spool/temp path. */
+  uploadFile?: (sessionId: string, path: string, size: number, signal?: AbortSignal) => Promise<Response>;
+  /** Negotiates the canonical structured trace envelope. Failures fall back to schema v2. */
+  capabilities?: () => Promise<TraceCapabilities>;
   /**
    * Asks the account layer for a fresh access token once the gateway rejects
    * an upload as unauthorized. Resolves with the bearer to send next, or null
@@ -469,9 +510,16 @@ type SessionUploaderOptions = {
   onPathTouched?: (sessionId: string, path: string) => void;
 };
 
+export type TraceCapabilities = {
+  schema_versions: number[];
+  canonical_trace: boolean;
+};
+
 type TransmitOutcome =
   | { ok: true }
-  | { ok: false; retryable: boolean; reason: string };
+  | { ok: false; retryable: boolean; reason: string; unsupportedSchema?: boolean };
+
+type CompressedArtifact = { path: string; size: number };
 
 // --- privacy rails -----------------------------------------------------------
 // The omnirush.ai backend applies the same denylist and scrubber server-side;
@@ -821,6 +869,37 @@ function workspaceRootName(root: string): string {
 
 function sha256Hex(input: string | Buffer): string {
   return createHash("sha256").update(input).digest("hex");
+}
+
+function fileReadableBody(path: string, signal?: AbortSignal): ReadableStream<Uint8Array> {
+  const source = createReadStream(path, { highWaterMark: 64 * 1024 });
+  const abort = () => source.destroy(signal?.reason instanceof Error ? signal.reason : undefined);
+  const cleanup = () => signal?.removeEventListener("abort", abort);
+  return new globalThis.ReadableStream<Uint8Array>({
+    start(controller) {
+      if (signal?.aborted) {
+        abort();
+        return;
+      }
+      signal?.addEventListener("abort", abort, { once: true });
+      source.on("data", (chunk: string | Buffer) => {
+        const bytes = typeof chunk === "string" ? Buffer.from(chunk) : chunk;
+        controller.enqueue(new Uint8Array(bytes));
+      });
+      source.on("end", () => {
+        cleanup();
+        controller.close();
+      });
+      source.on("error", (error: Error) => {
+        cleanup();
+        controller.error(error);
+      });
+    },
+    cancel(reason) {
+      cleanup();
+      source.destroy(reason instanceof Error ? reason : undefined);
+    },
+  });
 }
 
 function pathComponents(path: string): string[] {
@@ -1426,30 +1505,145 @@ const PATH_FIELD_NAMES = new Set([
   "file_path",
   "filepath",
   "filename",
+  "file_name",
   "target_path",
+  "targetpath",
   "workspace_path",
+  "workspacepath",
+  "old_path",
+  "oldpath",
+  "new_path",
+  "newpath",
 ]);
 
-function pathCandidates(value: unknown, key = "", output: string[] = [], depth = 0): string[] {
-  if (output.length >= 128 || depth > 6) return output;
-  if (typeof value === "string") {
-    const candidate = value.trim();
-    if (PATH_FIELD_NAMES.has(key.toLowerCase()) && candidate && candidate.length <= 2_048
-      && !candidate.includes("\n") && !candidate.includes("\r") && !candidate.includes("://")) {
-      output.push(candidate);
+const TOOL_READ_TRACE_TYPES = new Set([
+  "file.read",
+  "file.open",
+  "tool.read",
+  "tool.file_read",
+]);
+const TOOL_WRITE_TRACE_TYPES = new Set([
+  "file.write",
+  "file.create",
+  "file.edit",
+  "file.patch",
+  "file.delete",
+  "file.remove",
+  "tool.write",
+  "tool.create",
+  "tool.edit",
+  "tool.patch",
+  "tool.apply_patch",
+  "tool.delete",
+]);
+
+type TracePathEvidence = { path: string; relevance: number };
+
+function pathValue(value: unknown, key: string): string | null {
+  if (typeof value !== "string" || !PATH_FIELD_NAMES.has(key.toLowerCase())) return null;
+  const candidate = value.trim();
+  if (!candidate || candidate.length > 2_048 || candidate.includes("\n") || candidate.includes("\r") || candidate.includes("://")) return null;
+  return candidate;
+}
+
+const KNOWN_READ_TOOLS = new Set(["cat", "file_read", "open", "read", "read_file", "view"]);
+const KNOWN_WRITE_TOOLS = new Set(["apply_patch", "create", "delete", "edit", "file_write", "move", "patch", "remove", "rename", "rm", "write", "write_file"]);
+
+function pathEvidenceFromContainers(relevance: number, containers: readonly Record<string, unknown>[]): TracePathEvidence[] {
+  const output: TracePathEvidence[] = [];
+  const seen = new Set<string>();
+  for (const container of containers) {
+    for (const [key, value] of Object.entries(container)) {
+      const candidate = pathValue(value, key);
+      if (candidate && !seen.has(candidate)) {
+        seen.add(candidate);
+        output.push({ path: candidate, relevance });
+      }
     }
-    return output;
   }
-  if (!value || typeof value !== "object") return output;
-  if (Array.isArray(value)) {
-    for (const item of value) pathCandidates(item, key, output, depth + 1);
-    return output;
+  return output.slice(0, 128);
+}
+
+function patchPaths(value: unknown): string[] {
+  if (typeof value !== "string" || value.length > 256 * 1024) return [];
+  const paths: string[] = [];
+  for (const match of value.matchAll(/^\*\*\* (?:(?:Update|Add|Delete) File|Move to):[ \t]*(.+)$/gm)) {
+    const path = match[1]?.trim();
+    if (path) paths.push(path.split(/\s+->\s+/u)[0] ?? path);
   }
-  for (const [childKey, childValue] of Object.entries(value)) {
-    pathCandidates(childValue, childKey, output, depth + 1);
-    if (output.length >= 128) break;
+  return paths;
+}
+
+function patchPathsFromContainers(values: readonly unknown[]): string[] {
+  const paths: string[] = [];
+  for (const value of values) {
+    paths.push(...patchPaths(value));
+    if (!isRecord(value)) continue;
+    for (const key of ["patch", "content", "text", "diff"]) paths.push(...patchPaths(value[key]));
   }
-  return output;
+  return paths;
+}
+
+function toolName(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim().toLowerCase().split(".").at(-1) ?? "";
+  return normalized || null;
+}
+
+function messageToolPathEvidence(value: Record<string, unknown>): TracePathEvidence[] {
+  const messages = Array.isArray(value.messages) ? value.messages : [];
+  const output: TracePathEvidence[] = [];
+  for (const message of messages) {
+    if (!isRecord(message)) continue;
+    const parts = Array.isArray(message.parts) ? message.parts : [];
+    for (const part of parts) {
+      if (!isRecord(part) || part.type !== "tool") continue;
+      const name = toolName(part.tool ?? part.name);
+      const relevance = name && KNOWN_WRITE_TOOLS.has(name) ? 0 : name && KNOWN_READ_TOOLS.has(name) ? 1 : null;
+      if (relevance === null) continue;
+      const containers: Record<string, unknown>[] = [];
+      for (const key of ["input", "arguments", "args", "params", "output", "result"]) {
+        const child = part[key];
+        if (isRecord(child)) containers.push(child);
+      }
+      const state = part.state;
+      if (isRecord(state)) {
+        for (const key of ["input", "output", "metadata"]) {
+          const child = state[key];
+          if (isRecord(child)) containers.push(child);
+          if (name === "apply_patch") {
+            for (const path of patchPathsFromContainers([child])) output.push({ path, relevance });
+          }
+        }
+      }
+      if (name === "apply_patch") {
+        for (const key of ["patch", "content", "text"]) {
+          for (const path of patchPathsFromContainers([part[key]])) output.push({ path, relevance });
+        }
+      }
+      output.push(...pathEvidenceFromContainers(relevance, containers));
+    }
+  }
+  return output.slice(0, 128);
+}
+
+/**
+ * Only tool events with a known read/write/delete meaning may attribute a
+ * path. Generic trace payloads are deliberately opaque: a random `path` key
+ * in a model message must never turn into file relevance or a workspace read.
+ */
+function knownToolPathEvidence(type: string, data: unknown): TracePathEvidence[] {
+  const relevance = TOOL_WRITE_TRACE_TYPES.has(type) ? 0 : TOOL_READ_TRACE_TYPES.has(type) ? 1 : null;
+  if (relevance === null || !isRecord(data)) {
+    if (!["turn.messages", "turn.completed", "session.completed", "engine.request"].includes(type) || !isRecord(data)) return [];
+    return messageToolPathEvidence(data);
+  }
+  const containers: Record<string, unknown>[] = [data];
+  for (const key of ["input", "arguments", "args", "params", "output", "result"]) {
+    const child = data[key];
+    if (isRecord(child)) containers.push(child);
+  }
+  return pathEvidenceFromContainers(relevance, containers);
 }
 
 /** The rules of a .gitignore file's text, as walkFallback reads them: trimmed lines, no blanks or comments. */
@@ -1683,11 +1877,19 @@ async function readSessionLedger(path: string | null): Promise<SessionLedger> {
   }
 }
 
-function boundedTracePayload(
+type BoundedTraceBatch = { content: string; events: unknown[] };
+
+/**
+ * Scrubs once, then partitions a trace in arrival order. A large event is
+ * represented by a small explicit marker; later completion and diff events
+ * still get a batch of their own instead of being lost with a longest-prefix
+ * cut.
+ */
+function boundedTraceBatches(
   state: Pick<SessionState, "id" | "workspaceId" | "segment" | "resumed">,
   events: TraceEvent[],
   maxBytes = MAX_TRACE_BYTES,
-): Buffer {
+): BoundedTraceBatch[] {
   // The trace is scrubbed as a JSON value, never as serialised text: a text
   // redaction inside an escaped string (`\n@app.function`) once left a
   // dangling backslash that made the whole document unparseable. Header and
@@ -1701,57 +1903,72 @@ function boundedTracePayload(
     session_resumed: state.resumed,
     events,
   }).value as Record<string, unknown> & { events: TraceEvent[] };
-  const encode = (selected: TraceEvent[], truncated: boolean, includedCount = selected.length) => Buffer.from(JSON.stringify({
+  const encode = (selected: unknown[], truncated: boolean, dropped: number): BoundedTraceBatch & { byteLength: number } => {
+    const content = JSON.stringify({
     ...header,
     trace_truncated: truncated,
-    dropped_event_count: Math.max(0, events.length - includedCount),
+    dropped_event_count: dropped,
     events: selected,
-  }));
-
-  // One encode settles the common case. Only an oversized trace pays for the
-  // search, and that search measures each event once: the payload of a prefix
-  // is its wrapper plus the events' serialised bytes and the commas between
-  // them, so the longest prefix that fits follows from a running total. Every
-  // probe used to be a full serialisation of the prefix, which made a flush
-  // at the MAX_UPLOAD_TRACE_EVENTS cap peak at many times the payload.
-  let payload = encode(scrubbed, false);
-  if (payload.byteLength <= maxBytes) return payload;
-  const wrapperBytes = (included: number) => Buffer.byteLength(JSON.stringify({
-    ...header,
-    trace_truncated: true,
-    dropped_event_count: Math.max(0, events.length - included),
-    events: [],
-  }));
-  let fits = 0;
-  let eventBytes = 0;
+    });
+    return { content, events: selected, byteLength: Buffer.byteLength(content) };
+  };
+  const eventTexts = scrubbed.map((event) => JSON.stringify(event));
+  const wrapperBytes = (truncated: boolean, dropped: number): number => encode([], truncated, dropped).byteLength;
+  const batches: BoundedTraceBatch[] = [];
+  let selected: unknown[] = [];
+  let selectedBytes = 0;
+  let dropped = 0;
+  const flush = (): void => {
+    if (selected.length === 0) return;
+    const payload = encode(selected, dropped > 0, dropped);
+    batches.push({ content: payload.content, events: payload.events });
+    selected = [];
+    selectedBytes = 0;
+  };
   for (let index = 0; index < scrubbed.length; index += 1) {
-    const next = eventBytes + Buffer.byteLength(JSON.stringify(scrubbed[index])) + (index > 0 ? 1 : 0);
-    if (wrapperBytes(index + 1) + next > maxBytes) break;
-    eventBytes = next;
-    fits = index + 1;
-  }
-  const selected = scrubbed.slice(0, fits);
-  payload = encode(selected, true);
-  while (payload.byteLength > maxBytes && selected.length > 0) {
-    selected.pop();
-    payload = encode(selected, true);
-  }
-  if (selected.length === 0 && events.length > 0) {
+    const event = scrubbed[index];
+    const text = eventTexts[index] ?? "null";
+    const eventBytes = Buffer.byteLength(text);
+    const commaBytes = selected.length > 0 ? 1 : 0;
+    if (wrapperBytes(dropped > 0, dropped) + selectedBytes + commaBytes + eventBytes <= maxBytes) {
+      selected.push(event);
+      selectedBytes += commaBytes + eventBytes;
+      continue;
+    }
+    flush();
+    if (wrapperBytes(dropped > 0, dropped) + eventBytes <= maxBytes) {
+      selected.push(event);
+      selectedBytes = eventBytes;
+      continue;
+    }
+    dropped += 1;
     const marker: TraceEvent = {
       at: new Date().toISOString(),
       type: "trace.truncated",
-      data: { dropped_event_count: events.length },
+      data: { dropped_event_count: 1, reason: "oversize_single_event" },
     };
-    const marked = encode([marker], true, 0);
-    if (marked.byteLength <= maxBytes) return marked;
+    const markerText = JSON.stringify(marker);
+    if (wrapperBytes(true, dropped) + Buffer.byteLength(markerText) <= maxBytes) {
+      if (wrapperBytes(true, dropped) + selectedBytes + (selected.length > 0 ? 1 : 0) + Buffer.byteLength(markerText) > maxBytes) flush();
+      selected.push(marker);
+      selectedBytes += (selected.length > 1 ? 1 : 0) + Buffer.byteLength(markerText);
+    }
   }
-  return payload;
+  flush();
+  return batches;
 }
 
 /** Eligible files plus the number of non-ignored paths the denylist dropped. */
-type WorkspaceListing = { paths: string[]; denied: number };
+type WorkspaceListing = { paths: string[]; denied: number; truncated: boolean };
+const MAX_RAW_LISTING_FILES = MAX_FILES * 4;
 
-async function walkFallback(root: string, directory = root, rules: string[] = [], listing: WorkspaceListing = { paths: [], denied: 0 }): Promise<WorkspaceListing> {
+async function walkFallback(
+  root: string,
+  directory = root,
+  rules: string[] = [],
+  listing: WorkspaceListing = { paths: [], denied: 0, truncated: false },
+  priorityPaths: ReadonlySet<string> = new Set(),
+): Promise<WorkspaceListing> {
   const ignoreRules = [...rules, ...scopedIgnoreRules(portablePath(root, directory), await readGitignoreFile(directory))];
   let entries;
   try {
@@ -1759,16 +1976,22 @@ async function walkFallback(root: string, directory = root, rules: string[] = []
   } catch {
     return listing;
   }
+  entries.sort((left, right) => left.name.localeCompare(right.name));
   for (const entry of entries) {
-    if (listing.paths.length >= MAX_FILES) break;
     const fullPath = resolve(directory, entry.name);
     const path = portablePath(root, fullPath);
     if (!path || ignoredByRules(path, ignoreRules)) continue;
+    const uploadPath = portablePathForUpload(path);
+    const priorityBelow = [...priorityPaths].some((candidate) => candidate === uploadPath || candidate.startsWith(`${uploadPath}/`));
+    if (listing.paths.length >= MAX_RAW_LISTING_FILES && !priorityBelow && !priorityPaths.has(uploadPath)) {
+      listing.truncated = true;
+      continue;
+    }
     if (entry.isDirectory()) {
       // Only the unconditional rules apply to a directory name: "src/token/"
       // is walked so its source files can be kept and scrubbed.
       if (hasDeniedComponent(pathComponents(path))) listing.denied += 1;
-      else await walkFallback(root, fullPath, ignoreRules, listing);
+      else await walkFallback(root, fullPath, ignoreRules, listing, priorityPaths);
     } else if (entry.isFile()) {
       if (isUploadPathDenied(path)) listing.denied += 1;
       else listing.paths.push(path);
@@ -1777,26 +2000,32 @@ async function walkFallback(root: string, directory = root, rules: string[] = []
   return listing;
 }
 
-function filterListing(candidates: string[]): WorkspaceListing {
-  const listing: WorkspaceListing = { paths: [], denied: 0 };
+function filterListing(candidates: string[], priorityPaths: ReadonlySet<string> = new Set(), limit = MAX_RAW_LISTING_FILES): WorkspaceListing {
+  const eligible: string[] = [];
+  let denied = 0;
   for (const path of candidates) {
     if (!path) continue;
-    if (isUploadPathDenied(path)) listing.denied += 1;
-    else if (listing.paths.length < MAX_FILES) listing.paths.push(path);
+    if (isUploadPathDenied(path)) denied += 1;
+    else eligible.push(path);
   }
-  return listing;
+  const prioritized = eligible.filter((path) => priorityPaths.has(portablePathForUpload(path)));
+  const ordinary = eligible.filter((path) => !priorityPaths.has(portablePathForUpload(path)));
+  const paths = [...prioritized, ...ordinary.slice(0, Math.max(0, limit - prioritized.length))];
+  return { paths, denied, truncated: eligible.length > paths.length };
 }
 
-async function listWorkspaceFiles(root: string): Promise<WorkspaceListing> {
+async function listWorkspaceFiles(root: string, priorityPaths: ReadonlySet<string> = new Set(), limit = MAX_FILES): Promise<WorkspaceListing> {
   try {
     const { stdout } = await execFileAsync("git", ["-C", root, "ls-files", "-co", "--exclude-standard", "-z"], {
       encoding: "buffer",
       maxBuffer: 16 * 1024 * 1024,
       timeout: 15_000,
     });
-    return filterListing(Buffer.from(stdout).toString("utf8").split("\0"));
+    return filterListing(Buffer.from(stdout).toString("utf8").split("\0"), priorityPaths, limit);
   } catch {
-    return walkFallback(root);
+    const raw = await walkFallback(root, root, [], { paths: [], denied: 0, truncated: false }, priorityPaths);
+    const limited = filterListing(raw.paths, priorityPaths, limit);
+    return { paths: limited.paths, denied: raw.denied, truncated: raw.truncated || limited.truncated };
   }
 }
 
@@ -2083,6 +2312,20 @@ export async function collectGitBlock(root: string): Promise<UploadGitBlock | nu
   };
 }
 
+/** Cheap pre-scan git evidence used before the listing/file-count cap. */
+async function gitPriorityPaths(root: string): Promise<Set<string>> {
+  if (await gitText(root, ["rev-parse", "--is-inside-work-tree"]) !== "true") return new Set();
+  const prefixResult = await runGit(root, ["rev-parse", "--show-prefix"], { maxBytes: 64 * 1024, timeoutMs: 5_000 });
+  if (!prefixResult.ok || prefixResult.truncated) return new Set();
+  const prefix = prefixResult.stdout.toString("utf8").trim().replaceAll("\\", "/");
+  const status = await runGit(root, ["status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=normal", "--", "."], {
+    maxBytes: 2 * 1024 * 1024,
+    timeoutMs: 15_000,
+  });
+  if (!status.ok) return new Set();
+  return new Set(parseGitStatus(status.stdout.toString("utf8"), prefix).entries.map((entry) => entry.path));
+}
+
 /**
  * Files inside the workspace that git does not track but does not ignore
  * either: the outputs an agent leaves next to the source. A workspace without
@@ -2109,7 +2352,7 @@ async function artifactStats(root: string): Promise<Map<string, ArtifactStat>> {
       const absolute = resolve(root, path);
       const file = await lstat(absolute);
       if (!file.isFile() || file.isSymbolicLink()) continue;
-      stats.set(path, { size: file.size, mtimeMs: file.mtimeMs });
+      stats.set(path, fileSignature(file));
     } catch {
       // Live workspace: a listed file can vanish before it is inspected.
     }
@@ -2292,6 +2535,69 @@ export async function mapBounded<T, R>(items: readonly T[], limit: number, opera
   return results;
 }
 
+type AdmissionWaiter = {
+  resolve: (release: () => void) => void;
+  reject: (error: unknown) => void;
+  signal: AbortSignal | undefined;
+  onAbort: (() => void) | undefined;
+};
+
+/** One bounded pool shared by scans and uploads from every active session. */
+class CaptureAdmission {
+  private active = 0;
+  private readonly waiters: AdmissionWaiter[] = [];
+
+  constructor(private readonly limit: number) {}
+
+  acquire(signal?: AbortSignal): Promise<() => void> {
+    if (signal?.aborted) return Promise.reject(signal.reason);
+    if (this.active < this.limit) {
+      this.active += 1;
+      return Promise.resolve(this.releaseOnce());
+    }
+    return new Promise((resolvePromise, reject) => {
+      const waiter: AdmissionWaiter = {
+        resolve: (release) => resolvePromise(release),
+        reject,
+        signal,
+        onAbort: undefined,
+      };
+      waiter.onAbort = () => {
+        const index = this.waiters.indexOf(waiter);
+        if (index !== -1) this.waiters.splice(index, 1);
+        reject(signal?.reason);
+      };
+      signal?.addEventListener("abort", waiter.onAbort, { once: true });
+      this.waiters.push(waiter);
+    });
+  }
+
+  private releaseOnce(): () => void {
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.active -= 1;
+      this.pump();
+    };
+  }
+
+  private pump(): void {
+    while (this.active < this.limit && this.waiters.length > 0) {
+      const waiter = this.waiters.shift()!;
+      if (waiter.signal?.aborted) {
+        waiter.reject(waiter.signal.reason);
+        continue;
+      }
+      this.active += 1;
+      if (waiter.onAbort && waiter.signal) waiter.signal.removeEventListener("abort", waiter.onAbort);
+      waiter.resolve(this.releaseOnce());
+    }
+  }
+}
+
+const GLOBAL_CAPTURE_ADMISSION = new CaptureAdmission(4);
+
 /** Work counters for tests and profiling; never uploaded. */
 export type UploadMetrics = {
   fileStats: number;
@@ -2326,8 +2632,7 @@ function freshMetrics(): UploadMetrics {
 function redactedCacheEntry(
   path: string,
   buffer: Buffer,
-  size: number,
-  mtimeMs: number,
+  signature: FileSignature,
   uploadPath: string,
   metrics: UploadMetrics,
   texts?: { cache: RedactedTextCache; absolute: string },
@@ -2335,8 +2640,7 @@ function redactedCacheEntry(
   const redacted = redactUploadContentCounted(path, buffer.toString("utf8"));
   metrics.fileRedactions += 1;
   const entry: HashCacheEntry = {
-    size,
-    mtimeMs,
+    ...signature,
     binary: false,
     sha256: sha256Hex(redacted.text),
     bytes: Buffer.byteLength(redacted.text),
@@ -2398,6 +2702,24 @@ type ScanContext = {
   ancestors: AncestorCache;
 };
 
+/**
+ * Concurrent sessions still stat independently, but identical path signatures
+ * share the expensive read, scrub and digest pass. Entries leave this map as
+ * soon as the pass settles, so it is not a stale cache or TTL.
+ */
+const FILE_SCAN_IN_FLIGHT = new Map<string, Promise<HashCacheEntry | null>>();
+
+/** Bound metadata retained by long sessions that create and delete many paths. */
+class FileHashCache extends Map<string, HashCacheEntry> {
+  override set(path: string, entry: HashCacheEntry): this {
+    if (!this.has(path) && this.size >= MAX_FILES) {
+      const oldest = this.keys().next().value;
+      if (oldest !== undefined) this.delete(oldest);
+    }
+    return super.set(path, entry);
+  }
+}
+
 function scanContext(root: string, cache: Map<string, HashCacheEntry>, texts: RedactedTextCache, metrics: UploadMetrics): ScanContext {
   const base = resolve(root);
   return {
@@ -2414,7 +2736,7 @@ function scanContext(root: string, cache: Map<string, HashCacheEntry>, texts: Re
 
 /**
  * Stats one eligible path and, unless the per-root cache already knows the
- * file at this size and mtime, reads, redacts and hashes it. Null for anything
+ * file at this robust signature, reads, redacts and hashes it. Null for anything
  * that is not a regular file within the size cap (gone, a directory, a
  * symlink, too large) or that resolves outside the root, lexically or through
  * a symlinked directory; a binary file comes back as its binary entry. Content
@@ -2433,23 +2755,41 @@ async function inspectFile(context: ScanContext, path: string): Promise<HashCach
   metrics.fileStats += 1;
   if (!file.isFile() || file.isSymbolicLink() || file.size > MAX_UPLOAD_FILE_BYTES) return null;
   const cached = cache.get(path);
-  if (cached && cached.size === file.size && cached.mtimeMs === file.mtimeMs) return cached;
-  const uploadPath = uploadPathFor(path, cached);
-  let entry: HashCacheEntry | null = null;
-  try {
-    entry = await pool.read(absolute, file.size, (buffer) => {
-      metrics.fileReads += 1;
-      if (isBinary(buffer)) {
-        return { size: file.size, mtimeMs: file.mtimeMs, binary: true, sha256: "", bytes: 0, json: 0, clean: false, uploadPath };
-      }
-      return redactedCacheEntry(path, buffer, file.size, file.mtimeMs, uploadPath, metrics, { cache: context.texts, absolute }).entry;
-    });
-  } catch {
-    return null;
+  const signature = fileSignature(file);
+  if (cached && sameFileSignature(cached, signature)) return cached;
+  const scanKey = [
+    resolve(context.root),
+    path,
+    signature.size,
+    signature.mtimeMs,
+    signature.ctimeMs,
+    signature.ino,
+    signature.dev,
+  ].join("\0");
+  const existing = FILE_SCAN_IN_FLIGHT.get(scanKey);
+  if (existing) {
+    const entry = await existing;
+    if (entry) cache.set(path, entry);
+    await context.yielder.pause();
+    return entry;
   }
-  if (entry) cache.set(path, entry);
-  await context.yielder.pause();
-  return entry;
+  const uploadPath = uploadPathFor(path, cached);
+  const inFlight = pool.read(absolute, file.size, (buffer) => {
+    metrics.fileReads += 1;
+    if (isBinary(buffer)) {
+      return { ...signature, binary: true, sha256: "", bytes: 0, json: 0, clean: false, uploadPath };
+    }
+    return redactedCacheEntry(path, buffer, signature, uploadPath, metrics, { cache: context.texts, absolute }).entry;
+  }).catch(() => null);
+  FILE_SCAN_IN_FLIGHT.set(scanKey, inFlight);
+  try {
+    const entry = await inFlight;
+    if (entry) cache.set(path, entry);
+    await context.yielder.pause();
+    return entry;
+  } finally {
+    if (FILE_SCAN_IN_FLIGHT.get(scanKey) === inFlight) FILE_SCAN_IN_FLIGHT.delete(scanKey);
+  }
 }
 
 /** One file as files[] carries it, re-read at upload time. */
@@ -2482,11 +2822,12 @@ async function readUploadContent(
     return null;
   }
   if (!file.isFile() || file.isSymbolicLink() || file.size > MAX_UPLOAD_FILE_BYTES) return null;
+  const signature = fileSignature(file);
   const cached = cache.get(path);
   try {
     return await pool.read(absolute, file.size, (buffer): UploadContent | null => {
       metrics.fileReads += 1;
-      if (cached && !cached.binary && cached.size === file.size && cached.mtimeMs === file.mtimeMs) {
+      if (cached && !cached.binary && sameFileSignature(cached, signature)) {
         if (cached.clean) {
           if (cached.bytes === buffer.length && sha256Hex(buffer) === cached.sha256) return { content: buffer.toString("utf8"), entry: cached };
         } else if (texts.size > 0) {
@@ -2498,9 +2839,9 @@ async function readUploadContent(
         }
       }
       if (isBinary(buffer)) return null;
-      const { entry, text } = redactedCacheEntry(path, buffer, file.size, file.mtimeMs, uploadPathFor(path, cached), metrics, { cache: texts, absolute });
+      const { entry, text } = redactedCacheEntry(path, buffer, signature, uploadPathFor(path, cached), metrics, { cache: texts, absolute });
       // The same digest keeps the cached entry, which the manifest may share.
-      if (cached && cached.sha256 === entry.sha256 && cached.size === entry.size && cached.mtimeMs === entry.mtimeMs) {
+      if (cached && cached.sha256 === entry.sha256 && sameFileSignature(cached, signature)) {
         return { content: text, entry: cached };
       }
       cache.set(path, entry);
@@ -2537,8 +2878,8 @@ type SnapshotCandidate = {
   bytes: number;
   /** Serialised files[] cost: overhead, path and JSON-encoded content. */
   cost: number;
-  /** Touched this session, or named by git status or the diff. */
-  priority: boolean;
+  /** Lower ranks are more relevant and survive caps first. */
+  relevance: number;
 };
 
 /**
@@ -2567,18 +2908,23 @@ function writtenSince(mtimeMs: number, since: number, now = Date.now()): boolean
  * absence (a file the turn created), or null when every one saw it only once
  * written, so the edit stays in the turn.
  */
-function turnBaseline(manifest: Manifest, since: number | null, earlier: ReadonlyArray<TurnBaseline | null>): TurnBaseline {
+function turnBaseline(
+  manifest: Manifest,
+  since: number | null,
+  earlier: ReadonlyArray<TurnBaseline | null>,
+  forcePaths: ReadonlySet<string> = new Set(),
+): TurnBaseline {
   if (since === null) return manifest;
   const now = Date.now();
   let baseline: Map<string, HashCacheEntry | null> | null = null;
   for (const [path, entry] of manifest) {
-    if (!writtenSince(entry.mtimeMs, since, now)) continue;
+    if (!forcePaths.has(path) && !writtenSince(entry.mtimeMs, since, now) && !writtenSince(entry.ctimeMs, since, now)) continue;
     baseline ??= new Map(manifest);
     let known: HashCacheEntry | null | undefined = null;
     for (const source of earlier) {
       if (!source) continue;
       const seen = source.get(path);
-      if (seen === null || (seen && writtenSince(seen.mtimeMs, since, now))) continue;
+      if (seen === null || (seen && (writtenSince(seen.mtimeMs, since, now) || writtenSince(seen.ctimeMs, since, now)))) continue;
       known = seen;
       break;
     }
@@ -2593,9 +2939,10 @@ function turnBaseline(manifest: Manifest, since: number | null, earlier: Readonl
  * traced read or an attachment journals a path too): written since the
  * turn's prompt, or, before any prompt, moved since the cache last saw it.
  */
-function writtenThisTurn(turnStartedAt: number | null, cached: HashCacheEntry | undefined, file: { size: number; mtimeMs: number }): boolean {
+function writtenThisTurn(turnStartedAt: number | null, cached: HashCacheEntry | undefined, file: FileSignature): boolean {
+  if (cached && !sameFileSignature(cached, file)) return true;
   if (turnStartedAt !== null) return writtenSince(file.mtimeMs, turnStartedAt);
-  return cached !== undefined && (cached.size !== file.size || cached.mtimeMs !== file.mtimeMs);
+  return cached !== undefined && !sameFileSignature(cached, file);
 }
 
 /** Whether the first 8 KiB of a file read as binary (false when it cannot be read). */
@@ -2618,11 +2965,30 @@ function candidateCost(entry: HashCacheEntry): number {
 }
 
 /** The changed entries of a manifest as candidates, in manifest order. */
-function candidatesFor(scan: ScanResult, priorityPaths: ReadonlySet<string>): SnapshotCandidate[] {
+const GENERATED_PATH_PATTERN = /(^|\/)(?:dist|build|out|coverage|\.next|\.cache|target)(?:\/|$)|(?:\.min|\.map)$/i;
+const ASSOCIATED_PATH_PATTERN = /(^|\/)(?:test|tests|__tests__|spec|specs)(?:\/|$)|\.(?:test|spec)\.[^.]+$|(^|\/)(?:package(?:-lock)?\.json|pnpm-lock\.yaml|yarn\.lock|bun\.lockb?|tsconfig(?:\.[^/]+)?\.json|vitest\.config\.[^.]+|jest\.config\.[^.]+|webpack\.config\.[^.]+|vite\.config\.[^.]+|manifest\.[^.]+)$/i;
+
+function relevanceForPath(path: string, toolRelevance: ReadonlyMap<string, number>, gitPaths: ReadonlySet<string>): number {
+  const portable = portablePathForUpload(path);
+  const tool = toolRelevance.get(path) ?? toolRelevance.get(portable);
+  if (tool !== undefined) return tool;
+  if (ASSOCIATED_PATH_PATTERN.test(portable)) return 2;
+  if (gitPaths.has(portable)) return 3;
+  if (GENERATED_PATH_PATTERN.test(portable)) return 5;
+  return 4;
+}
+
+function candidatesFor(scan: ScanResult, toolRelevance: ReadonlyMap<string, number>, gitPaths: ReadonlySet<string>): SnapshotCandidate[] {
   const candidates: SnapshotCandidate[] = [];
   for (const [path, entry] of scan.manifest) {
     if (scan.changed && !scan.changed.has(path)) continue;
-    candidates.push({ path, uploadPath: entry.uploadPath, bytes: entry.bytes, cost: candidateCost(entry), priority: priorityPaths.has(entry.uploadPath) });
+    candidates.push({
+      path,
+      uploadPath: entry.uploadPath,
+      bytes: entry.bytes,
+      cost: candidateCost(entry),
+      relevance: relevanceForPath(path, toolRelevance, gitPaths),
+    });
   }
   return candidates;
 }
@@ -2637,10 +3003,12 @@ function countRemoved(previous: Manifest | null, manifest: Manifest): number {
 
 /**
  * Lists and inspects every eligible file. Unchanged files are recognised by
- * size + mtime through the per-root cache, so a rescan of a settled tree costs
- * a stat per file and no reads. The cache is rebuilt from what the listing
- * still names, so entries for removed paths go with it. `onListing` sees the
- * listing before any file is read.
+ * robust file signatures through the per-root cache, so a rescan of a settled tree costs
+ * a stat per file and no reads. Only paths the current listing names are
+ * selected. The metadata cache is bounded to MAX_FILES and shared by
+ * overlapping sessions; entries are retained because every reuse
+ * checks the complete stat signature, including ctime/inode/device. `onListing`
+ * sees the listing before any file is read.
  */
 async function scanWorkspaceFull(
   root: string,
@@ -2649,14 +3017,15 @@ async function scanWorkspaceFull(
   previous: Manifest | null,
   includeAll: boolean,
   metrics: UploadMetrics,
+  priorityPaths: ReadonlySet<string> = new Set(),
   onListing?: (paths: readonly string[]) => void,
+  listFiles: () => Promise<WorkspaceListing> = () => listWorkspaceFiles(root, priorityPaths),
 ): Promise<ScanResult> {
   metrics.fullScans += 1;
-  const listing = await listWorkspaceFiles(root);
+  const listing = await listFiles();
   onListing?.(listing.paths);
   const context = scanContext(root, cache, texts, metrics);
   const entries = await mapBounded(listing.paths, SCAN_CONCURRENCY, (path) => inspectFile(context, path));
-  cache.clear();
   const manifest: Manifest = new Map();
   const changed = includeAll ? null : new Set<string>();
   listing.paths.forEach((path, index) => {
@@ -2672,7 +3041,7 @@ async function scanWorkspaceFull(
     changed,
     removed: countRemoved(previous, manifest),
     deniedCount: listing.denied,
-    manifestTruncated: listing.paths.length >= MAX_FILES,
+    manifestTruncated: listing.truncated || listing.paths.length >= MAX_FILES,
   };
 }
 
@@ -2745,8 +3114,9 @@ async function scanDirtyPaths(
 }
 
 /**
- * Paths whose content a capped snapshot keeps first: what the session touched
- * plus what git reports as modified, keyed the way files[] names them.
+ * Paths that were touched by the session or named by git, keyed the way
+ * files[] names them. The weighted candidate ranking adds associated and
+ * generated-file rules after this early evidence is collected.
  */
 function snapshotPriorityPaths(touched: Iterable<string>, git: UploadGitBlock | null): Set<string> {
   const paths = new Set<string>();
@@ -2765,8 +3135,9 @@ function snapshotPriorityPaths(touched: Iterable<string>, git: UploadGitBlock | 
  * escaping cannot push the envelope past what the raw byte count promised.
  */
 function selectSnapshotContent(candidates: SnapshotCandidate[], budget: number): { selected: Set<string>; omittedCount: number; omittedBytes: number } {
-  // A stable sort: equal candidates keep manifest order.
-  const ordered = [...candidates].sort((a, b) => Number(b.priority) - Number(a.priority) || a.bytes - b.bytes);
+  // Relevance wins before size. Path order makes equal inputs reproducible
+  // across sessions whose filesystem listing order differs.
+  const ordered = [...candidates].sort((a, b) => a.relevance - b.relevance || a.bytes - b.bytes || a.path.localeCompare(b.path));
   const selected = new Set<string>();
   let used = 0;
   let omittedCount = 0;
@@ -2792,12 +3163,48 @@ function serializedBytes(value: unknown): number {
  * gateway's `omnirush_account_required`) rather than a stale device token.
  * Reading the body also releases the connection.
  */
-async function responseSignalsAccountRequired(response: Response): Promise<boolean> {
+async function boundedResponseText(response: Response, maxBytes = MAX_RESPONSE_BODY_BYTES): Promise<string> {
   try {
-    return (await response.text()).includes(ACCOUNT_REQUIRED_MARKER);
+    if (!response.body) return (await response.text()).slice(0, maxBytes);
+    const reader = response.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let bytes = 0;
+    try {
+      while (bytes < maxBytes) {
+        const next = await reader.read();
+        if (next.done) break;
+        const chunk = next.value;
+        const take = Math.min(chunk.byteLength, maxBytes - bytes);
+        if (take > 0) {
+          chunks.push(chunk.subarray(0, take));
+          bytes += take;
+        }
+        if (take < chunk.byteLength) break;
+      }
+    } finally {
+      await reader.cancel().catch(() => undefined);
+    }
+    const result = new Uint8Array(bytes);
+    let offset = 0;
+    for (const chunk of chunks) {
+      result.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    return new TextDecoder().decode(result);
   } catch {
-    return false;
+    return "";
   }
+}
+
+async function responseSignalsAccountRequired(response: Response): Promise<boolean> {
+  return (await boundedResponseText(response)).includes(ACCOUNT_REQUIRED_MARKER);
+}
+
+async function responseSignalsUnsupportedSchema(response: Response): Promise<boolean> {
+  const body = (await boundedResponseText(response)).toLowerCase();
+  return body.includes("unsupported_schema")
+    || body.includes("unsupported schema")
+    || (body.includes("schema") && (body.includes("unsupported") || body.includes("not supported")));
 }
 
 /**
@@ -2909,7 +3316,8 @@ type EnvelopeBody = {
   manifest: () => Iterable<HashCacheEntry>;
   /** Computed once files[] is written, so cap omissions are known. */
   privacy: () => Record<string, unknown>;
-  trace?: unknown[];
+  trace?: readonly unknown[];
+  schemaVersion?: 2 | 3;
 };
 
 function uploadEnvironment(appVersion: string | undefined, engineVersion: string | undefined, gitVersion: string | null): UploadEnvironment {
@@ -3038,13 +3446,22 @@ export class SessionUploader {
    * Per workspace root, shared by every session open on it: the hash cache,
    * and when the reconcile pass last ran (one pass serves every session).
    */
-  private readonly caches = new Map<string, { refs: number; entries: Map<string, HashCacheEntry>; reconciling: boolean; reconciledAt: number }>();
+  private readonly caches = new Map<string, {
+    refs: number;
+    entries: Map<string, HashCacheEntry>;
+    listingInFlight: Map<string, Promise<WorkspaceListing>>;
+    reconcileInFlight: Promise<void> | null;
+  }>();
   /** Redacted text of the files the scrubber changed, shared by every root. */
   private readonly texts: RedactedTextCache;
   /** The scrubbed texts sent, by redacted digest: the bases of "turn.diff" events. */
   private readonly bases: TurnBaseStore;
   private readonly onSessionClosed?: (sessionId: string) => void;
   private readonly onPathTouched?: (sessionId: string, path: string) => void;
+  private readonly fileUploader?: SessionUploaderOptions["uploadFile"];
+  private readonly capabilityProbe?: SessionUploaderOptions["capabilities"];
+  private traceSchemaCache: { version: 2 | 3; expiresAt: number } | null = null;
+  private traceSchemaProbe: Promise<2 | 3> | null = null;
   /** Work counters for tests and profiling. */
   readonly metrics: UploadMetrics = freshMetrics();
 
@@ -3053,6 +3470,8 @@ export class SessionUploader {
     this.token = (options.accessToken ?? process.env.OMNIRUSH_ACCESS_TOKEN ?? "").trim();
     this.fetcher = options.fetch ?? externalFetch;
     this.uploader = options.upload;
+    this.fileUploader = options.uploadFile;
+    this.capabilityProbe = options.capabilities;
     this.refreshAccessToken = options.refreshAccessToken;
     this.log = options.log ?? (() => undefined);
     const stateDir = options.stateDir ? resolve(options.stateDir) : null;
@@ -3217,7 +3636,7 @@ export class SessionUploader {
   }
 
   get enabled(): boolean {
-    return Boolean(this.uploader || (this.uploadUrl && this.token));
+    return Boolean(this.uploader || this.fileUploader || (this.uploadUrl && this.token));
   }
 
   private environment(): Promise<UploadEnvironment> {
@@ -3232,6 +3651,37 @@ export class SessionUploader {
       return uploadEnvironment(this.appVersion, this.engineVersion, gitVersion);
     })();
     return this.environmentCache;
+  }
+
+  private negotiatedTraceSchema(force = false): Promise<2 | 3> {
+    if (!force && this.traceSchemaCache && this.traceSchemaCache.expiresAt > Date.now()) {
+      return Promise.resolve(this.traceSchemaCache.version);
+    }
+    if (this.traceSchemaProbe) return this.traceSchemaProbe;
+    this.traceSchemaProbe = (async () => {
+      let version: 2 | 3 = 2;
+      if (this.capabilityProbe) {
+        try {
+          const capabilities = await this.capabilityProbe();
+          version = capabilities.canonical_trace
+            && Array.isArray(capabilities.schema_versions)
+            && capabilities.schema_versions.includes(TRACE_SCHEMA_VERSION)
+            ? 3
+            : 2;
+        } catch {
+          version = 2;
+        }
+      }
+      this.traceSchemaCache = { version, expiresAt: Date.now() + TRACE_CAPABILITY_TTL_MS };
+      return version;
+    })().finally(() => {
+      this.traceSchemaProbe = null;
+    });
+    return this.traceSchemaProbe;
+  }
+
+  private downgradeTraceSchema(): void {
+    this.traceSchemaCache = { version: 2, expiresAt: Date.now() + TRACE_CAPABILITY_TTL_MS };
   }
 
   startSession(sessionId: string, workspaceId: string, root: string): void {
@@ -3270,6 +3720,8 @@ export class SessionUploader {
       turnInProgress: false,
       changesHeld: false,
       turnSkipped: new Map(),
+      turnWrittenPaths: new Map(),
+      relevance: new Map(),
       cache: this.acquireCache(root),
       listing: { denied: 0, truncated: false },
       dirty: new Set(),
@@ -3454,6 +3906,8 @@ export class SessionUploader {
 
   /** Tells the project archive that the session touched `path` (workspace-relative). */
   private reportTouched(state: SessionState, path: string): void {
+    const current = state.relevance.get(path);
+    if (current === undefined || current > 4) state.relevance.set(path, 4);
     try {
       this.onPathTouched?.(state.id, path);
     } catch {
@@ -3496,16 +3950,18 @@ export class SessionUploader {
   private async reconcile(state: SessionState): Promise<void> {
     if (state.finished || state.watchMode !== "watching" || !state.manifest) return;
     const shared = this.caches.get(resolve(state.root));
-    // Another session's timer already ran the pass for this interval.
-    if (!shared || shared.entries !== state.cache || shared.reconciling || Date.now() - shared.reconciledAt < this.fallbackScanMs * 0.9) return;
+    if (!shared || shared.entries !== state.cache) return;
+    if (shared.reconcileInFlight) {
+      await shared.reconcileInFlight;
+      return;
+    }
     const sessions = [...this.sessions.values()]
       .filter((other) => other.cache === state.cache && !other.finished && other.watchMode === "watching" && other.manifest !== null);
-    shared.reconciling = true;
-    shared.reconciledAt = Date.now();
-    this.metrics.reconciles += 1;
-    try {
+    const releaseAdmission = await GLOBAL_CAPTURE_ADMISSION.acquire(this.account.signal);
+    const pass = (async () => {
+      this.metrics.reconciles += 1;
       const cache = state.cache;
-      const listing = await listWorkspaceFiles(state.root);
+      const listing = await this.listWorkspaceFilesShared(state.root, new Set());
       const yielder = new LoopYielder();
       await mapBounded(listing.paths, SCAN_CONCURRENCY, async (path) => {
         const file = await lstat(resolve(state.root, path)).catch(() => null);
@@ -3514,9 +3970,12 @@ export class SessionUploader {
         const cached = cache.get(path);
         for (const session of sessions) {
           const known = session.manifest?.get(path);
+          const signature = eligible ? fileSignature(eligible) : null;
           const stale = eligible === null
             ? known !== undefined
-            : !cached || cached.size !== eligible.size || cached.mtimeMs !== eligible.mtimeMs
+            : signature === null
+              ? true
+              : cached === undefined || !sameFileSignature(cached, signature)
               || (!cached.binary && known?.sha256 !== cached.sha256) || (cached.binary && known !== undefined);
           if (stale) {
             this.markDirty(session, path);
@@ -3528,14 +3987,16 @@ export class SessionUploader {
       const listed = new Set(listing.paths);
       for (const session of sessions) {
         for (const path of session.manifest?.keys() ?? []) {
-          if (listed.has(path)) continue;
+        if (listed.has(path)) continue;
           this.markDirty(session, path);
           this.reportTouched(session, path);
         }
       }
-    } finally {
-      shared.reconciling = false;
-    }
+    })().finally(() => releaseAdmission());
+    shared.reconcileInFlight = pass;
+    await pass.finally(() => {
+      if (shared.reconcileInFlight === pass) shared.reconcileInFlight = null;
+    });
     for (const session of sessions) {
       if (!session.finished && (session.dirty.size > 0 || session.dirtyOverflow)) this.scheduleChange(session, "periodic");
     }
@@ -3624,11 +4085,32 @@ export class SessionUploader {
     const key = resolve(root);
     let shared = this.caches.get(key);
     if (!shared) {
-      shared = { refs: 0, entries: new Map(), reconciling: false, reconciledAt: 0 };
+      shared = { refs: 0, entries: new FileHashCache(), listingInFlight: new Map(), reconcileInFlight: null };
       this.caches.set(key, shared);
     }
     shared.refs += 1;
     return shared.entries;
+  }
+
+  private listingKey(priorityPaths: ReadonlySet<string>): string {
+    return [...priorityPaths].map(portablePathForUpload).sort().join("\0");
+  }
+
+  private async listWorkspaceFilesShared(root: string, priorityPaths: ReadonlySet<string>): Promise<WorkspaceListing> {
+    const shared = this.caches.get(resolve(root));
+    if (!shared) return listWorkspaceFiles(root, priorityPaths);
+    const key = this.listingKey(priorityPaths);
+    let inFlight = shared.listingInFlight.get(key);
+    if (!inFlight) {
+      inFlight = listWorkspaceFiles(root, priorityPaths, MAX_RAW_LISTING_FILES);
+      shared.listingInFlight.set(key, inFlight);
+      void inFlight.finally(() => {
+        if (shared.listingInFlight.get(key) === inFlight) shared.listingInFlight.delete(key);
+      }).catch(() => undefined);
+    }
+    const raw = await inFlight;
+    const limited = filterListing(raw.paths, priorityPaths, MAX_FILES);
+    return { paths: limited.paths, denied: raw.denied, truncated: raw.truncated || limited.truncated };
   }
 
   private releaseCache(state: SessionState): void {
@@ -3676,7 +4158,7 @@ export class SessionUploader {
   recordTrace(sessionId: string, type: string, data?: unknown): void {
     const state = this.sessions.get(sessionId);
     if (!state || state.finished) return;
-    for (const candidate of pathCandidates(data)) this.recordTouchedPath(state, candidate);
+    for (const evidence of knownToolPathEvidence(type, data)) this.recordTouchedPath(state, evidence.path, evidence.relevance);
     if (type === SUBAGENT_MODEL_FALLBACK_TRACE) {
       const entry = subagentModelFallback(data);
       if (entry) {
@@ -3697,10 +4179,13 @@ export class SessionUploader {
     if (state.trace.length > MAX_UPLOAD_TRACE_EVENTS) state.trace.splice(0, state.trace.length - MAX_UPLOAD_TRACE_EVENTS);
   }
 
-  private recordTouchedPath(state: SessionState, candidate: string): void {
+  private recordTouchedPath(state: SessionState, candidate: string, relevance = 4): void {
     const path = workspaceRelativePath(state.root, candidate.replaceAll("\\", "/"));
     if (!path) return;
     this.reportTouched(state, path);
+    const current = state.relevance.get(path);
+    if (current === undefined || relevance < current) state.relevance.set(path, relevance);
+    if (relevance === 0 && state.turnStartedAt !== null) state.turnWrittenPaths.set(path, Date.now());
     if (isUploadPathDenied(path) || state.touchedPaths.has(path)) return;
     state.touchedPaths.add(path);
     this.markDirty(state, path);
@@ -3764,7 +4249,6 @@ export class SessionUploader {
       state.childSessionIds.push(child.childSessionId);
     }
     if (child.lastMessageId) state.childCheckpoints.set(child.childSessionId, child.lastMessageId);
-    for (const candidate of pathCandidates(child.messages)) this.recordTouchedPath(state, candidate);
     this.appendTrace(state, "session.child", {
       child_session_id: child.childSessionId,
       parent_session_id: child.parentSessionId,
@@ -3850,11 +4334,13 @@ export class SessionUploader {
     let emitted = 0;
     for (const [path, stat] of current) {
       const previous = baseline.get(path);
-      if (previous && previous.size === stat.size && previous.mtimeMs === stat.mtimeMs) continue;
+      if (previous && sameFileSignature(previous, stat)) continue;
       // The turn's change snapshot must carry it even where no watcher saw it
       // land (a tool writing into a directory beyond MAX_WATCH_ROOTS).
       this.markDirty(state, path);
       this.reportTouched(state, path);
+      state.relevance.set(path, 0);
+      if (state.turnStartedAt !== null) state.turnWrittenPaths.set(path, Date.now());
       if (emitted >= MAX_ARTIFACT_EVENTS_PER_TURN || stat.size > MAX_ARTIFACT_HASH_BYTES) continue;
       try {
         const sha256 = await sha256File(resolve(state.root, path));
@@ -3876,6 +4362,10 @@ export class SessionUploader {
   captureSnapshot(sessionId: string, trigger: "prompt" | "turn_completed"): void {
     const state = this.sessions.get(sessionId);
     if (!state || state.finished) return;
+    if (trigger === "prompt") {
+      state.relevance.clear();
+      state.turnWrittenPaths.clear();
+    }
     // The artifact baseline must reflect the workspace as the turn begins, not
     // once the queued start snapshot has finished uploading.
     if (trigger === "prompt") state.artifactBaseline = artifactStats(state.root);
@@ -3907,7 +4397,10 @@ export class SessionUploader {
         return this.recordTurnDiff(state, new Map([...taken].map(([path, entry]) => [path, entry ?? current.get(path)!])), next);
       }
       // The turn is measured from the workspace as its prompt found it.
-      state.turnManifest = current && turnBaseline(current, startedAt, [previous, state.turnManifest]);
+      const forcePaths = new Set(
+        [...state.turnWrittenPaths].filter(([, at]) => startedAt === null || at >= startedAt).map(([path]) => path),
+      );
+      state.turnManifest = current && turnBaseline(current, startedAt, [previous, state.turnManifest], forcePaths);
       for (const [path, at] of state.turnSkipped) if (startedAt !== null && at < startedAt) state.turnSkipped.delete(path);
     });
   }
@@ -3927,6 +4420,7 @@ export class SessionUploader {
     const skipped = state.turnSkipped;
     state.turnManifest = after;
     state.turnSkipped = new Map(next === null ? [] : [...skipped].filter(([, at]) => at >= next));
+    state.turnWrittenPaths = new Map(next === null ? [] : [...state.turnWrittenPaths].filter(([, at]) => at >= next));
     if (state.finished || !before || !after) return;
     const changes: TurnChange[] = [];
     if (before !== after) {
@@ -4003,7 +4497,9 @@ export class SessionUploader {
     if (!state || state.finished) return;
     const pendingTrace = state.trace.splice(0);
     if (finalTrace !== undefined) {
-      for (const candidate of pathCandidates(finalTrace)) this.recordTouchedPath(state, candidate);
+      for (const evidence of knownToolPathEvidence("session.completed", finalTrace)) {
+        this.recordTouchedPath(state, evidence.path, evidence.relevance);
+      }
     }
     state.finished = true;
     if (state.changeTimer) clearTimeout(state.changeTimer);
@@ -4035,7 +4531,9 @@ export class SessionUploader {
     if (!state || state.finished) return;
     const pendingTrace = state.trace.splice(0);
     if (finalTrace !== undefined) {
-      for (const candidate of pathCandidates(finalTrace)) this.recordTouchedPath(state, candidate);
+      for (const evidence of knownToolPathEvidence("turn.completed", finalTrace)) {
+        this.recordTouchedPath(state, evidence.path, evidence.relevance);
+      }
       pendingTrace.push({ at: new Date().toISOString(), type: "turn.completed", data: finalTrace });
     }
     if (pendingTrace.length === 0) return;
@@ -4261,6 +4759,7 @@ export class SessionUploader {
     try {
       const file = await lstat(absolute);
       const written = writtenThisTurn(state.turnStartedAt, state.cache.get(path), file);
+      if (written && state.turnStartedAt !== null) state.turnWrittenPaths.set(path, Date.now());
       if (file.isFile() && !file.isSymbolicLink() && file.size > MAX_CHANGE_JOURNAL_BYTES && written) state.turnSkipped.set(path, file.mtimeMs);
       if (!file.isFile() || file.isSymbolicLink() || file.size > MAX_UPLOAD_FILE_BYTES) {
         entry = { path, at: new Date().toISOString(), status: "skipped" };
@@ -4273,12 +4772,15 @@ export class SessionUploader {
         const buffer = await readFile(absolute);
         this.metrics.fileReads += 1;
         if (buffer.length > MAX_UPLOAD_FILE_BYTES || isBinary(buffer)) {
-          if (written) state.turnSkipped.set(path, file.mtimeMs);
+          if (written) {
+            state.turnWrittenPaths.set(path, Date.now());
+            state.turnSkipped.set(path, file.mtimeMs);
+          }
           entry = { path, at: new Date().toISOString(), status: "skipped" };
         } else {
           // The journal's read doubles as the snapshot's: the cache learns the
           // file now, so the next capture only stats it.
-          const redacted = redactedCacheEntry(path, buffer, file.size, file.mtimeMs, uploadPathFor(path, state.cache.get(path)), this.metrics, { cache: this.texts, absolute });
+          const redacted = redactedCacheEntry(path, buffer, fileSignature(file), uploadPathFor(path, state.cache.get(path)), this.metrics, { cache: this.texts, absolute });
           state.cache.set(path, redacted.entry);
           entry = { path, at: new Date().toISOString(), status: "present", content: redacted.text, sha256: redacted.entry.sha256 };
         }
@@ -4356,14 +4858,36 @@ export class SessionUploader {
         this.acknowledgeJournal(state, dropped);
         for (const entry of dropped) cache.delete(entry.path);
       }
-      const scan = targeted && previous !== null
-        ? await scanDirtyPaths(state.root, cache, this.texts, previous, reported, ignored, state.listing, this.metrics)
-        : await scanWorkspaceFull(state.root, cache, this.texts, previous, type === "start", this.metrics,
-          type === "start" ? (paths) => this.installWatchers(state, paths) : undefined);
+      // Collect the cheap relevance evidence before the listing cap. A late
+      // alphabetical path named by a tool or git status must not disappear
+      // merely because the workspace has many files.
+      const preGitPaths = targeted ? new Set<string>() : await gitPriorityPaths(state.root);
+      const preScanPaths = new Set<string>([
+        ...state.relevance.keys(),
+        ...state.touchedPaths,
+        ...preGitPaths,
+      ].map(portablePathForUpload));
+      const releaseScan = await GLOBAL_CAPTURE_ADMISSION.acquire(this.account.signal);
+      let scan: ScanResult;
+      try {
+        scan = targeted && previous !== null
+          ? await scanDirtyPaths(state.root, cache, this.texts, previous, reported, ignored, state.listing, this.metrics)
+          : await scanWorkspaceFull(state.root, cache, this.texts, previous, type === "start", this.metrics,
+            preScanPaths,
+            type === "start" ? (paths) => this.installWatchers(state, paths) : undefined,
+            () => this.listWorkspaceFilesShared(state.root, preScanPaths));
+      } finally {
+        releaseScan();
+      }
       // What moved on disk since the last snapshot, where no watcher may have
       // seen it (a polled workspace). Only against an accepted snapshot: with
       // none yet (the start one was refused), every file counts as changed.
-      if (previous !== null) for (const path of scan.changed ?? []) this.reportTouched(state, path);
+      if (previous !== null) {
+        for (const path of scan.changed ?? []) {
+          this.reportTouched(state, path);
+          if (state.turnStartedAt !== null) state.turnWrittenPaths.set(path, Date.now());
+        }
+      }
       // A change capture that found nothing moved stops at one `git rev-parse`
       // (a commit changes history without touching a file); the full git block
       // with its status, log and diff is read only for a snapshot that goes out.
@@ -4374,7 +4898,11 @@ export class SessionUploader {
       }
       // Its status and diff name the files a capped snapshot must keep.
       const git = await collectGitBlock(state.root);
-      const candidates = candidatesFor(scan, snapshotPriorityPaths(state.touchedPaths, git));
+      const gitPaths = new Set<string>([
+        ...preGitPaths,
+        ...snapshotPriorityPaths([], git),
+      ]);
+      const candidates = candidatesFor(scan, state.relevance, gitPaths);
       const environment = await this.environment();
       const rootName = workspaceRootName(state.root);
       const touchedPaths = this.touchedPathsForUpload(state);
@@ -4499,29 +5027,35 @@ export class SessionUploader {
 
   private async uploadTrace(state: SessionState, traceEvents: TraceEvent[]): Promise<void> {
     if (traceEvents.length === 0) return;
-    const bounded = boundedTracePayload(state, traceEvents, MAX_TRACE_BYTES);
-    const content = bounded.toString("utf8");
-    let events: unknown[] = [];
-    try {
-      const parsed = JSON.parse(content) as { events?: unknown };
-      if (Array.isArray(parsed.events)) events = parsed.events;
-    } catch {
-      events = [];
+    let schemaVersion = await this.negotiatedTraceSchema();
+    let downgraded = false;
+    const batches = boundedTraceBatches(state, traceEvents, MAX_TRACE_BYTES);
+    for (const batch of batches) {
+      const makeBody = async (version: 2 | 3): Promise<EnvelopeBody> => ({
+          schemaVersion: version,
+          extras: {
+            workspace: { root_name: workspaceRootName(state.root), git: null },
+            environment: await this.environment(),
+            touched_paths: this.touchedPathsForUpload(state),
+            files_scope: "full",
+          },
+          writeFiles: version === TRACE_SCHEMA_VERSION
+            ? async () => undefined
+            : async (emit) => {
+                await emit({ path: "__omnirush__/trace.json", content: batch.content, sha256: sha256Hex(batch.content) });
+              },
+          manifest: () => [],
+          privacy: () => ({ ...PRIVACY_POLICY }),
+          trace: batch.events,
+        });
+      let uploaded = await this.uploadEnvelope(state, "trace", "trace_flush", await makeBody(schemaVersion));
+      if (uploaded === "unsupported_schema" && schemaVersion === TRACE_SCHEMA_VERSION && !downgraded) {
+        downgraded = true;
+        schemaVersion = 2;
+        this.downgradeTraceSchema();
+        uploaded = await this.uploadEnvelope(state, "trace", "trace_flush", await makeBody(schemaVersion));
+      }
     }
-    await this.uploadEnvelope(state, "trace", "trace_flush", {
-      extras: {
-        workspace: { root_name: workspaceRootName(state.root), git: null },
-        environment: await this.environment(),
-        touched_paths: this.touchedPathsForUpload(state),
-        files_scope: "full",
-      },
-      writeFiles: async (emit) => {
-        await emit({ path: "__omnirush__/trace.json", content, sha256: sha256Hex(content) });
-      },
-      manifest: () => [],
-      privacy: () => ({ ...PRIVACY_POLICY }),
-      trace: events,
-    });
   }
 
   /**
@@ -4530,9 +5064,47 @@ export class SessionUploader {
    * sending the body and the gateway's answer share one deadline) or sooner
    * by `cancel`.
    */
-  private send(sessionId: string, compressed: Uint8Array, deadline: AbortSignal, cancel?: AbortSignal): Promise<Response> {
+  private uploadPathOwned(path: string): boolean {
+    const absolute = resolve(path);
+    return [this.tempDir, this.spoolDir]
+      .filter((directory): directory is string => directory !== null)
+      .some((directory) => {
+        const relativePath = relative(resolve(directory), absolute);
+        return relativePath !== "" && relativePath !== ".." && !relativePath.startsWith(`..${sep}`) && !relativePath.includes(sep + sep);
+      });
+  }
+
+  private async validateCompressedArtifact(compressed: CompressedArtifact): Promise<void> {
+    if (!this.uploadPathOwned(compressed.path)) throw new Error("session upload artifact is outside its owned directory");
+    const file = await lstat(compressed.path);
+    if (!file.isFile() || file.isSymbolicLink() || file.size !== compressed.size) {
+      throw new Error("session upload artifact changed or is not a regular file");
+    }
+  }
+
+  private async send(sessionId: string, compressed: Uint8Array | CompressedArtifact, deadline: AbortSignal, cancel?: AbortSignal): Promise<Response> {
     const signal = cancel ? AbortSignal.any([deadline, cancel]) : deadline;
     if (signal.aborted) return Promise.reject(signal.reason);
+    if ("path" in compressed) {
+      await this.validateCompressedArtifact(compressed);
+      if (this.fileUploader) return untilAborted(this.fileUploader(sessionId, compressed.path, compressed.size, signal), signal);
+      if (!this.uploader) {
+        const body = fileReadableBody(compressed.path, signal);
+        const init: RequestInit & { duplex: "half" } = {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${this.token}`,
+            "Content-Type": "application/zstd",
+            "X-OmniRush-Session-ID": sessionId,
+          },
+          body,
+          duplex: "half",
+          signal,
+        };
+        return this.fetcher(this.uploadUrl!, init);
+      }
+      return untilAborted(readFile(compressed.path).then((bytes) => this.uploader!(sessionId, bytes, signal)), signal);
+    }
     if (this.uploader) return untilAborted(this.uploader(sessionId, compressed, signal), signal);
     return this.fetcher(this.uploadUrl!, {
       method: "POST",
@@ -4566,8 +5138,14 @@ export class SessionUploader {
    * could hold the session's queue for many minutes, so the envelope goes to
    * the spool at once and the spool drain retries it on its own backoff.
    */
-  private async transmit(sessionId: string, compressed: Uint8Array, attempts = UPLOAD_ATTEMPTS, cancel?: AbortSignal): Promise<TransmitOutcome> {
-    const timeoutMs = sessionUploadTimeoutMs(compressed.byteLength, this.uploadBudget);
+  private async transmit(
+    sessionId: string,
+    compressed: Uint8Array | CompressedArtifact,
+    attempts = UPLOAD_ATTEMPTS,
+    cancel?: AbortSignal,
+    schemaVersion: 2 | 3 = 2,
+  ): Promise<TransmitOutcome> {
+    const timeoutMs = sessionUploadTimeoutMs("path" in compressed ? compressed.size : compressed.byteLength, this.uploadBudget);
     let lastReason = "session upload unavailable";
     let refreshAttempted = false;
     let attempt = 0;
@@ -4598,6 +5176,9 @@ export class SessionUploader {
           if (!refresh.refreshed) return { ok: false, retryable: true, reason: lastReason };
           // The retry with the fresh token is not one of the transport attempts.
           continue;
+        }
+        if (response.status === 422 && schemaVersion === TRACE_SCHEMA_VERSION && await responseSignalsUnsupportedSchema(response)) {
+          return { ok: false, retryable: false, reason: lastReason, unsupportedSchema: true };
         }
         await response.body?.cancel().catch(() => undefined);
         if (!RETRYABLE_STATUSES.has(response.status)) return { ok: false, retryable: false, reason: lastReason };
@@ -4650,8 +5231,13 @@ export class SessionUploader {
    * retryable failure moves the file into the spool instead. Resolves with
    * whether the envelope was accepted (delivered or spooled).
    */
-  private async uploadEnvelope(state: SessionState, snapshotType: SnapshotType, trigger: UploadTrigger, body: EnvelopeBody): Promise<boolean> {
-    if (!this.uploadUrl && !this.uploader) return false;
+  private async uploadEnvelope(
+    state: SessionState,
+    snapshotType: SnapshotType,
+    trigger: UploadTrigger,
+    body: EnvelopeBody,
+  ): Promise<boolean | "unsupported_schema"> {
+    if (!this.uploadUrl && !this.uploader && !this.fileUploader) return false;
     const sequence = state.sequence + 1;
     const path = await this.envelopeTempPath();
     const writer = new EnvelopeWriter(path);
@@ -4659,7 +5245,7 @@ export class SessionUploader {
     let compressedBytes: number;
     try {
       const head = JSON.stringify({
-        schema_version: UPLOAD_SCHEMA_VERSION,
+        schema_version: body.schemaVersion ?? UPLOAD_SCHEMA_VERSION,
         session_id: state.id,
         session_segment: state.segment,
         session_resumed: state.resumed,
@@ -4682,7 +5268,13 @@ export class SessionUploader {
         first = false;
       }
       await writer.write(`],"privacy":${JSON.stringify(body.privacy())}`);
-      if (body.trace) await writer.write(`,"trace":${JSON.stringify(body.trace)}`);
+      if (body.trace) {
+        await writer.write(',"trace":[');
+        for (let index = 0; index < body.trace.length; index += 1) {
+          await writer.write(`${index > 0 ? "," : ""}${JSON.stringify(body.trace[index]) ?? "null"}`);
+        }
+        await writer.write("]");
+      }
       await writer.write("}");
       compressedBytes = await writer.finish();
     } catch (error) {
@@ -4710,14 +5302,10 @@ export class SessionUploader {
         this.log("warn", "OmniRush session upload payload exceeded compressed limit", { sessionId: state.id, snapshotType, trigger });
         return false;
       }
-      const compressed = await readFile(path);
+      const compressed: CompressedArtifact = { path, size: compressedBytes };
       const account = this.account.signal;
-      const outcome = await this.transmit(state.id, compressed, UPLOAD_ATTEMPTS, AbortSignal.any([account, this.halted.signal]));
-      if (!outcome.ok) {
-        if ((!outcome.retryable || !this.spoolDir) && !account.aborted) {
-          await this.recordLedgerOutcome(state.id, "failure").catch(() => undefined);
-          throw new Error(outcome.reason);
-        }
+      const uploadSignal = AbortSignal.any([account, this.halted.signal]);
+      const spoolArtifact = async (reason: string): Promise<boolean> => {
         const spooled = await this.spoolEnvelopeFile({ id: "", session_id: state.id, snapshot_type: snapshotType, trigger, sequence, bytes: compressedBytes, created_at: new Date().toISOString(), attempts: 1 }, path, account);
         if (!spooled) {
           // Signed out during the upload: the envelope is deleted, never queued for the next account.
@@ -4735,11 +5323,32 @@ export class SessionUploader {
           trigger,
           sequence,
           compressedBytes,
-          reason: outcome.reason,
+          reason,
         });
         this.retryFailures += 1;
         this.scheduleRetry();
         return true;
+      };
+      let releaseUpload: (() => void) | null = null;
+      try {
+        releaseUpload = await GLOBAL_CAPTURE_ADMISSION.acquire(uploadSignal);
+      } catch (error) {
+        if (!this.halted.signal.aborted || account.aborted) throw error;
+        return await spoolArtifact("capture shutdown");
+      }
+      let outcome: TransmitOutcome;
+      try {
+        outcome = await this.transmit(state.id, compressed, UPLOAD_ATTEMPTS, uploadSignal, body.schemaVersion ?? UPLOAD_SCHEMA_VERSION);
+      } finally {
+        releaseUpload();
+      }
+      if (!outcome.ok && outcome.unsupportedSchema) return "unsupported_schema";
+      if (!outcome.ok) {
+        if ((!outcome.retryable || !this.spoolDir) && !account.aborted) {
+          await this.recordLedgerOutcome(state.id, "failure").catch(() => undefined);
+          throw new Error(outcome.reason);
+        }
+        return await spoolArtifact(outcome.reason);
       }
       state.sentBytes += bytes;
       state.sequence = sequence;
@@ -4929,15 +5538,24 @@ export class SessionUploader {
         nextDueAt = Math.min(nextDueAt, dueAt);
         continue;
       }
-      let compressed: Buffer;
+      let compressed: CompressedArtifact;
       try {
-        compressed = await readFile(join(spoolDir, `${entry.id}.zst`));
+        const spoolPath = join(spoolDir, `${entry.id}.zst`);
+        const file = await stat(spoolPath);
+        if (!file.isFile() || file.size !== entry.bytes) throw new Error("spool artifact size changed");
+        compressed = { path: spoolPath, size: file.size };
       } catch {
         await this.spoolLocked(() => this.removeSpoolEntry(entry.id));
         pending -= 1;
         continue;
       }
-      const outcome = await this.transmit(entry.session_id, compressed, 1, signal);
+      const releaseUpload = await GLOBAL_CAPTURE_ADMISSION.acquire(signal);
+      let outcome: TransmitOutcome;
+      try {
+        outcome = await this.transmit(entry.session_id, compressed, 1, signal);
+      } finally {
+        releaseUpload();
+      }
       if (outcome.ok) {
         await this.spoolLocked(() => this.removeSpoolEntry(entry.id));
         await this.recordLedgerOutcome(entry.session_id, "success").catch(() => undefined);
@@ -5005,6 +5623,8 @@ export class SessionUploader {
     this.draining?.controller.abort();
     this.account.abort();
     this.account = new AbortController();
+    this.traceSchemaCache = null;
+    this.traceSchemaProbe = null;
     this.retryFailures = 0;
     return this.spoolLocked(async () => {
       // The turn diffs' bases are workspace content on disk too.

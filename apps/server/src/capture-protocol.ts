@@ -9,7 +9,7 @@
  */
 import type { CaptureHost, EngineReplacement, EngineTarget, PromptRecord } from "./capture-host.js";
 import type { FolderGateOptions } from "./session-archive/detect.js";
-import type { UploadWebVisit } from "./session-uploader.js";
+import type { TraceCapabilities, UploadWebVisit } from "./session-uploader.js";
 
 /** How the capture stops: `archiveFinals` false (the account is gone) packs no final project archives. */
 export type CaptureStopOptions = { archiveFinals: boolean };
@@ -18,6 +18,8 @@ export type CaptureStopOptions = { archiveFinals: boolean };
 export type CaptureCalls = {
   startSession: [sessionId: string, workspaceId: string, root: string];
   recordTrace: [sessionId: string, type: string, data?: unknown];
+  flushTrace: [sessionId: string, finalTrace?: unknown];
+  finishSession: [sessionId: string, finalTrace?: unknown];
   recordPrompt: [sessionId: string, prompt: PromptRecord];
   captureSnapshot: [sessionId: string, trigger: "prompt" | "turn_completed"];
   recordWebVisit: [sessionId: string, visit: UploadWebVisit];
@@ -39,6 +41,8 @@ export type CaptureCall = { [M in CaptureCallName]: { kind: "call"; id: number |
 /** What a worker asks of the main thread. `channel` says whose request it is: archive requests are aborted first at shutdown. */
 export type HostRequest =
   | { type: "upload"; sessionId: string; body: Uint8Array<ArrayBuffer> }
+  | { type: "uploadFile"; sessionId: string; path: string; size: number }
+  | { type: "capabilities" }
   | { type: "refreshAccessToken" }
   | { type: "archiveRequest"; path: string; method: "GET" | "POST"; body?: string; refresh?: false }
   | { type: "fetch"; url: string; method: string; headers: Array<[string, string]>; body?: Uint8Array<ArrayBuffer> | string };
@@ -48,7 +52,7 @@ export type RequestChannel = "uploader" | "archive";
 export type SerializedResponse = { status: number; statusText: string; headers: Array<[string, string]>; body: ArrayBuffer | null };
 
 export type RequestResult =
-  | { kind: "result"; id: number; ok: true; response: SerializedResponse | null; token?: string | null }
+  | { kind: "result"; id: number; ok: true; response: SerializedResponse | null; token?: string | null; value?: TraceCapabilities }
   | { kind: "result"; id: number; ok: false; error: string; name: string };
 
 export type ToWorker = CaptureCall | RequestResult;
@@ -67,7 +71,7 @@ export type CaptureWorkerInit = {
   stateDir: string;
   appVersion: string;
   engineVersion: string;
-  sessionUploader: { upload: boolean; refreshAccessToken: boolean; gatewayUrl?: string; accessToken?: string };
+  sessionUploader: { upload: boolean; uploadFile: boolean; capabilities: boolean; refreshAccessToken: boolean; gatewayUrl?: string; accessToken?: string };
   archive: {
     enabled: boolean;
     excludedDirs: string[];
@@ -82,13 +86,43 @@ export type CaptureWorkerInit = {
 };
 
 export async function serializeResponse(response: Response): Promise<SerializedResponse> {
-  const body = response.body ? await response.arrayBuffer() : null;
+  const body = response.body ? await boundedResponseBody(response) : null;
   return {
     status: response.status,
     statusText: response.statusText,
     headers: [...response.headers],
     body: body && body.byteLength > 0 ? body : null,
   };
+}
+
+const MAX_RELAY_RESPONSE_BYTES = 1024 * 1024;
+
+async function boundedResponseBody(response: Response): Promise<ArrayBuffer | null> {
+  if (!response.body) return null;
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const result = await reader.read();
+      if (result.done) break;
+      total += result.value.byteLength;
+      if (total > MAX_RELAY_RESPONSE_BYTES) {
+        await reader.cancel("capture relay response too large").catch(() => undefined);
+        throw new Error("capture relay response exceeds its bound");
+      }
+      chunks.push(result.value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const body = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return body.buffer;
 }
 
 const NULL_BODY_STATUSES = new Set([101, 204, 205, 304]);
@@ -117,6 +151,10 @@ export function invokeCapture(host: CaptureHost, call: CaptureCall): unknown {
       return host.startSession(...call.args);
     case "recordTrace":
       return host.recordTrace(...call.args);
+    case "flushTrace":
+      return host.flushTrace(...call.args);
+    case "finishSession":
+      return host.finishSession(...call.args);
     case "recordPrompt":
       return host.recordPrompt(...call.args);
     case "captureSnapshot":

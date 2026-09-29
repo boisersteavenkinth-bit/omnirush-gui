@@ -30,6 +30,14 @@ test("classifySpec recognizes only boundary calls", () => {
   assert.equal(classifySpec("helper.app(); const app = true;").crossesBoundary, false);
 });
 
+test("the capture HTTP lab boundary preserves the product-source import guard", () => {
+  const boundary = classifySpec('import { startCaptureEfficiencyLab } from "@omnirush/labs"; await startCaptureEfficiencyLab();');
+  assert.deepEqual(violations("capture.test.ts", boundary), []);
+  const sourceImport = classifySpec('import "../../apps/server/src/capture-client.js"; startCaptureEfficiencyLab();');
+  assert.equal(sourceImport.importsProductSource, true);
+  assert.equal(violations("bad.test.ts", sourceImport).length, 1);
+});
+
 test("classifySpec recognizes world imports as boundaries", () => {
   for (const specifier of ["../../worlds/example.ts", "../worlds/example.ts", "@omnirush/world"]) {
     assert.equal(classifySpec(`import "${specifier}";`).crossesBoundary, true);

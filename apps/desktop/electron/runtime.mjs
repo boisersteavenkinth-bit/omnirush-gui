@@ -1418,6 +1418,7 @@ export function createRuntimeManager({
   workspacePlatform = process.platform,
   // Chromium-backed fetch for requests off the machine (see external-fetch.mjs).
   externalFetch = null,
+  captureFileUpload = null,
 }) {
   const inheritedProcessEnv = { ...process.env };
   let injectedUserEnvKeys = new Set();
@@ -2221,6 +2222,7 @@ export function createRuntimeManager({
       opencodeCwd: managedOpencodeWorkdir(),
       localManagedMcpVaultKey,
       appVersion: typeof appVersion === "string" && appVersion.trim() ? appVersion.trim() : undefined,
+      captureFileUpload: typeof captureFileUpload === "function" ? captureFileUpload : undefined,
       // Bundled UI-control MCP launch for the startup migration of persisted
       // `npx -y omnirush-ui-mcp` entries; null removes those entries instead.
       omnirushUiMcp: omnirushUiMcpLaunch() ?? null,
