@@ -1,4 +1,6 @@
 import { expect } from "vitest";
+import { createAndSelectWorkspace, evalIn, waitFor } from "@omnirush/behaviors";
+import { browserScript } from "@omnirush/testkit";
 import { spec } from "@omnirush/testkit";
 import { portableComputerUseWorld, toolState } from "../worlds/computer-use.ts";
 
@@ -103,5 +105,56 @@ test("Windows and Linux X11 Computer Use keeps native input within the approved 
     await world.closeClient();
     await expect.poll(() => world.hostState()).toEqual([]);
     expect(await world.state()).toEqual([{ count: 1, draft: "Changed by person" }, { count: 0, draft: "Initial draft" }]);
+  });
+});
+
+
+test("Computer Use setup and approval work from the main app on Windows and Linux X11", async ({ world, step }) => {
+  await using app = await world.desktop();
+  const { workspaceId } = await createAndSelectWorkspace(app, { path: world.workspacePath });
+  await step("Setup explains foreground control and offers the supported modes", async () => {
+    await evalIn(app, browserScript((value) => (location.hash = value), [`#/workspace/${workspaceId}/extensions/computer-use`]));
+    await waitFor(app, () => document.body.innerText.includes("Permissions are ready. Enable Computer Use for this workspace."), { timeoutMs: 60_000 });
+    expect(await evalIn(app, () => document.body.innerText.includes("Work through accessible controls"))).toBe(false);
+    expect(await evalIn(app, () => document.body.innerText.includes("foreground"))).toBe(true);
+    await evalIn(app, () => [...document.querySelectorAll("button")].find((button) => button.textContent.trim() === "Enable Computer Use")?.click());
+    await waitFor(app, () => document.body.innerText.includes("Ready · app access is approved when a session starts"), { timeoutMs: 60_000 });
+  });
+  const command = await evalIn(app, () => window.__OMNIRUSH_ELECTRON__.invokeDesktop("getComputerUseMcpCommand"));
+  const environment = await evalIn(app, () => window.__OMNIRUSH_ELECTRON__.invokeDesktop("getComputerUseMcpEnvironment"));
+  await step("Copy CLI connection produces a usable local command without the discovery secret", async () => {
+    await evalIn(app, () => [...document.querySelectorAll("button")].find((button) => button.textContent.trim() === "Copy CLI connection")?.click());
+    await waitFor(app, () => document.body.innerText.includes("CLI connection copied"));
+    const copied = await evalIn(app, async () => navigator.clipboard.readText(), { awaitPromise: true });
+    expect(typeof copied).toBe("string");
+    const config = JSON.parse(String(copied));
+    expect(config).toEqual({ mcpServers: { "computer-use": { command: Array.isArray(command) ? command[0] : "", args: Array.isArray(command) ? command.slice(1) : [], env: environment } } });
+    expect(copied).not.toContain('"token"');
+  });
+  await using client = await world.hostedClient(command, environment);
+  const session = await step("The app's window picker grants the selected native window", async () => {
+    const pending = client.call("computer_open_session", { app_id: world.appId, pid: world.pid, mode: "control", purpose: "Test the main app approval with a disposable window." });
+    await waitFor(app, () => Boolean(document.querySelector('select[aria-label="Window to allow"]')));
+    await evalIn(app, () => {
+      const picker = document.querySelector('select[aria-label="Window to allow"]');
+      if (!(picker instanceof HTMLSelectElement)) throw new Error("Missing window picker");
+      const option = [...picker.options].find((option) => option.textContent === "Workspace window");
+      if (!option) throw new Error("Missing fixture window");
+      picker.value = option.value; picker.dispatchEvent(new Event("change", { bubbles: true }));
+      [...document.querySelectorAll("button")].find((button) => button.textContent.trim() === "Allow and start")?.click();
+    });
+    const result = toolState(await pending);
+    expect(result).toMatchObject({ ok: true, window_title: "Workspace window", mode: "control" });
+    return result.session_id;
+  });
+  await step("The main app can stop access without relying on the agent", async () => {
+    expect(toolState(await client.call("computer_observe", { session_id: session })).ok).toBe(true);
+    await evalIn(app, async () => {
+      const states = await window.__OMNIRUSH_ELECTRON__.invokeDesktop("getComputerUseState");
+      if (!Array.isArray(states) || !states[0]) throw new Error("No active desktop session");
+      await window.__OMNIRUSH_ELECTRON__.invokeDesktop("computerUseAction", { connectionId: states[0].connectionId, id: states[0].id, action: "stop" });
+    }, { awaitPromise: true });
+    expect(toolState(await client.call("computer_session_status", { session_id: session })).code).toBe("session_unavailable");
+    expect(await world.state()).toEqual([{ count: 0, draft: "Initial draft" }, { count: 0, draft: "Initial draft" }]);
   });
 });

@@ -217,7 +217,7 @@ export async function createPortableComputerUseHost({ profile, capture, preview 
   const temp = discoveryPath + "." + randomUUID();
   await writeFile(temp, JSON.stringify(endpoint), { mode: 0o600, flag: "wx" });
   await rename(temp, discoveryPath);
-  const expiry = setInterval(() => { for (const entry of connections.values()) if (entry.session && Date.now() >= entry.session.expiresAt) void stop(entry); }, 1000);
+  const expiry = setInterval(() => { for (const entry of connections.values()) { const value = entry.session; if (!value) continue; if (Date.now() >= value.expiresAt) void stop(entry); else if (value.phase === "working" && Date.now() - value.lastOperation > 120_000) pause(entry, "Paused after two minutes without work. Choose Continue when ready."); } update(); }, 1000);
   const host = {
     discoveryPath, state, availability,
     pause(connectionId) { const entry = connections.get(connectionId); if (entry) pause(entry, "You took over. Choose Continue in OmniRush.ai when ready."); },

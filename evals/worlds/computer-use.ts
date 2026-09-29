@@ -279,6 +279,16 @@ export async function portableComputerUseWorld(_seed: Seed, { place }: { place: 
     if (!record(appInfo) || typeof appInfo.app_id !== "string") throw new Error("Fixture was not discoverable: " + JSON.stringify(discovery));
     const main = client, other = peer;
     return {
+      desktop: () => desktop({ name: "native-computer-use-setup", host: place.host(), profileDir: join(directory, "desktop-profile"), env: { OPENCODE_DB: join(directory, "desktop.db"), OMNIRUSH_GATEWAY_URL: "http://127.0.0.1:1", COREPACK_ENABLE_DOWNLOAD_PROMPT: "0", ELECTRON_DISABLE_SANDBOX: "1", OMNIRUSH_ELECTRON_USE_MOCK_KEYCHAIN: "1" } }),
+      workspacePath: join(directory, "workspace"),
+      async hostedClient(command: unknown, environment: unknown) {
+        if (!Array.isArray(command) || !command.every((part): part is string => typeof part === "string") || !record(environment)) throw new Error("Missing hosted MCP command.");
+        const env: Record<string, string> = {};
+        for (const [key, value] of Object.entries(environment)) { if (typeof value !== "string") throw new Error("Invalid hosted environment."); env[key] = value; }
+        const hosted = pipeClient(command[0], command.slice(1), env);
+        await hosted.request("initialize", { protocolVersion: "2025-11-25", clientInfo: { name: "desktop-native-journey", version: "1" }, capabilities: {} });
+        return { call: (name: string, args: Record<string, unknown> = {}) => hosted.request("tools/call", { name, arguments: args }, 70_000), [Symbol.asyncDispose]: hosted.close };
+      },
       permissions,
       appId: appInfo.app_id, pid: fixture.pid,
       call: (name: string, args: Record<string, unknown> = {}) => main.request("tools/call", { name, arguments: args }, 70_000),
