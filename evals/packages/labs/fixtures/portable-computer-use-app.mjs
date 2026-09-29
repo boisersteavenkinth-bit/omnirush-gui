@@ -1,6 +1,11 @@
 // Disposable native app used as an OS-level witness, never a real user's app.
 import { app, BrowserWindow, screen, nativeImage } from "electron";
 import { createInterface } from "node:readline";
+import { connect } from "node:net";
+const channel = connect({ host: "127.0.0.1", port: Number(process.env.OMNIRUSH_FIXTURE_PORT) });
+channel.on("connect", () => channel.write(JSON.stringify({ token: process.env.OMNIRUSH_FIXTURE_TOKEN }) + "\n"));
+import { createRequire } from "node:module";
+const requireDesktop = createRequire(new URL("../../../../apps/desktop/package.json", import.meta.url));
 let windows = [];
 app.setPath("userData", process.argv.at(-1));
 const ready = app.whenReady().then(async () => {
@@ -10,13 +15,34 @@ const ready = app.whenReady().then(async () => {
     await window.loadURL("data:text/html," + encodeURIComponent(html)); windows.push(window);
   }
 });
-createInterface({ input: process.stdin }).on("line", async (line) => {
+createInterface({ input: channel }).on("line", async (line) => {
   const request = JSON.parse(line);
   try {
     await ready; let result;
     if (request.method === "state") result = await Promise.all(windows.map((w) => w.webContents.executeJavaScript('({ count: window.counter, draft: document.getElementById("draft").value })')));
     else if (request.method === "bounds") result = windows.map((w) => ({ bounds: w.getBounds(), contentBounds: w.getContentBounds(), scale: screen.getDisplayMatching(w.getBounds()).scaleFactor }));
     else if (request.method === "focus_other") { windows[1].focus(); result = {}; }
+    else if (request.method === "outside_input") {
+      const koffi = requireDesktop("koffi");
+      if (process.platform === "win32") {
+        const keyboard = koffi.struct({ wVk: "uint16_t", wScan: "uint16_t", dwFlags: "uint32_t", time: "uint32_t", dwExtraInfo: "uintptr_t" });
+        const mouse = koffi.struct({ dx: "int32_t", dy: "int32_t", mouseData: "uint32_t", dwFlags: "uint32_t", time: "uint32_t", dwExtraInfo: "uintptr_t" });
+        const input = koffi.struct({ type: "uint32_t", value: koffi.union({ ki: keyboard, mi: mouse }) });
+        const send = koffi.load("user32.dll").func("uint32_t __stdcall SendInput(uint32_t count, void *input, int size)");
+        const data = Buffer.alloc(koffi.sizeof(input) * 2);
+        koffi.encode(data, input, [{ type: 1, value: { ki: { wVk: 16, wScan: 0, dwFlags: 0, time: 0, dwExtraInfo: 0 } } }, { type: 1, value: { ki: { wVk: 16, wScan: 0, dwFlags: 2, time: 0, dwExtraInfo: 0 } } }], 2);
+        if (send(2, data, koffi.sizeof(input)) !== 2) throw new Error("Outside keyboard stimulus unavailable.");
+      } else {
+        const x = koffi.load("libX11.so.6"), xt = koffi.load("libXtst.so.6"), display = x.func("void *XOpenDisplay(str name)")(null);
+        if (!display) throw new Error("Outside input display unavailable.");
+        try {
+          const code = x.func("uint8_t XKeysymToKeycode(void *display, ulong symbol)")(display, 0xffe1);
+          const send = xt.func("int XTestFakeKeyEvent(void *display, uint code, int down, ulong delay)");
+          send(display, code, 1, 0); send(display, code, 0, 0); x.func("int XSync(void *display, int discard)")(display, 0);
+        } finally { x.func("int XCloseDisplay(void *display)")(display); }
+      }
+      result = {};
+    }
     else if (request.method === "cover") { windows[1].setBounds(windows[0].getBounds()); windows[1].setAlwaysOnTop(true); await windows[1].webContents.executeJavaScript('document.body.style.background="#ff00ff"'); windows[1].focus(); result = {}; }
     else if (request.method === "image_pixel") { const image = nativeImage.createFromBuffer(Buffer.from(request.params.data, "base64")); const size = image.getSize(), pixels = image.toBitmap(); const offset = ((size.height - 50) * size.width + 20) * 4; result = { width: size.width, height: size.height, rgb: [pixels[offset + 2], pixels[offset + 1], pixels[offset]] }; }
     else if (request.method === "change") { await windows[0].webContents.executeJavaScript('document.getElementById("draft").value="Changed by person"; document.body.style.background="#eeeeee"; new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))'); result = {}; }
@@ -24,7 +50,7 @@ createInterface({ input: process.stdin }).on("line", async (line) => {
     else if (request.method === "restore") { windows[0].restore(); result = {}; }
     else if (request.method === "close") { app.quit(); return; }
     else throw new Error("Unknown fixture request.");
-    process.stdout.write(JSON.stringify({ id: request.id, result }) + "\n");
-  } catch (error) { process.stdout.write(JSON.stringify({ id: request.id, error: { message: error.message } }) + "\n"); }
+    channel.write(JSON.stringify({ id: request.id, result }) + "\n");
+  } catch (error) { channel.write(JSON.stringify({ id: request.id, error: { message: error.message } }) + "\n"); }
 });
-process.stdin.on("end", () => app.quit());
+channel.on("close", () => app.quit());

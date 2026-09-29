@@ -74,6 +74,12 @@ test("Windows and Linux X11 Computer Use keeps native input within the approved 
     expect(await world.state()).toEqual([{ count: 1, draft: "Changed by person" }, { count: 0, draft: "Initial draft" }]);
     await world.approve("resume");
   });
+  await step("Desktop input from outside the controller automatically pauses control", async () => {
+    await world.outsideInput();
+    await expect.poll(async () => toolState(await world.call("computer_session_status", { session_id: session })).state).toBe("paused");
+    expect(await world.state()).toEqual([{ count: 1, draft: "Changed by person" }, { count: 0, draft: "Initial draft" }]);
+    await world.approve("resume");
+  });
   await step("Take over pauses control and only the person can continue", async () => {
     const observed = toolState(await world.call("computer_observe", { session_id: session }));
     await world.previewAction("pause");
@@ -84,11 +90,21 @@ test("Windows and Linux X11 Computer Use keeps native input within the approved 
     expect(toolState(await world.call("computer_session_status", { session_id: session })).state).toBe("active");
     expect(toolState(await world.call("computer_act", { session_id: session, observation_id: observed.observation_id, request_id: "invalidated-input", action: { type: "type", text: "Forbidden" } })).code).toBe("stale_observation");
   });
-  await step("Stop in the native preview revokes access and leaves both windows intact", async () => {
+  const stoppedState = await step("Stop in the native preview interrupts typing and revokes access", async () => {
+    const observed = toolState(await world.call("computer_observe", { session_id: session }));
+    const pending = world.call("computer_act", { session_id: session, observation_id: observed.observation_id, request_id: "interrupt-typing", action: { type: "type", text: "x".repeat(500) } });
+    await expect.poll(async () => {
+      const states = await world.state();
+      return Array.isArray(states) && typeof states[0] === "object" && states[0] !== null && "draft" in states[0] && typeof states[0].draft === "string" && states[0].draft.includes("x");
+    }).toBe(true);
     await world.previewAction("stop");
+    expect(toolState(await pending)).toMatchObject({ ok: false, may_have_acted: true });
     expect(toolState(await world.call("computer_observe", { session_id: session })).code).toBe("session_unavailable");
     expect(await world.hostState()).toEqual([]);
-    expect(await world.state()).toEqual([{ count: 1, draft: "Changed by person" }, { count: 0, draft: "Initial draft" }]);
+    const states = await world.state();
+    expect(states).toMatchObject([{ count: 1 }, { count: 0, draft: "Initial draft" }]);
+    expect(JSON.stringify(states)).not.toContain("x".repeat(500));
+    return states;
   });
   await step("Read-only approval never permits mouse or keyboard input", async () => {
     const pending = world.call("computer_open_session", { app_id: world.appId, pid: world.pid, mode: "observe", purpose: "Read the disposable fixture." });
@@ -104,7 +120,7 @@ test("Windows and Linux X11 Computer Use keeps native input within the approved 
     expect(await world.imagePixel(covered)).toMatchObject({ rgb: [238, 238, 238] });
     await world.closeClient();
     await expect.poll(() => world.hostState()).toEqual([]);
-    expect(await world.state()).toEqual([{ count: 1, draft: "Changed by person" }, { count: 0, draft: "Initial draft" }]);
+    expect(await world.state()).toEqual(stoppedState);
   });
 });
 

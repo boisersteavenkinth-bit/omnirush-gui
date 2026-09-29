@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createInterface } from "node:readline";
+import { createServer } from "node:net";
+import { randomBytes } from "node:crypto";
 import { createRequire } from "node:module";
 import { needs, SkipError } from "@omnirush/env";
 import type { Place, Seed } from "@omnirush/env";
@@ -55,6 +57,64 @@ function pipeClient(executable: string, args: string[], environment: Record<stri
         child.once("exit", () => { clearTimeout(timeout); resolve(); });
       });
       fail();
+    },
+  };
+}
+
+// Electron's Windows GUI executable does not provide a reliable stdio channel.
+// Use an authenticated loopback socket for the disposable witness only.
+async function nativeFixtureClient(executable: string, args: string[]) {
+  const token = randomBytes(32).toString("hex");
+  const server = createServer();
+  await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); });
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("No fixture endpoint.");
+  const child = spawn(executable, args, { stdio: ["ignore", "ignore", "pipe"], env: { ...process.env, OMNIRUSH_FIXTURE_PORT: String(address.port), OMNIRUSH_FIXTURE_TOKEN: token } });
+  let stderr = "";
+  child.stderr.on("data", (chunk: Buffer) => { stderr = (stderr + chunk.toString()).slice(-2000); });
+  const pending = new Map<number, { resolve(value: unknown): void; reject(error: Error): void; timer: NodeJS.Timeout }>();
+  let nextId = 0;
+  const socket = await new Promise<import("node:net").Socket>((resolve, reject) => {
+    const timer = setTimeout(() => { server.close(); child.kill(); reject(new Error("Fixture connection timed out: " + stderr)); }, 15_000);
+    child.once("error", (error) => { clearTimeout(timer); server.close(); reject(error); });
+    child.once("exit", () => { clearTimeout(timer); server.close(); reject(new Error("Fixture exited: " + stderr)); });
+    server.on("connection", (connected) => {
+      const lines = createInterface({ input: connected });
+      let authenticated = false;
+      lines.on("line", (line) => {
+        let message: unknown;
+        try { message = JSON.parse(line); } catch { connected.destroy(); return; }
+        if (!record(message)) { connected.destroy(); return; }
+        if (!authenticated) {
+          if (message.token !== token) { connected.destroy(); return; }
+          authenticated = true; clearTimeout(timer); server.close(); resolve(connected); return;
+        }
+        if (typeof message.id !== "number") return;
+        const request = pending.get(message.id); if (!request) return;
+        pending.delete(message.id); clearTimeout(request.timer);
+        if (message.error) request.reject(new Error(JSON.stringify(message.error))); else request.resolve(message.result);
+      });
+      connected.on("error", () => connected.destroy());
+      connected.once("close", () => { lines.close(); for (const request of pending.values()) { clearTimeout(request.timer); request.reject(new Error("Fixture connection closed: " + stderr)); } pending.clear(); });
+    });
+  });
+  return {
+    pid: child.pid,
+    request(method: string, params: Record<string, unknown> = {}, timeoutMs = 15_000) {
+      const id = ++nextId;
+      return new Promise<unknown>((resolve, reject) => {
+        const timer = setTimeout(() => { pending.delete(id); reject(new Error("Fixture operation timed out: " + method + "; " + stderr)); }, timeoutMs);
+        pending.set(id, { resolve, reject, timer }); socket.write(JSON.stringify({ id, method, params }) + "\n");
+      });
+    },
+    async close() {
+      socket.end();
+      await new Promise<void>((resolve) => {
+        if (child.exitCode !== null || child.signalCode !== null) { resolve(); return; }
+        const timer = setTimeout(() => { child.kill(); resolve(); }, 2000);
+        child.once("exit", () => { clearTimeout(timer); resolve(); });
+      });
+      socket.destroy();
     },
   };
 }
@@ -256,8 +316,8 @@ export async function portableComputerUseWorld(_seed: Seed, { place }: { place: 
   if (typeof executable !== "string") throw new Error("Electron executable unavailable.");
   const directory = await mkdtemp(join(tmpdir(), "omnirush-native-journey-"));
   const launchFlags = process.platform === "linux" ? ["--no-sandbox"] : [];
-  const fixture = pipeClient(executable, [...launchFlags, join(root, "evals/packages/labs/fixtures/portable-computer-use-app.mjs"), join(directory, "fixture")]);
-  const controller = pipeClient(executable, [...launchFlags, join(root, "evals/packages/labs/fixtures/portable-computer-use-host.mjs"), join(directory, "host")]);
+  const fixture = await nativeFixtureClient(executable, [...launchFlags, join(root, "evals/packages/labs/fixtures/portable-computer-use-app.mjs"), join(directory, "fixture")]);
+  const controller = await nativeFixtureClient(executable, [...launchFlags, join(root, "evals/packages/labs/fixtures/portable-computer-use-host.mjs"), join(directory, "host")]).catch(async (error) => { await fixture.close(); await rm(directory, { recursive: true, force: true }); throw error; });
   let client: ReturnType<typeof pipeClient> | undefined;
   let peer: ReturnType<typeof pipeClient> | undefined;
   try {
@@ -299,6 +359,7 @@ export async function portableComputerUseWorld(_seed: Seed, { place }: { place: 
       change: () => fixture.request("change"),
       focusOther: () => fixture.request("focus_other"),
       cover: () => fixture.request("cover"),
+      outsideInput: () => fixture.request("outside_input"),
       imagePixel(reply: unknown) {
         if (!record(reply) || !Array.isArray(reply.content)) throw new Error("Missing image content.");
         const image = reply.content.find((item: unknown) => record(item) && item.type === "image");
