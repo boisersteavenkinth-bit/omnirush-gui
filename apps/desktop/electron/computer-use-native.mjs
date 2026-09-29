@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 /** @param {unknown} value @returns {value is Record<string, unknown>} */
 function record(value) { return typeof value === "object" && value !== null && !Array.isArray(value); }
@@ -31,6 +32,11 @@ export function createNativeDesktop() {
   worker.on("exit", () => fail(new Error("Desktop access stopped. Restart OmniRush.ai.")));
   return {
     ready,
+    grantForeground() {
+      if (process.platform !== "win32" || !worker.pid) return;
+      const koffi = createRequire(import.meta.url)("koffi");
+      koffi.load("user32.dll").func("int __stdcall AllowSetForegroundWindow(uint32_t processId)")(worker.pid);
+    },
     onInput(listener) { listeners.add(listener); return () => listeners.delete(listener); },
     call(method, params = {}) {
       if (closed) return Promise.reject(new Error("Desktop access has stopped."));

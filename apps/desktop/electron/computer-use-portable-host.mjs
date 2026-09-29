@@ -233,7 +233,10 @@ export async function createPortableComputerUseHost({ profile, capture, preview 
       if (!selected) throw new Error("Choose a window.");
       const current = await native.call("window", { id: selected.id });
       if (current.identity !== selected.identity) { await stop(entry); throw new Error("The app restarted. Start a new session."); }
-      if (value.mode === "control") await native.call("focus", { window: current });
+      if (value.mode === "control") {
+        native.grantForeground?.();
+        await native.call("focus", { window: current });
+      }
       if (entry.session !== value) throw new Error("The request ended.");
       value.window = current; value.phase = "working"; value.status = ""; value.lastOperation = Date.now(); value.observation = null;
       if (input.action === "approve") value.expiresAt = Date.now() + 900_000;
