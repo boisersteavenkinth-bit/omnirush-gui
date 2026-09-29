@@ -57,6 +57,10 @@ type ComposerProps = {
   onSteer: () => void | Promise<void>;
   onQueue: () => void | Promise<void>;
   onStop: () => void | Promise<void>;
+  /** Explicitly summarize the current session's context. */
+  onCompact?: () => void | Promise<void>;
+  canCompact?: boolean;
+  compacting?: boolean;
   busy: boolean;
   steering: boolean;
   submissionPreparing: boolean;
@@ -1707,6 +1711,20 @@ export const ReactSessionComposer = memo(function ReactSessionComposer(props: Co
                   <Paperclip size={16} />
                 </button>
                 <VoiceButton voice={voice} disabled={props.disabled} />
+                {props.onCompact ? (
+                  <button
+                    type="button"
+                    data-context-compact
+                    className="inline-flex h-9 max-h-9 shrink-0 items-center gap-1.5 rounded-md px-2 text-[11px] font-medium text-gray-10 transition-colors hover:bg-gray-3 hover:text-gray-12 disabled:cursor-not-allowed disabled:opacity-50"
+                    onClick={() => void props.onCompact?.()}
+                    disabled={props.disabled || props.busy || props.compacting || props.canCompact === false}
+                    aria-label={props.compacting ? t("session.compact_context_running") : t("session.compact_context")}
+                    title={props.compacting ? t("session.compact_context_running") : t("app.compact_command_desc")}
+                  >
+                    {props.compacting ? <LoaderCircle size={13} className="animate-spin" /> : <RefreshCw size={13} />}
+                    <span>{props.compacting ? t("session.compact_context_running") : t("session.compact_context")}</span>
+                  </button>
+                ) : null}
 
                 </div>
 

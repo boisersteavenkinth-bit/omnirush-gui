@@ -171,7 +171,11 @@ test.skipIf(!runnable)(
           const buttons = [...toolbar.querySelectorAll('button')]
             .map((button) => button.getBoundingClientRect())
             .filter((rect) => rect.width > 0 && rect.height > 0);
-          return buttons.length >= 4 && buttons.every((rect, index) =>
+          const compactButtons = [...toolbar.querySelectorAll<HTMLButtonElement>('button[data-context-compact]')]
+            .filter((button) => button.getBoundingClientRect().width > 0 && button.getBoundingClientRect().height > 0);
+          return buttons.length >= 4
+            && compactButtons.length === 1
+            && buttons.every((rect, index) =>
             rect.left >= bounds.left - 1 && rect.right <= bounds.right + 1
             && rect.top >= bounds.top - 1 && rect.bottom <= bounds.bottom + 1
             && buttons.slice(index + 1).every((other) =>
@@ -182,7 +186,7 @@ test.skipIf(!runnable)(
       await screenshot(app);
       evidence.recordAssertionEvidence(
         `Composer controls remain contained and do not overlap at ${width}px`,
-        "Measured every visible toolbar button against the toolbar bounds and every other button.",
+        "Measured every visible toolbar button against the toolbar bounds and every other button; the explicit Compact context action remained visible in the toolbar.",
         true,
       );
     }

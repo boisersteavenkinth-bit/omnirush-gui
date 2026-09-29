@@ -1369,6 +1369,8 @@ export default {
   "session.assistant_empty_response": "The agent responded with nothing. Try again.",
   "session.assistant_compacting": "Compacting",
   "session.assistant_error": "Error",
+  "session.compact_context": "Compact context",
+  "session.compact_context_running": "Compacting context…",
   "session.assistant_idle": "Idle",
   "session.assistant_responding": "Responding",
   "session.assistant_thinking": "Thinking",
