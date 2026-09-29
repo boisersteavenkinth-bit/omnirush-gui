@@ -880,7 +880,20 @@ async function ensureDisplay(repoRoot: string, env: NodeJS.ProcessEnv, log: (mes
         spawned = spawnDetached(packagedBinary, [], { cwd: profileRoot, env, logPath });
       } else {
         log(`Starting local Electron surface ${name} (Vite :${port}, CDP :${cdpPort})...`);
-        spawned = spawnDetached(pnpmCommand(), [opts.devCommand ?? "dev:electron"], { cwd: options.repoRoot, env, logPath });
+        // Launch pnpm's JS entry on Windows: a detached .cmd shell can exit
+        // without starting the app or forwarding its diagnostics.
+        const pnpmEntry = process.env.npm_execpath;
+        if (process.platform === "win32") {
+          // Workspace dev scripts use POSIX environment assignments.
+          // Keep the emulator scoped to this isolated eval process.
+          env.npm_config_shell_emulator = "true";
+          if (!pnpmEntry || !/pnpm\.(?:c|m)?js$/i.test(pnpmEntry) || !existsSync(pnpmEntry)) {
+            throw new Error("Run Windows Electron journeys through pnpm so npm_execpath names its JS entry.");
+          }
+          spawned = spawnDetached(process.execPath, [pnpmEntry, opts.devCommand ?? "dev:electron"], { cwd: options.repoRoot, env, logPath });
+        } else {
+          spawned = spawnDetached(pnpmCommand(), [opts.devCommand ?? "dev:electron"], { cwd: options.repoRoot, env, logPath });
+        }
       }
       const cdpUrl = `http://127.0.0.1:${cdpPort}`;
       try {

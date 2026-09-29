@@ -39,7 +39,9 @@ function windows() {
   const hookMouse = koffi.struct("CU_MSLLHOOKSTRUCT", { pt: point, mouseData: "uint32_t", flags: "uint32_t", time: "uint32_t", dwExtraInfo: "uintptr_t" });
   const msg = koffi.struct("CU_MSG", { hwnd: "uintptr_t", message: "uint32_t", wParam: "uintptr_t", lParam: "intptr_t", time: "uint32_t", pt: point, lPrivate: "uint32_t" });
   const enumProto = koffi.proto("int __stdcall CU_ENUMPROC(uintptr_t hwnd, intptr_t parameter)");
-  const hookProto = koffi.proto("intptr_t __stdcall CU_HOOKPROC(int code, uintptr_t wParam, intptr_t lParam)");
+  // Low-level hook LPARAM points to event data. Keep its pointer type so Koffi
+  // passes an external pointer to decode rather than converting it to a number.
+  const hookProto = koffi.proto("intptr_t __stdcall CU_HOOKPROC(int code, uintptr_t wParam, void *lParam)");
   const enumWindows = f(u, "int __stdcall EnumWindows(CU_ENUMPROC *callback, intptr_t parameter)");
   const visible = f(u, "int __stdcall IsWindowVisible(uintptr_t hwnd)");
   const isWindow = f(u, "int __stdcall IsWindow(uintptr_t hwnd)");
@@ -73,7 +75,7 @@ function windows() {
     if (pointerDown) { try { mouseEvent(4); } catch {} pointerDown = false; }
   };
   const peek = f(u, "int __stdcall PeekMessageW(_Out_ CU_MSG *message, uintptr_t hwnd, uint32_t first, uint32_t last, uint32_t remove)");
-  const nextHook = f(u, "intptr_t __stdcall CallNextHookEx(uintptr_t hook, int code, uintptr_t wParam, intptr_t lParam)");
+  const nextHook = f(u, "intptr_t __stdcall CallNextHookEx(uintptr_t hook, int code, uintptr_t wParam, void *lParam)");
   const installHook = f(u, "uintptr_t __stdcall SetWindowsHookExW(int type, CU_HOOKPROC *callback, uintptr_t module, uint32_t thread)");
   const uninstall = f(u, "int __stdcall UnhookWindowsHookEx(uintptr_t hook)");
   const callbacks = [hookKey, hookMouse].map((type) => koffi.register((code, wParam, lParam) => {
