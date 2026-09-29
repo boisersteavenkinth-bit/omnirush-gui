@@ -13,8 +13,8 @@ function record(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function pipeClient(executable: string, args: string[]) {
-  const child = spawn(executable, args, { stdio: ["pipe", "pipe", "pipe"] });
+function pipeClient(executable: string, args: string[], environment: Record<string, string> = {}) {
+  const child = spawn(executable, args, { stdio: ["pipe", "pipe", "pipe"], env: { ...process.env, ...environment } });
   let stderr = "";
   child.stderr.on("data", (chunk: Buffer) => { stderr = (stderr + chunk.toString()).slice(-2000); });
   const pending = new Map<number, { resolve(value: unknown): void; reject(error: Error): void; timer: NodeJS.Timeout }>();
@@ -241,4 +241,93 @@ export async function computerUseWorld(_seed: Seed, { place }: { place: Place })
       [Symbol.asyncDispose]: close,
     };
   } catch (error) { await close(); throw error; }
+}
+
+/** Desktop-native Windows/X11 journey with disposable Electron windows. */
+export async function portableComputerUseWorld(_seed: Seed, { place }: { place: Place }) {
+  if (place.kind !== "local" || !["win32", "linux"].includes(process.platform)) throw new SkipError("Windows or Linux X11 graphical desktop placement");
+  if (process.platform === "linux") {
+    if (process.env.WAYLAND_DISPLAY || process.env.XDG_SESSION_TYPE === "wayland") throw new SkipError("Linux X11; Wayland portal control is not implemented");
+    if (!process.env.DISPLAY) throw new SkipError("Linux graphical display");
+  }
+  const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
+  const requireDesktop = createRequire(join(root, "apps/desktop/package.json"));
+  const executable = requireDesktop("electron");
+  if (typeof executable !== "string") throw new Error("Electron executable unavailable.");
+  const directory = await mkdtemp(join(tmpdir(), "omnirush-native-journey-"));
+  const launchFlags = process.platform === "linux" ? ["--no-sandbox"] : [];
+  const fixture = pipeClient(executable, [...launchFlags, join(root, "evals/packages/labs/fixtures/portable-computer-use-app.mjs"), join(directory, "fixture")]);
+  const controller = pipeClient(executable, [...launchFlags, join(root, "evals/packages/labs/fixtures/portable-computer-use-host.mjs"), join(directory, "host")]);
+  let client: ReturnType<typeof pipeClient> | undefined;
+  let peer: ReturnType<typeof pipeClient> | undefined;
+  try {
+    await fixture.request("state");
+    const permissions = await controller.request("permissions", {}, 20_000);
+    if (!record(permissions) || permissions.ok !== true) throw new Error("Desktop readiness failed: " + JSON.stringify(permissions));
+    const launch = await controller.request("command");
+    if (!record(launch) || !Array.isArray(launch.command) || !launch.command.every((v): v is string => typeof v === "string") || !record(launch.environment)) throw new Error("Missing desktop MCP command.");
+    const environment: Record<string, string> = {};
+    for (const [key, value] of Object.entries(launch.environment)) { if (typeof value !== "string") throw new Error("Invalid MCP environment."); environment[key] = value; }
+    const command = launch.command;
+    client = pipeClient(command[0], command.slice(1), environment);
+    peer = pipeClient(command[0], command.slice(1), environment);
+    await client.request("initialize", { protocolVersion: "2025-11-25", clientInfo: { name: "native-journey", version: "1" }, capabilities: {} });
+    await peer.request("initialize", { protocolVersion: "2025-11-25", clientInfo: { name: "native-peer", version: "1" }, capabilities: {} });
+    const discovery = toolState(await client.request("tools/call", { name: "computer_discover", arguments: {} }));
+    if (!Array.isArray(discovery.apps)) throw new Error("No app discovery.");
+    const appInfo = discovery.apps.find((value: unknown) => record(value) && value.pid === fixture.pid);
+    if (!record(appInfo) || typeof appInfo.app_id !== "string") throw new Error("Fixture was not discoverable: " + JSON.stringify(discovery));
+    const main = client, other = peer;
+    return {
+      permissions,
+      appId: appInfo.app_id, pid: fixture.pid,
+      call: (name: string, args: Record<string, unknown> = {}) => main.request("tools/call", { name, arguments: args }, 70_000),
+      peerCall: (name: string, args: Record<string, unknown> = {}) => other.request("tools/call", { name, arguments: args }),
+      raw: (method: string, params: Record<string, unknown> = {}) => main.request(method, params),
+      hostState: () => controller.request("state"),
+      state: () => fixture.request("state"),
+      change: () => fixture.request("change"),
+      focusOther: () => fixture.request("focus_other"),
+      cover: () => fixture.request("cover"),
+      imagePixel(reply: unknown) {
+        if (!record(reply) || !Array.isArray(reply.content)) throw new Error("Missing image content.");
+        const image = reply.content.find((item: unknown) => record(item) && item.type === "image");
+        if (!record(image) || typeof image.data !== "string") throw new Error("Missing image data.");
+        return fixture.request("image_pixel", { data: image.data });
+      },
+      minimize: () => fixture.request("minimize"),
+      restore: () => fixture.request("restore"),
+      cancel: () => main.cancelPending(),
+      previewAction: (action: string) => controller.request("preview_action", { action }),
+      async approve(action = "approve") {
+        const deadline = Date.now() + 15_000;
+        for (;;) {
+          const states = await controller.request("state");
+          if (Array.isArray(states)) {
+            const state = states.find((value: unknown) => record(value) && (action === "approve" ? value.phase === "approval" : true));
+            if (record(state) && Array.isArray(state.windows)) {
+              const window = state.windows.find((value: unknown) => record(value) && value.title === "Workspace window");
+              if (!record(window) || typeof window.id !== "number") throw new Error("No workspace window in approval.");
+              await controller.request("action", { connectionId: state.connectionId, id: state.id, action, windowId: window.id });
+              return;
+            }
+          }
+          if (Date.now() >= deadline) throw new Error("Timed out waiting for native consent.");
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+      },
+      async point(observation: Record<string, unknown>, x: number, y: number) {
+        const bounds = await fixture.request("bounds");
+        if (!Array.isArray(bounds) || !record(bounds[0]) || !record(bounds[0].contentBounds) || typeof bounds[0].scale !== "number") throw new Error("Missing fixture bounds.");
+        const native = observation.window_bounds, image = observation.image_size, contentBounds = bounds[0].contentBounds;
+        if (!record(native) || !record(image) || typeof native.x !== "number" || typeof native.y !== "number" || typeof native.width !== "number" || typeof native.height !== "number" || typeof image.width !== "number" || typeof image.height !== "number" || typeof contentBounds.x !== "number" || typeof contentBounds.y !== "number") throw new Error("Missing image bounds.");
+        return { x: ((contentBounds.x + x) * bounds[0].scale - native.x) * image.width / native.width, y: ((contentBounds.y + y) * bounds[0].scale - native.y) * image.height / native.height };
+      },
+      async closeClient() { await main.close(); },
+      async [Symbol.asyncDispose]() { await Promise.all([main.close(), other.close(), controller.close(), fixture.close()]); await rm(directory, { recursive: true, force: true }); },
+    };
+  } catch (error) {
+    await Promise.all([client?.close(), peer?.close(), controller.close(), fixture.close()]);
+    await rm(directory, { recursive: true, force: true }); throw error;
+  }
 }
