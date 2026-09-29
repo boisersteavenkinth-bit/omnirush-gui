@@ -157,7 +157,7 @@ export function ComputerUseConfig({ connected, connecting, onConnect, onRefresh,
         </div> : null}
         <p className="text-xs leading-relaxed text-muted-foreground">
           {!mac ? "Keep the target app visible on an unlocked desktop. Computer Use moves the mouse and types in the foreground; choose Continue after taking over. Choose a model that accepts images. For background Blender work, ask for a Blender Python script or use an app connector. " : null}
-          Sessions end after 15 minutes and pause when idle. Window content is processed by your selected model provider. Enter passwords yourself. For websites, use the built-in browser.
+          Hide the preview if it covers app controls; Stop stays available in the OmniRush.ai window. Sessions end after 15 minutes and pause when idle. Window content is processed by your selected model provider. Enter passwords yourself. For websites, use the built-in browser.
         </p>
       </CardContent>
       <CardFooter className="flex flex-wrap items-center justify-between gap-3 border-t border-border">

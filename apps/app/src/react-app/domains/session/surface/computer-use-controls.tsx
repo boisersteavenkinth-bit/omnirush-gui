@@ -31,7 +31,10 @@ export function ComputerUseControls() {
       const selectedWindow = windows[session.id] ?? session.windows?.[0]?.id;
       const send = (command: string) => action.mutate({ connectionId: session.connectionId, id: session.id, action: command, windowId: selectedWindow });
       if (!approval && !blocked) {
-        return session.previewVisible ? null : <Button key={session.connectionId} variant="outline" onClick={() => send("show")}>Show {session.appName} preview</Button>;
+        return session.previewVisible ? null : <div key={session.connectionId} className="flex justify-end gap-2">
+          <Button variant="outline" onClick={() => send("show")}>Show {session.appName} preview</Button>
+          <Button variant="destructive" disabled={action.isPending} onClick={() => send("stop")}>Stop</Button>
+        </div>;
       }
       return <section key={session.connectionId} className="rounded-2xl border border-border bg-background p-4 shadow-lg">
         <p className="text-sm font-semibold">{approval ? `Use ${session.appName}?` : `Computer Use · ${session.appName}`}</p>

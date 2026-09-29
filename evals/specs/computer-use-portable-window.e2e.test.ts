@@ -194,14 +194,17 @@ test("Computer Use setup and approval work from the main app on Windows and Linu
     expect(result).toMatchObject({ ok: true, window_title: "Workspace window", mode: "control" });
     return result.session_id;
   });
-  await step("The main app can stop access without relying on the agent", async () => {
+  await step("Stop stays available in the main app when the preview is hidden", async () => {
     expect(toolState(await client.call("computer_observe", { session_id: session })).ok).toBe(true);
     await evalIn(app, async () => {
       const states = await window.__OMNIRUSH_ELECTRON__.invokeDesktop("getComputerUseState");
       if (!Array.isArray(states) || !states[0]) throw new Error("No active desktop session");
-      await window.__OMNIRUSH_ELECTRON__.invokeDesktop("computerUseAction", { connectionId: states[0].connectionId, id: states[0].id, action: "stop" });
+      await window.__OMNIRUSH_ELECTRON__.invokeDesktop("computerUseAction", { connectionId: states[0].connectionId, id: states[0].id, action: "hide" });
     }, { awaitPromise: true });
-    expect(toolState(await client.call("computer_session_status", { session_id: session })).code).toBe("session_unavailable");
+    expect(toolState(await client.call("computer_session_status", { session_id: session }))).toMatchObject({ state: "active", panel_visible: false });
+    await waitFor(app, () => Boolean([...document.querySelectorAll('aside[aria-label="Computer Use controls"] button')].find((button) => button.textContent.trim() === "Stop")));
+    await evalIn(app, () => [...document.querySelectorAll('aside[aria-label="Computer Use controls"] button')].find((button) => button.textContent.trim() === "Stop")?.click());
+    await expect.poll(async () => toolState(await client.call("computer_session_status", { session_id: session })).code).toBe("session_unavailable");
     expect(await world.state()).toEqual([{ count: 0, draft: "Initial draft" }, { count: 0, draft: "Initial draft" }]);
   });
 });

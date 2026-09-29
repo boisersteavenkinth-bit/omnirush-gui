@@ -641,6 +641,19 @@ export function resolveChromeBinary(env: NodeJS.ProcessEnv = process.env, platfo
 export async function killLocalPid(pid: number, options: KillLocalPidOptions = {}): Promise<boolean> {
   if (!Number.isInteger(pid) || pid <= 0) return false;
   const rootWasAlive = pidIsAlive(pid);
+  if (process.platform === "win32") {
+    // Node cannot send console Ctrl-C to a detached Windows pnpm tree.
+    // Stop this host-owned tree, including Electron and its database workers.
+    if (!rootWasAlive) return false;
+    await new Promise<void>((resolveKill, reject) => {
+      execFile("taskkill", ["/PID", String(pid), "/T", "/F"], { encoding: "utf8", timeout: 10_000 }, (error, _stdout, stderr) => {
+        if (error && pidIsAlive(pid)) { reject(new Error("Could not stop owned Windows process tree " + pid + ": " + (stderr || error.message))); return; }
+        resolveKill();
+      });
+    });
+    await waitUntilGone(pid, KILL_GRACE_MS);
+    return true;
+  }
   const graceMs = options.graceMs ?? KILL_GRACE_MS;
   const sentGroup = signalProcessGroup(pid, "SIGINT");
   const sentDirect = !sentGroup && rootWasAlive ? signalPid(pid, "SIGINT") : false;

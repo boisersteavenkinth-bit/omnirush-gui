@@ -150,7 +150,7 @@ export async function computerUseWorld(_seed: Seed, { place }: { place: Place })
   const fixture = pipeClient(fixtureExecutable, []);
   const helper = pipeClient(executable, ["mcp"]);
   const peer = pipeClient(executable, ["mcp"]);
-  const close = async () => { await Promise.all([helper.close(), peer.close(), fixture.close()]); await rm(directory, { recursive: true, force: true }); };
+  const close = async () => { await Promise.all([helper.close(), peer.close(), fixture.close()]); await rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }); };
   try {
     await fixture.request("state");
     const fixturePermissions = await fixture.request("permissions");
@@ -317,7 +317,7 @@ export async function portableComputerUseWorld(_seed: Seed, { place }: { place: 
   const directory = await mkdtemp(join(tmpdir(), "omnirush-native-journey-"));
   const launchFlags = process.platform === "linux" ? ["--no-sandbox"] : [];
   const fixture = await nativeFixtureClient(executable, [...launchFlags, join(root, "evals/packages/labs/fixtures/portable-computer-use-app.mjs"), join(directory, "fixture")]);
-  const controller = await nativeFixtureClient(executable, [...launchFlags, join(root, "evals/packages/labs/fixtures/portable-computer-use-host.mjs"), join(directory, "host")]).catch(async (error) => { await fixture.close(); await rm(directory, { recursive: true, force: true }); throw error; });
+  const controller = await nativeFixtureClient(executable, [...launchFlags, join(root, "evals/packages/labs/fixtures/portable-computer-use-host.mjs"), join(directory, "host")]).catch(async (error) => { await fixture.close(); await rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }); throw error; });
   let client: ReturnType<typeof pipeClient> | undefined;
   let peer: ReturnType<typeof pipeClient> | undefined;
   try {
@@ -396,10 +396,10 @@ export async function portableComputerUseWorld(_seed: Seed, { place }: { place: 
         return { x: ((contentBounds.x + x) * bounds[0].scale - native.x) * image.width / native.width, y: ((contentBounds.y + y) * bounds[0].scale - native.y) * image.height / native.height };
       },
       async closeClient() { await main.close(); },
-      async [Symbol.asyncDispose]() { await Promise.all([main.close(), other.close(), controller.close(), fixture.close()]); await rm(directory, { recursive: true, force: true }); },
+      async [Symbol.asyncDispose]() { await Promise.all([main.close(), other.close(), controller.close(), fixture.close()]); await rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }); },
     };
   } catch (error) {
     await Promise.all([client?.close(), peer?.close(), controller.close(), fixture.close()]);
-    await rm(directory, { recursive: true, force: true }); throw error;
+    await rm(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 }); throw error;
   }
 }

@@ -46,7 +46,7 @@ export async function createPortableComputerUseHost({ profile, capture, preview 
   const state = () => [...connections.values()].flatMap((entry) => entry.session ? [{
     connectionId: entry.id, id: entry.session.id, phase: entry.session.phase, appName: entry.session.window.appName,
     task: entry.session.purpose, mode: entry.session.mode, windows: entry.session.windows.map((w) => ({ id: w.id, title: w.title })),
-    windowTitle: entry.session.window.title, status: entry.session.status, recoverable: false,
+    windowTitle: entry.session.window.title, windowBounds: entry.session.window.bounds, status: entry.session.status, recoverable: false,
     canContinue: entry.session.phase === "paused", previewVisible: entry.session.previewVisible,
     remainingSeconds: Math.max(0, Math.ceil((entry.session.expiresAt - Date.now()) / 1000)),
   }] : []);
