@@ -105,7 +105,7 @@ describe("omnirush swarm plugin", () => {
     expect(child).toContain("layer 1 of at most 3");
     expect(child).toContain("Do not read, search or edit the board file");
     expect(child).toContain(`use the \`${OMNIRUSH_SWARM_TOOL_NAME}\` tool`);
-    expect(child).toContain("If you do delegate part of your task, add sub-task rows");
+    expect(child).toContain("If you implement a delegated part of your task, add sub-task rows");
     expect(await system("ses_grand")).toContain("layer 2 of at most 3");
     const great = await system("ses_great");
     expect(great).toContain(`layer ${OMNIRUSH_SUBAGENT_DEPTH} of at most ${OMNIRUSH_SUBAGENT_DEPTH}`);
@@ -154,11 +154,11 @@ describe("omnirush swarm plugin", () => {
     await hooks["tool.definition"]({ toolID: "task" }, task);
     expect(task.description).toBe(`Launch a new agent.\n\n${OMNIRUSH_TASK_TOOL_NOTE}`);
     expect(OMNIRUSH_TASK_TOOL_NOTE).toContain("start exactly that many, all in one message");
-    expect(OMNIRUSH_TASK_TOOL_NOTE).toContain("in the main session, for any task beyond a few tool calls");
-    expect(OMNIRUSH_TASK_TOOL_NOTE).toContain("A sub-agent starts its own sub-agents only when its task explicitly tells it to.");
+    expect(OMNIRUSH_TASK_TOOL_NOTE).toContain("in the main session, delegate only implementation work");
+    expect(OMNIRUSH_TASK_TOOL_NOTE).toContain("A sub-agent starts its own sub-agents only when its task explicitly tells it to implement a part.");
     expect(OMNIRUSH_TASK_TOOL_NOTE).toContain("never paste the user's whole message");
     // Sub-agents see this tool text too: it must not invite them to split their task.
-    expect(OMNIRUSH_TASK_TOOL_NOTE).toMatch(/A sub-agent starts its own sub-agents only when its task explicitly tells it to\.$/);
+    expect(OMNIRUSH_TASK_TOOL_NOTE).toMatch(/A sub-agent starts its own sub-agents only when its task explicitly tells it to implement a part\.$/);
     const bash = { description: "Run a command." };
     await hooks["tool.definition"]({ toolID: "bash" }, bash);
     expect(bash.description).toBe("Run a command.");

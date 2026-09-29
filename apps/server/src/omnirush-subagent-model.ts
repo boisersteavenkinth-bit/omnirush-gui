@@ -4,9 +4,9 @@
  * to the main agent's model when that model cannot serve them.
  *
  * The setting is kept at <runtimeStorageDir>/omnirush-subagent-model.json.
- * Untouched (both fields null, or no file) nothing changes: sub-agents keep
- * the engine's own inheritance of the main agent's model and effort, exactly
- * as before the picker existed.
+ * An explicit "same as main" setting (both fields null) keeps the engine's
+ * inheritance. A missing setting uses GPT-5.6 Sol with the main agent's
+ * inherited effort; users can still select another model in Preferences.
  *
  * Who does what:
  *   - The app reads and writes the setting (GET/PUT /omnirush/subagent-model).
@@ -56,7 +56,7 @@ export type SubagentModelSetting = {
   effort: OmniRushModelEffort | null;
 };
 
-export const DEFAULT_SUBAGENT_MODEL_SETTING: SubagentModelSetting = Object.freeze({ model: null, effort: null });
+export const DEFAULT_SUBAGENT_MODEL_SETTING: SubagentModelSetting = Object.freeze({ model: "gpt-5.6-sol", effort: null });
 
 export type EngineModelRef = { providerID: string; modelID: string };
 
@@ -98,7 +98,7 @@ export function parseSubagentEffort(value: unknown): OmniRushModelEffort | null 
   return (OMNIRUSH_MODEL_EFFORTS as readonly string[]).includes(normalized) ? normalized as OmniRushModelEffort : null;
 }
 
-/** A stored or submitted setting; anything unusable reads as "same as main". */
+/** A stored or submitted setting; a missing setting is handled by the GPT-5.6 Sol default. */
 export function sanitizeSubagentModelSetting(raw: unknown): SubagentModelSetting {
   if (!isRecord(raw)) return { ...DEFAULT_SUBAGENT_MODEL_SETTING };
   const model = typeof raw.model === "string" && MODEL_ID.test(raw.model.trim()) ? raw.model.trim() : null;

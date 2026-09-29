@@ -66,15 +66,19 @@ describe("sub-agent model routes", () => {
       const main = { providerID: "omnirush", modelID: "gpt-6-astra", variant: "max" };
 
       const initial = await read();
-      expect(initial.setting).toEqual({ model: null, effort: null });
+      expect(initial.setting).toEqual({ model: "gpt-5.6-sol", effort: null });
       expect(initial.signedIn).toBe(true);
       expect((initial.models as Array<{ id: string; name: string; efforts: string[] }>).map((model) => [model.id, model.name, model.efforts.join(",")])).toEqual([
         ["gpt-6-astra", "GPT 6 Astra", "low,high,xhigh,max"],
         ["gpt-6-sol", "GPT 6 Sol", "low,high,xhigh,max"],
         ["gpt-5.6-sol", "GPT-5.6 Sol", "low,high,xhigh,max"],
       ]);
-      // Untouched: sub-agent prompts stay as the engine made them.
-      expect(await resolve({ sessionId: "ses_child", rootSessionId: "ses_main", inherited: main, main })).toEqual({});
+      // A missing preference defaults to GPT-5.6 Sol while preserving the main effort.
+      expect(await resolve({ sessionId: "ses_child", rootSessionId: "ses_main", inherited: main, main })).toEqual({
+        model: { providerID: "omnirush", modelID: "gpt-5.6-sol" },
+        variant: "max",
+        gatewayFallback: { model: "gpt-6-astra", effort: "max" },
+      });
 
       const bad = await fetch(`${base}/omnirush/subagent-model`, { method: "PUT", headers: client, body: JSON.stringify({ model: "gpt-6-sol", effort: "turbo" }) });
       expect(bad.status).toBe(400);
