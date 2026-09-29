@@ -42,6 +42,7 @@ test("Windows and Linux X11 Computer Use keeps native input within the approved 
     expect(acted, JSON.stringify(acted)).toMatchObject({ ok: true, dispatched: true });
     await expect.poll(() => world.state()).toEqual([{ count: 1, draft: "Initial draft" }, { count: 0, draft: "Initial draft" }]);
     expect(toolState(await world.call("computer_act", { session_id: session, observation_id: observed.observation_id, request_id: "repeat-observation", action: { type: "click", ...point } })).code).toBe("stale_observation");
+    expect(toolState(await world.call("computer_act", { session_id: session, observation_id: observed.observation_id, request_id: "first-click", action: { type: "click", ...point } })).code).toBe("duplicate_request");
   });
   await step("Native keyboard input edits only the selected window", async () => {
     const act = async (request: string, action: object) => {
@@ -57,6 +58,24 @@ test("Windows and Linux X11 Computer Use keeps native input within the approved 
     await act("write-draft", { type: "type", text: "OmniRush 123!" });
     await expect.poll(() => world.state()).toEqual([{ count: 1, draft: "OmniRush 123!" }, { count: 0, draft: "Initial draft" }]);
   });
+  await step("Native double-click, scroll and drag affect only the selected window and release input", async () => {
+    const act = async (request: string, actionFor: (observation: Record<string, unknown>) => Promise<object>) => {
+      const observed = toolState(await world.call("computer_observe", { session_id: session }));
+      expect(observed.ok, JSON.stringify(observed)).toBe(true);
+      const action = await actionFor(observed);
+      const result = toolState(await world.call("computer_act", { session_id: session, observation_id: observed.observation_id, request_id: request, action }));
+      expect(result, JSON.stringify(result)).toMatchObject({ ok: true, dispatched: true });
+    };
+    await act("double-click", async (observed) => ({ type: "double_click", ...await world.point(observed, 480, 95) }));
+    await act("scroll", async (observed) => ({ type: "scroll", axis: "vertical", delta: 3, ...await world.point(observed, 480, 240) }));
+    await act("drag", async (observed) => ({ type: "drag", path: await Promise.all([{ x: 120, y: 310 }, { x: 140, y: 315 }, { x: 180, y: 325 }, { x: 240, y: 330 }].map(({ x, y }) => world.point(observed, x, y))) }));
+    await expect.poll(() => world.pointerState()).toEqual([
+      { doubles: 1, scrolled: true, dragged: true, released: true },
+      { doubles: 0, scrolled: false, dragged: false, released: true },
+    ]);
+    await act("restore-draft-focus", async (observed) => ({ type: "click", ...await world.point(observed, 150, 180) }));
+    expect(await world.state()).toEqual([{ count: 1, draft: "OmniRush 123!" }, { count: 0, draft: "Initial draft" }]);
+  });
   await step("Changed pixels and out-of-window coordinates cannot dispatch input", async () => {
     const observed = toolState(await world.call("computer_observe", { session_id: session }));
     await world.change();
@@ -64,6 +83,14 @@ test("Windows and Linux X11 Computer Use keeps native input within the approved 
     const fresh = toolState(await world.call("computer_observe", { session_id: session }));
     expect(toolState(await world.call("computer_act", { session_id: session, observation_id: fresh.observation_id, request_id: "outside-click", action: { type: "click", x: -1, y: 20 } }))).toMatchObject({ ok: false, code: "invalid_action", may_have_acted: false });
     expect(await world.state()).toEqual([{ count: 1, draft: "Changed by person" }, { count: 0, draft: "Initial draft" }]);
+  });
+  await step("System-wide shortcuts are rejected without closing or changing either window", async () => {
+    const observed = toolState(await world.call("computer_observe", { session_id: session }));
+    const result = toolState(await world.call("computer_act", { session_id: session, observation_id: observed.observation_id, request_id: "system-shortcut", action: { type: "key", key: "F4", modifiers: ["alt"] } }));
+    expect(result, JSON.stringify(result)).toMatchObject({ ok: false, code: "unsupported_action" });
+    expect(toolState(await world.call("computer_session_status", { session_id: session })).state).toBe("paused");
+    expect(await world.state()).toEqual([{ count: 1, draft: "Changed by person" }, { count: 0, draft: "Initial draft" }]);
+    await world.approve("resume");
   });
   await step("Focus moving to another window stops keyboard input", async () => {
     const observed = toolState(await world.call("computer_observe", { session_id: session }));
@@ -114,10 +141,14 @@ test("Windows and Linux X11 Computer Use keeps native input within the approved 
     const observed = toolState(await world.call("computer_observe", { session_id: opened.session_id, include_image: false }));
     expect(observed.ok).toBe(true);
     expect(toolState(await world.call("computer_act", { session_id: opened.session_id, observation_id: observed.observation_id, request_id: "read-only-type", action: { type: "type", text: "Forbidden" } })).code).toBe("scope_denied");
+    const baseline = await world.imagePixel(await world.call("computer_observe", { session_id: opened.session_id }));
+    if (!baseline || typeof baseline !== "object" || !("rgb" in baseline) || !Array.isArray(baseline.rgb)) throw new Error("Missing selected-window image sample.");
+    // Windows capture can round colours during its native pixel conversion.
+    for (const channel of baseline.rgb) { expect(channel).toBeGreaterThanOrEqual(234); expect(channel).toBeLessThanOrEqual(242); }
     await world.cover();
     const covered = await world.call("computer_observe", { session_id: opened.session_id });
     expect(toolState(covered).ok, JSON.stringify(toolState(covered))).toBe(true);
-    expect(await world.imagePixel(covered)).toMatchObject({ rgb: [238, 238, 238] });
+    expect(await world.imagePixel(covered)).toEqual(baseline);
     await world.closeClient();
     await expect.poll(() => world.hostState()).toEqual([]);
     expect(await world.state()).toEqual(stoppedState);

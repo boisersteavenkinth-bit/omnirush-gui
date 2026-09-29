@@ -886,6 +886,7 @@ async function ensureDisplay(repoRoot: string, env: NodeJS.ProcessEnv, log: (mes
         if (process.platform === "win32") {
           // Workspace dev scripts use POSIX environment assignments.
           // Keep the emulator scoped to this isolated eval process.
+          env.pnpm_config_shell_emulator = "true";
           env.npm_config_shell_emulator = "true";
           if (!pnpmEntry || !/pnpm\.(?:c|m)?js$/i.test(pnpmEntry) || !existsSync(pnpmEntry)) {
             throw new Error("Run Windows Electron journeys through pnpm so npm_execpath names its JS entry.");
