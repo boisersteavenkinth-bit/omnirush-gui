@@ -69,7 +69,7 @@ test("Windows and Linux X11 Computer Use keeps native input within the approved 
     await act("double-click", async (observed) => ({ type: "double_click", ...await world.point(observed, 480, 95) }));
     await act("scroll", async (observed) => ({ type: "scroll", axis: "vertical", delta: 3, ...await world.point(observed, 480, 240) }));
     await act("drag", async (observed) => ({ type: "drag", path: await Promise.all([{ x: 120, y: 310 }, { x: 140, y: 315 }, { x: 180, y: 325 }, { x: 240, y: 330 }].map(({ x, y }) => world.point(observed, x, y))) }));
-    await expect.poll(() => world.pointerState()).toEqual([
+    await expect.poll(() => world.pointerState(), { message: JSON.stringify(await world.inputEvents()) }).toEqual([
       { doubles: 1, scrolled: true, dragged: true, released: true },
       { doubles: 0, scrolled: false, dragged: false, released: true },
     ]);

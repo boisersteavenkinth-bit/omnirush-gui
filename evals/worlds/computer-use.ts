@@ -361,6 +361,7 @@ export async function portableComputerUseWorld(_seed: Seed, { place }: { place: 
       cover: () => fixture.request("cover"),
       outsideInput: () => fixture.request("outside_input"),
       pointerState: () => fixture.request("pointer_state"),
+      inputEvents: () => fixture.request("input_events"),
       imagePixel(reply: unknown) {
         if (!record(reply) || !Array.isArray(reply.content)) throw new Error("Missing image content.");
         const image = reply.content.find((item: unknown) => record(item) && item.type === "image");

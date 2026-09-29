@@ -152,7 +152,7 @@ function windows() {
           for (const p of points) {
             const position = pointValue(p); checked(position); move(position.x, position.y); checked(position);
             if (action.type === "drag" && !pointerDown) { pointerDown = true; mouseEvent(2); }
-            await new Promise((resolve) => setTimeout(resolve, action.type === "drag" ? 12 : 2));
+            await new Promise((resolve) => setTimeout(resolve, action.type === "scroll" ? 32 : action.type === "drag" ? 12 : 2));
           }
           const position = pointValue(points.at(-1)); checked(position);
           if (action.type === "scroll") mouseEvent(action.axis === "horizontal" ? 0x1000 : 0x800, action.delta * (action.axis === "horizontal" ? 120 : -120));
@@ -343,8 +343,8 @@ function x11() {
   const fakeMotion = (...args) => inject(rawMotion, args);
   const keysym = x.func("ulong XStringToKeysym(str name)"), keycode = x.func("uint8_t XKeysymToKeycode(void *display, ulong symbol)");
   const downKeys = new Set();
-  let pointerDown = false;
-  const release = () => { for (const key of downKeys) inject(rawKey, [display, key, 0, 0], false); downKeys.clear(); if (pointerDown) inject(rawButton, [display, 1, 0, 0], false); pointerDown = false; sync(display, 0); };
+  let pointerDown = false, wheelDown = 0;
+  const release = () => { for (const key of downKeys) inject(rawKey, [display, key, 0, 0], false); downKeys.clear(); if (pointerDown) inject(rawButton, [display, 1, 0, 0], false); pointerDown = false; if (wheelDown) inject(rawButton, [display, wheelDown, 0, 0], false); wheelDown = 0; sync(display, 0); };
   const symbolAt = x.func("ulong XKeycodeToKeysym(void *display, uint8_t code, int index)");
   const key = (name, down) => { const symbol = typeof name === "number" ? name : keysym(name); const code = keycode(display, symbol); if (!code) fail("unsupported_action", "This character is unavailable in the active keyboard layout. Use an app connector for arbitrary Unicode text."); if (down) downKeys.add(code); else downKeys.delete(code); if (!fakeKey(display, code, down ? 1 : 0, 0)) fail("input_unavailable", "X11 rejected keyboard input."); sync(display, 0); };
   return {
@@ -382,12 +382,19 @@ function x11() {
           for (const p of points) {
             checked(); fakeMotion(display, -1, expected.bounds.x + Math.round(p.x), expected.bounds.y + Math.round(p.y), 0); sync(display, 0); checked(p);
             if (action.type === "drag" && !pointerDown) { pointerDown = true; fakeButton(display, 1, 1, 0); sync(display, 0); }
-            await new Promise((resolve) => setTimeout(resolve, action.type === "drag" ? 12 : 2));
+            await new Promise((resolve) => setTimeout(resolve, action.type === "scroll" ? 32 : action.type === "drag" ? 12 : 2));
           }
           checked(points.at(-1));
           if (action.type === "scroll") {
             const button = action.axis === "horizontal" ? action.delta > 0 ? 7 : 6 : action.delta > 0 ? 5 : 4;
-            for (let i = 0; i < Math.abs(action.delta); i++) { checked(points.at(-1)); fakeButton(display, button, 1, 0); fakeButton(display, button, 0, 0); sync(display, 0); }
+            // Let the app process pointer entry and distinct wheel ticks.
+            // Keep releases tracked so person input or Stop cannot leave a button held.
+            for (let i = 0; i < Math.abs(action.delta); i++) {
+              checked(points.at(-1)); wheelDown = button; fakeButton(display, button, 1, 0); sync(display, 0);
+              await new Promise((resolve) => setTimeout(resolve, 8));
+              fakeButton(display, button, 0, 0); wheelDown = 0; sync(display, 0);
+              await new Promise((resolve) => setTimeout(resolve, 12));
+            }
           } else if (action.type !== "drag") {
             for (let i = 0; i < (action.type === "double_click" ? 2 : 1); i++) { checked(points.at(-1)); pointerDown = true; fakeButton(display, 1, 1, 0); fakeButton(display, 1, 0, 0); pointerDown = false; sync(display, 0); if (i === 0 && action.type === "double_click") await new Promise((resolve) => setTimeout(resolve, 60)); }
           }
