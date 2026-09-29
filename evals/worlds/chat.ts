@@ -135,7 +135,7 @@ export async function configureProvider(
   }, [workspaceId, providerId, modelId, `${providerId}/${modelId}`, JSON.stringify(opencode)]), { awaitPromise: true, timeoutMs: 120_000 });
   if (result !== "ok") throw new Error(`Provider configuration failed: ${String(result)}`);
   await seed.evalIn(app, () => { location.reload(); return true; });
-  const ready = await seed.evalIn(app, browserScript(async (workspaceId, engine, providerId, modelId) => {
+  const readiness = browserScript(async (workspaceId, engine, providerId, modelId) => {
     const deadline = Date.now() + 60000;
     while (Date.now() < deadline) {
       const base = "http://127.0.0.1:" + localStorage.getItem("omnirush.server.port");
@@ -159,7 +159,21 @@ export async function configureProvider(
       await new Promise((resolve) => setTimeout(resolve, 500));
     }
     return false;
-  }, [workspaceId, engine, providerId, modelId]), { awaitPromise: true, timeoutMs: 120_000 });
+  }, [workspaceId, engine, providerId, modelId]);
+  // Page reload replaces the CDP execution context. Retry this read-only
+  // readiness probe if it races that replacement; catalog assertions still run.
+  const deadline = Date.now() + 120_000;
+  let ready: unknown;
+  for (;;) {
+    try {
+      ready = await seed.evalIn(app, readiness, { awaitPromise: true, timeoutMs: 120_000 });
+      break;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!/Inspected target navigated or closed|Execution context was destroyed|Cannot find context/i.test(message) || Date.now() >= deadline) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+  }
   if (ready !== true) throw new Error(`Selected ${engine} engine did not become ready after provider configuration.`);
 }
 
