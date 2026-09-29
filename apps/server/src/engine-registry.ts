@@ -315,7 +315,7 @@ export async function reapOrphanEngineInstances(
   }
   for (const entry of toKill) {
     result.killed.push(entry.pid);
-    options?.logger?.log("info", `Reaped orphaned managed OpenCode engine (pid ${entry.pid}).`, {
+    options?.logger?.log("info", `Reaped orphaned managed OmniRush engine (pid ${entry.pid}).`, {
       "engine.pid": entry.pid,
       "engine.port": entry.port,
       "engine.owner_pid": entry.ownerPid,

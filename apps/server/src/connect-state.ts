@@ -230,9 +230,9 @@ export function resolveConnectWorkspace(config: ServerConfig, options: ConnectSn
       if (workspace) return { workspace, directory: workspaceDirectory(workspace, options.resolveOpencodeDirectory) };
     }
     if (matches.length > 1) {
-      return { resolution: "ambiguous", directory: normalizedRequested, reason: "Multiple workspaces have this exact OpenCode directory" };
+      return { resolution: "ambiguous", directory: normalizedRequested, reason: "Multiple workspaces have this exact OmniRush directory" };
     }
-    return { resolution: "unknown", directory: normalizedRequested, reason: "No workspace has this exact OpenCode directory" };
+    return { resolution: "unknown", directory: normalizedRequested, reason: "No workspace has this exact OmniRush directory" };
   }
 
   const only = config.workspaces[0];
@@ -262,7 +262,7 @@ async function resolveCloudHealth(config: ServerConfig, options: ConnectSnapshot
         resolution: "resolved",
         id: resolved.workspace.id,
         directory: resolved.directory,
-        reason: "OpenCode health probe is not available in this route",
+        reason: "OmniRush health probe is not available in this route",
       },
     };
   }
@@ -332,7 +332,7 @@ export async function inspectConnectSnapshot(
         resolution: "unknown",
         id: null,
         directory: null,
-        reason: "Passive diagnostics inspection does not probe OpenCode health",
+        reason: "Passive diagnostics inspection does not probe OmniRush health",
       },
       googleWorkspace: { legacyConfigured: googleWorkspaceLegacyConfigured() },
     },

@@ -1,8 +1,11 @@
 /** @jsxImportSource react */
 import { useCallback, useEffect, useState } from "react";
 import { resolveProviderDisplayName } from "@/app/utils";
+import { isSupportedModelProvider } from "@/app/lib/provider-catalog";
 import {
   newProvidersEvent,
+  readSeenProviderIds,
+  markProvidersSeen,
   type NewProviderInfo,
   type NewProvidersEventDetail,
 } from "@/app/lib/provider-events";
@@ -11,7 +14,6 @@ import { useNotificationStore } from "@/react-app/kernel/notification-store";
 import { notifyEvent } from "./notifications";
 import { orgOnboardingVisibilityEvent } from "./reload-coordinator";
 
-const SEEN_KEY = "omnirush.seenProviderIds";
 const PENDING_MODEL_PICKER_KEY = "omnirush.pendingModelPickerProviderIds";
 const NEW_PROVIDERS_DEDUPE_KEY = "new-providers";
 
@@ -21,22 +23,6 @@ export const openModelPickerEvent = "omnirush-open-model-picker";
 export const openProviderAuthEvent = "omnirush-open-provider-auth";
 export const pendingModelPickerProviderIdsKey = PENDING_MODEL_PICKER_KEY;
 
-function readSeenProviderIds(): Set<string> {
-  try {
-    const raw = window.localStorage.getItem(SEEN_KEY);
-    return new Set(raw ? JSON.parse(raw) : []);
-  } catch {
-    return new Set();
-  }
-}
-
-function markProvidersSeen(ids: string[]): void {
-  try {
-    const existing = readSeenProviderIds();
-    for (const id of ids) existing.add(id);
-    window.localStorage.setItem(SEEN_KEY, JSON.stringify([...existing]));
-  } catch {}
-}
 
 /**
  * Open the model picker focused on the given new providers. If no session
@@ -95,9 +81,17 @@ export function NewProvidersListener() {
   const showProviders = useCallback((detail: NewProvidersEventDetail) => {
     const seen = readSeenProviderIds();
     const genuinelyNew = detail.providers.filter((p) => !seen.has(p.id));
-    const newProviderCount = detail.newProviderCount ?? genuinelyNew.length;
+    const newProviderCount = Math.min(
+      detail.newProviderCount ?? genuinelyNew.length,
+      genuinelyNew.length,
+    );
     const newModelCount = detail.newModelCount ?? 0;
-    if (genuinelyNew.length === 0 && newModelCount === 0) return;
+    if (newProviderCount === 0 && newModelCount === 0) return;
+
+    // Remember synchronously so duplicate sync sources cannot both announce
+    // a provider before React writes the notification. Onboarding owns sign-in.
+    markProvidersSeen(detail.providers.map((provider) => provider.id));
+    if (detail.source === "sign_in") return;
 
     setState((prev) => ({
       active: true,
@@ -116,15 +110,21 @@ export function NewProvidersListener() {
   useEffect(() => {
     const handler = (event: Event) => {
       const detail = (event as CustomEvent<NewProvidersEventDetail>).detail;
-      if (detail.providers.length === 0 && !detail.newModelCount) return;
+      // Cloud sync uses Den IDs; its imports become supported lpr_* providers.
+      // Local catalog sources use engine IDs and must obey the picker allowlist.
+      const providers = detail.source === "cloud_sync" || detail.source === "sign_in"
+        ? detail.providers
+        : detail.providers.filter((provider) => isSupportedModelProvider(provider.id));
+      if (detail.providers.length > 0 && providers.length === 0) return;
+      if (providers.length === 0 && !detail.newModelCount) return;
       if (orgOnboardingVisible) {
         setPendingProviders((current) => [
           ...current,
-          ...detail.providers.filter((p) => !current.some((existing) => existing.id === p.id)),
+          ...providers.filter((p) => !current.some((existing) => existing.id === p.id)),
         ]);
         return;
       }
-      showProviders(detail);
+      showProviders({ ...detail, providers });
     };
     window.addEventListener(newProvidersEvent, handler);
     return () => window.removeEventListener(newProvidersEvent, handler);
@@ -150,8 +150,6 @@ export function NewProvidersListener() {
     if (!state.active || (state.providers.length === 0 && state.newModelCount === 0)) {
       return;
     }
-
-    markProvidersSeen(state.providers.map((p) => p.id));
 
     const parts: string[] = [];
     if (state.newProviderCount > 0) {

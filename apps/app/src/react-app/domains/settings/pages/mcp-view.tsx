@@ -2515,7 +2515,7 @@ function McpAdvancedConfigSection(props: {
                   </>
                 )}
               </Button>
-              <a href="https://opencode.ai/docs/mcp-servers/" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-xs text-dls-secondary transition-colors hover:text-dls-text">
+              <a href="https://modelcontextprotocol.io/docs/learn/architecture" target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-1 text-xs text-dls-secondary transition-colors hover:text-dls-text">
                 {t("mcp.docs_link")}
                 <ExternalLink size={11} />
               </a>

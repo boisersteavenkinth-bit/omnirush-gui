@@ -2576,7 +2576,7 @@ export function SessionRoute() {
       description: "Dev-only eval hook that creates a child session blocked on a permission request.",
       sideEffect: "mutation",
       disabled: !selectedWorkspaceId || !selectedSessionId,
-      execute: () => {
+      execute: (args) => {
         if (!selectedWorkspaceId || !selectedSessionId) {
           return { ok: false, error: "No session is selected." };
         }
@@ -2585,6 +2585,10 @@ export function SessionRoute() {
         );
         if (!parent) return { ok: false, error: "The selected session is unavailable." };
 
+        const browserBranding = typeof args === "object" && args !== null
+          && Reflect.get(args, "browserBranding") === true;
+        const browserTool = "opencode-chrome-devtools_browser_open";
+
         const childSessionId = `${selectedSessionId}:eval-child`;
         // Match a real session.created event: a concurrent list snapshot must
         // not remove this newly seeded child before its approval is answered.
@@ -2592,9 +2596,12 @@ export function SessionRoute() {
         const request: PendingPermission = {
           id: `${selectedSessionId}:eval-child-permission`,
           sessionID: childSessionId,
-          permission: "bash",
-          patterns: ["git status --short --branch"],
-          metadata: {
+          permission: browserBranding ? browserTool : "bash",
+          patterns: browserBranding ? [browserTool] : ["git status --short --branch"],
+          metadata: browserBranding ? {
+            tool: browserTool,
+            description: "OpenCode browser access",
+          } : {
             command: "git status --short --branch",
             description: "Inspect the delegated task workspace",
           },

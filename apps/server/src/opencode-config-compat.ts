@@ -21,10 +21,10 @@ import { globalOpencodeConfigDir, workspaceOpencodeConfigCandidates } from "@omn
 import { readJsoncFile } from "./jsonc.js";
 
 export const OPENCODE_V2_PERMISSIONS_MESSAGE =
-  'V2 permissions are not supported by OpenCode V1. Use V1 "permission" rules or run opencode2.';
+  'V2 permissions are not supported by OmniRush V1. Use V1 "permission" rules or run opencode2.';
 
 export const OPENCODE_CONFIG_COMPAT_HINT =
-  'Rename "permissions" to "permission" (OpenCode V1 rules) or remove it, then restart OmniRush.ai.';
+  'Rename "permissions" to "permission" (OmniRush V1 rules) or remove it, then restart OmniRush.ai.';
 
 export type OpencodeConfigCompatScope = "global" | "workspace";
 
@@ -156,7 +156,7 @@ export class OpencodeConfigCompatError extends Error {
 
   constructor(findings: OpencodeConfigCompatFinding[]) {
     super([
-      "OpenCode cannot start with the current global configuration.",
+      "OmniRush cannot start with the current global configuration.",
       ...findings.map(formatOpencodeConfigCompatFinding),
       OPENCODE_CONFIG_COMPAT_HINT,
     ].join("\n"));
@@ -182,8 +182,8 @@ export async function assertOpencodeConfigCompat(input: {
     input.logger?.log(
       finding.scope === "global" ? "error" : "warn",
       finding.scope === "global"
-        ? "OpenCode global configuration uses V2 permissions; the bundled engine refuses to start."
-        : "OpenCode workspace configuration uses V2 permissions; the engine will reject that workspace.",
+        ? "OmniRush global configuration uses V2 permissions; the bundled engine refuses to start."
+        : "OmniRush workspace configuration uses V2 permissions; the engine will reject that workspace.",
       opencodeConfigCompatLogAttributes(finding),
     );
   }
@@ -209,6 +209,6 @@ export function parseOpencodeConfigErrorBody(body: unknown): OpencodeConfigError
       })
     : [];
   const parts = [detail, formatIssues(issues)].filter(Boolean);
-  const message = `OpenCode configuration is invalid${file ? ` at ${file}` : ""}${parts.length ? `: ${parts.join("; ")}` : ""}`;
+  const message = `OmniRush configuration is invalid${file ? ` at ${file}` : ""}${parts.length ? `: ${parts.join("; ")}` : ""}`;
   return { name: body.name, file, message, issues };
 }

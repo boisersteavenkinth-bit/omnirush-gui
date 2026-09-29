@@ -24,6 +24,7 @@ import type {
 import type { OpencodeExecutionSnapshot } from "../../../../app/lib/desktop-types";
 import { formatRelativeTime, isDesktopRuntime } from "../../../../app/utils";
 import { t } from "../../../../i18n";
+import { displayRuntimeBrand } from "@/lib/display-runtime-brand";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -582,7 +583,7 @@ export function DebugView(props: DebugViewProps) {
               <div className="mb-1 text-[10px] font-medium uppercase tracking-wider text-dls-secondary">
                 {t("settings.last_error")}
               </div>
-              <pre className={miniPreClass}>{props.opencodeConnectCard.error}</pre>
+              <pre className={miniPreClass}>{displayRuntimeBrand(props.opencodeConnectCard.error)}</pre>
             </div>
           ) : null}
         </div>

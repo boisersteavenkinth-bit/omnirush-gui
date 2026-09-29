@@ -1324,7 +1324,7 @@ export class EnginePool {
           }
         }
         await previous.handle.close();
-        if (previous.handle.isAlive()) throw new Error("Managed OpenCode process remained alive after close");
+        if (previous.handle.isAlive()) throw new Error("Managed OmniRush process remained alive after close");
         previous.status = "dead";
         if (previous.registryId) await removeEngineInstance(this.config, previous.registryId).catch(() => undefined);
         this.generations = this.generations.filter((entry) => entry.id !== previous.id);
@@ -1533,7 +1533,7 @@ export class EnginePool {
       }
       await new Promise((resolve) => setTimeout(resolve, 500));
     }
-    throw new Error("Standby OpenCode engine did not report healthy");
+    throw new Error("Standby OmniRush engine did not report healthy");
   }
 
   private async nonIdleSessionIds(generation: Generation | null): Promise<string[]> {
@@ -1624,11 +1624,11 @@ export class EnginePool {
   private abortEventProxies(): void {
     const controllers = [...this.eventProxyControllers];
     this.eventProxyControllers.clear();
-    for (const controller of controllers) controller.abort(new Error("OpenCode engine generation changed"));
+    for (const controller of controllers) controller.abort(new Error("OmniRush engine generation changed"));
   }
 
   private async abortSession(generation: Generation, sessionId: string): Promise<void> {
-    this.hooks.logger?.log("info", "Aborting OpenCode session from engine pool.", {
+    this.hooks.logger?.log("info", "Aborting OmniRush session from engine pool.", {
       "abort.source": "engine_pool.drain_timeout",
       "abort.initiator": "system",
       "abort.reason": "draining engine saw no session activity for the grace period",
@@ -1641,14 +1641,14 @@ export class EnginePool {
         headers: { Authorization: buildEngineAuthProbeHeader(generation.handle.username, generation.handle.password) },
         signal: AbortSignal.timeout(5_000),
       });
-      this.hooks.logger?.log("info", "OpenCode session abort from engine pool completed.", {
+      this.hooks.logger?.log("info", "OmniRush session abort from engine pool completed.", {
         "abort.source": "engine_pool.drain_timeout",
         "abort.initiator": "system",
         "session.id": sessionId,
         "engine.generation_id": generation.id,
       });
     } catch (error) {
-      this.hooks.logger?.log("error", "OpenCode session abort from engine pool failed.", {
+      this.hooks.logger?.log("error", "OmniRush session abort from engine pool failed.", {
         "abort.source": "engine_pool.drain_timeout",
         "abort.initiator": "system",
         "session.id": sessionId,

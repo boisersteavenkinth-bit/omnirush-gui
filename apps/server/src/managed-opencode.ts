@@ -89,7 +89,7 @@ export function createManagedProcessClose(
         // Re-check below; kill can race a natural exit.
       }
       if (!await waitForExit(options.killTimeoutMs ?? 500)) {
-        throw new Error("Managed OpenCode process did not exit after SIGKILL");
+        throw new Error("Managed OmniRush process did not exit after SIGKILL");
       }
     })();
     return closePromise;
@@ -148,7 +148,7 @@ class ManagedOpencodeExitError extends Error {
   readonly exitCode: number | null;
 
   constructor(exitCode: number | null, output: string) {
-    super(`OpenCode server exited with code ${exitCode}${output.trim() ? `\n${output}` : ""}`);
+    super(`OmniRush server exited with code ${exitCode}${output.trim() ? `\n${output}` : ""}`);
     this.exitCode = exitCode;
   }
 }
@@ -214,7 +214,7 @@ async function startManagedEngine2Server(
   let engineUrl: string;
   try {
     engineUrl = await new Promise<string>((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error(`Timeout waiting for OpenCode server after ${timeoutMs}ms`)), timeoutMs);
+      const timeout = setTimeout(() => reject(new Error(`Timeout waiting for OmniRush server after ${timeoutMs}ms`)), timeoutMs);
       let output = "";
       const done = (value: string) => {
         clearTimeout(timeout);
@@ -332,7 +332,7 @@ async function startManagedOpencodeServer(
   let url: string;
   try {
     url = await new Promise<string>((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error(`Timeout waiting for OpenCode server after ${options.timeoutMs ?? 15000}ms`)), options.timeoutMs ?? 15000);
+      const timeout = setTimeout(() => reject(new Error(`Timeout waiting for OmniRush server after ${options.timeoutMs ?? 15000}ms`)), options.timeoutMs ?? 15000);
       let output = "";
       const done = (value: string) => {
         clearTimeout(timeout);
@@ -347,7 +347,7 @@ async function startManagedOpencodeServer(
         for (const line of output.split("\n")) {
           if (!line.startsWith("opencode server listening")) continue;
           const match = line.match(/on\s+(https?:\/\/[^\s]+)/);
-          if (!match?.[1]) return fail(new Error(`Failed to parse OpenCode server URL from: ${line}`));
+          if (!match?.[1]) return fail(new Error(`Failed to parse OmniRush server URL from: ${line}`));
           done(match[1]);
         }
       });

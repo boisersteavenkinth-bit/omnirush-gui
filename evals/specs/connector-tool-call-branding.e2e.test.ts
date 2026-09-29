@@ -6,8 +6,15 @@ const test = spec.world(connectorBranding, { timeout: 420_000 });
 
 test("connector-backed tool calls show first-class branding and human-readable labels", async ({ world, user, probe, step }) => {
   const sinceIso = new Date().toISOString();
+  const runTask = async () => {
+    await probe.eventually(() => probe.eval(() => {
+      const button = document.querySelector<HTMLButtonElement>('button[aria-label="Run task"]');
+      return Boolean(button && !button.disabled);
+    }), { within: 30_000, label: "Run task enabled after model synchronization", until: value => value === true });
+    await user.click("Run task");
+  };
   await user.type("composer", world.prompt);
-  await user.click("Run task");
+  await runTask();
 
   await step("the real search and connector action are readable while the tool runs", async () => {
     await user.see({ text: /Searched your connections for.*Slack list_channels/ }, { timeoutMs: 60_000 });
@@ -17,7 +24,7 @@ test("connector-backed tool calls show first-class branding and human-readable l
   });
 
   await step("the completed connector action exposes its arguments and survives reload", async () => {
-    await user.see({ text: world.proof }, { timeoutMs: 60_000 });
+    await user.see({ text: "Listed the channels." }, { timeoutMs: 60_000 });
     await user.see("Run task");
     expect(await world.den.mocks.connector.toolCalls({ name: "list_channels", sinceIso, atLeast: 1 }))
       .toMatchObject([{ name: "list_channels", args: { limit: 3 } }]);
@@ -36,6 +43,8 @@ test("connector-backed tool calls show first-class branding and human-readable l
     await user.click({ role: "button", label: "Listed channels. Show technical details" });
     await user.see({ text: /mcp:.*:list_channels/ });
     await user.see({ text: /"limit":\s*3/ });
+    await user.see({ text: `OmniRush diagnostic: ${world.proof}` });
+    await user.notSee({ text: /OpenCode diagnostic/ });
     await user.screenshot();
     await user.reload();
     await user.see({ text: /^Listed channels$/ }, { timeoutMs: 30_000 });
@@ -43,12 +52,13 @@ test("connector-backed tool calls show first-class branding and human-readable l
     await user.notSee({ text: /omnirush-cloud_execute_capability/ });
     await user.click({ role: "button", label: "Listed channels. Show technical details" });
     await user.see({ text: /"limit":\s*3/ });
+    await user.see({ text: `OmniRush diagnostic: ${world.proof}` });
     await user.click({ role: "button", label: "Listed channels. Hide technical details" });
   });
 
   await step("a failed connector action stays identifiable and is not shown as successful", async () => {
     await user.type("composer", world.failurePrompt);
-    await user.click("Run task");
+    await runTask();
     await user.see({ text: /^Reading history$/ }, { timeoutMs: 30_000 });
     await user.see({ role: "button", label: /Read history failed/ }, { timeoutMs: 60_000 });
     await user.see("Run task");

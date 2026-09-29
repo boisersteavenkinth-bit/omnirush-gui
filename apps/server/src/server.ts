@@ -721,7 +721,7 @@ async function assertWorkspaceOwnsProxiedSessionRead(
     if (result.response?.status === 404) {
       throw new ApiError(404, "session_not_found", "Session not found");
     }
-    throw new ApiError(502, "opencode_request_failed", "OpenCode request failed", {
+    throw new ApiError(502, "opencode_request_failed", "OmniRush request failed", {
       ...(result.response ? { status: result.response.status } : {}),
       body: result.error,
       path: `/session/${encodeURIComponent(sessionId)}`,
@@ -1724,7 +1724,7 @@ export async function proxyOpencodeV2Request(input: {
       },
       async transform(chunk, controller) {
         const parsed = frames.push(chunk);
-        if (parsed.overflow) throw new Error("OpenCode v2 event frame exceeded the size limit");
+        if (parsed.overflow) throw new Error("OmniRush v2 event frame exceeded the size limit");
         for (const frame of parsed.frames) {
           let scopedFrame = frame;
           let payload = parseSsePayload(frame);
@@ -1821,7 +1821,7 @@ function engineNeverReceivedRequest(error: unknown): boolean {
 }
 
 function opencodeUnreachableError(error: unknown, path: string): ApiError {
-  return new ApiError(502, "opencode_unreachable", "OpenCode engine is unavailable", {
+  return new ApiError(502, "opencode_unreachable", "OmniRush engine is unavailable", {
     path,
     cause: error instanceof Error ? error.message : String(error),
   });
@@ -1891,7 +1891,7 @@ export function createWorkspaceOpencodeClient(
     : resolveWorkspaceOpencodeConnection(config, workspace);
   const baseUrl = connection.baseUrl?.trim();
   if (!baseUrl) {
-    throw new ApiError(400, "opencode_unconfigured", "OpenCode base URL is missing for this workspace", {
+    throw new ApiError(400, "opencode_unconfigured", "OmniRush base URL is missing for this workspace", {
       workspaceId: workspace.id,
       workspaceType: workspace.workspaceType,
     });
@@ -1916,10 +1916,10 @@ export function unwrapOpencodeResult<T, E>(result: OpencodeClientResult<T, E>, p
     return result.data;
   }
   if (result.error === undefined) {
-    throw new ApiError(502, "opencode_empty_response", "OpenCode returned an empty response", { path });
+    throw new ApiError(502, "opencode_empty_response", "OmniRush returned an empty response", { path });
   }
   if (!result.response) {
-    throw new ApiError(502, "opencode_unreachable", "OpenCode request failed before a response was received", {
+    throw new ApiError(502, "opencode_unreachable", "OmniRush request failed before a response was received", {
       body: result.error,
       path,
     });
@@ -1938,7 +1938,7 @@ export function unwrapOpencodeResult<T, E>(result: OpencodeClientResult<T, E>, p
       path,
     });
   }
-  throw new ApiError(502, "opencode_request_failed", "OpenCode request failed", {
+  throw new ApiError(502, "opencode_request_failed", "OmniRush request failed", {
     status: result.response.status,
     body: result.error,
     path,
@@ -1983,7 +1983,7 @@ export async function proxyOpencodeRequest(input: {
   const baseUrl = route?.target.baseUrl ??
     (workspace ? resolveWorkspaceOpencodeConnection(input.config, workspace).baseUrl?.trim() ?? "" : "");
   if (!baseUrl) {
-    throw new ApiError(400, "opencode_unconfigured", "OpenCode base URL is missing for this workspace");
+    throw new ApiError(400, "opencode_unconfigured", "OmniRush base URL is missing for this workspace");
   }
 
   let headers = new Headers(input.request.headers);
@@ -2253,9 +2253,9 @@ async function serveLocalSessionList(
             headers: { Authorization: buildEngineAuthProbeHeader(engine.username, engine.password) },
             signal: AbortSignal.timeout(10_000),
           });
-          if (!response.ok) throw new Error(`OpenCode session index failed with status ${response.status}`);
+          if (!response.ok) throw new Error(`OmniRush session index failed with status ${response.status}`);
           const payload: unknown = await response.json();
-          if (!Array.isArray(payload)) throw new Error("OpenCode session index returned an unreadable page");
+          if (!Array.isArray(payload)) throw new Error("OmniRush session index returned an unreadable page");
           return { items: payload, nextCursor: response.headers.get("x-next-cursor") };
         },
       });
@@ -2331,7 +2331,7 @@ async function proxyEngineAggregateRead(input: {
   }));
   const results = settled.flatMap((entry) => entry.status === "fulfilled" ? [entry.value] : []);
   const primary = results.find((entry) => entry.connection.role === "primary");
-  if (!primary) throw new ApiError(502, "opencode_unreachable", "No OpenCode engine is available");
+  if (!primary) throw new ApiError(502, "opencode_unreachable", "No OmniRush engine is available");
   if (!primary.response.ok) return sanitizeProxyResponse(primary.response);
 
   if (input.kind === "status") {
@@ -2498,7 +2498,7 @@ async function proxyEngineEventStreams(input: {
     lease.signal.addEventListener("abort", onLeaseAbort, { once: true });
     if (lease.signal.aborted) onLeaseAbort();
     const timer = setTimeout(
-      () => establish.abort(new Error("OpenCode event stream establishment timed out")),
+      () => establish.abort(new Error("OmniRush event stream establishment timed out")),
       engineEventStreamEstablishTimeoutMs(),
     );
     timer.unref?.();
@@ -2527,7 +2527,7 @@ async function proxyEngineEventStreams(input: {
   if (!primary) {
     lease.release();
     discard(successful);
-    throw new ApiError(502, "opencode_unreachable", "The primary OpenCode event stream is unavailable");
+    throw new ApiError(502, "opencode_unreachable", "The primary OmniRush event stream is unavailable");
   }
   if (!primary.response.ok || !primary.response.body) {
     lease.release();
@@ -3318,7 +3318,7 @@ function createRoutes(
   const runModeState = async (workspace: WorkspaceInfo): Promise<WorkspaceRunModeState & { path: string }> => {
     const state = await readWorkspaceRunMode(workspace.path);
     if (engineV2Preview.status().chatRouting) {
-      return { ...state, supported: false, reason: "Workspace run modes are unavailable while OpenCode v2 chat routing is enabled." };
+      return { ...state, supported: false, reason: "Workspace run modes are unavailable while OmniRush v2 chat routing is enabled." };
     }
     if (workspace.workspaceType === "remote" || resolve(resolveOpencodeDirectory(workspace) ?? workspace.path) !== resolve(workspace.path)) {
       return { ...state, supported: false, reason: "Workspace run modes require an engine using this local workspace directory." };
@@ -3376,7 +3376,7 @@ function createRoutes(
       if (pendingRunModeRefresh.has(current.path)) {
         refresh = "deferred";
         try {
-          if (engineV2Preview.status().chatRouting) throw new Error("OpenCode v2 chat routing is enabled");
+          if (engineV2Preview.status().chatRouting) throw new Error("OmniRush v2 chat routing is enabled");
           await requireWorkspaceRunModeIdle(config, workspace);
           // Directory-scoped disposal leaves other workspaces alone. The
           // detached MCP sync uses the same fence, so do not await it here.
@@ -3416,11 +3416,11 @@ function createRoutes(
       agents: unwrapOpencodeResult(agentResult, "/agent"),
     });
     if (!snapshot) {
-      throw new ApiError(502, "opencode_invalid_response", "OpenCode returned an unreadable agent list", { workspaceId: workspace.id });
+      throw new ApiError(502, "opencode_invalid_response", "OmniRush returned an unreadable agent list", { workspaceId: workspace.id });
     }
     const agent = selectGoverningAgent(snapshot.agents, snapshot.defaultAgent);
     if (!agent) {
-      throw new ApiError(502, "opencode_agent_missing", "OpenCode reported no agent for this workspace", { workspaceId: workspace.id });
+      throw new ApiError(502, "opencode_agent_missing", "OmniRush reported no agent for this workspace", { workspaceId: workspace.id });
     }
     const globalPath = resolveOpencodeConfigFilePath("global", workspace.path);
     const emptyConfig: Record<string, unknown> = {};
@@ -3903,7 +3903,7 @@ function createRoutes(
     await requireApproval(ctx, {
       workspaceId: workspace.id,
       action: scope === "global" ? "config.global.write" : "config.write",
-      summary: `Write ${scope} OpenCode config`,
+      summary: `Write ${scope} OmniRush config`,
       paths: [configPath],
     });
 
@@ -3921,7 +3921,7 @@ function createRoutes(
       actor: ctx.actor ?? { type: "remote" },
       action: scope === "global" ? "config.global.write" : "config.write",
       target: configPath,
-      summary: `Updated ${scope} OpenCode config`,
+      summary: `Updated ${scope} OmniRush config`,
       timestamp: Date.now(),
     });
 
@@ -5264,7 +5264,7 @@ function buildOpencodeReloadUrl(baseUrl: string, directory?: string | null): str
     }
     return url.toString();
   } catch {
-    throw new ApiError(400, "opencode_url_invalid", "OpenCode base URL is invalid");
+    throw new ApiError(400, "opencode_url_invalid", "OmniRush base URL is invalid");
   }
 }
 
@@ -5313,7 +5313,7 @@ async function requireWorkspaceRunModeIdle(config: ServerConfig, workspace: Work
         throw new ApiError(409, "workspace_run_mode_activity_unknown", "Cannot verify that all workspace sessions are idle; no permission change was made.");
       }
       if (path === "/session/status" ? !isRecord(payload) || Object.values(payload).some((status) => !isRecord(status) || typeof status.type !== "string") : !Array.isArray(payload)) {
-        throw new ApiError(409, "workspace_run_mode_activity_unknown", "OpenCode returned unreadable workspace activity; no permission change was made.");
+        throw new ApiError(409, "workspace_run_mode_activity_unknown", "OmniRush returned unreadable workspace activity; no permission change was made.");
       }
       const busy = Array.isArray(payload) ? payload.length > 0 : isRecord(payload) && Object.values(payload).some((status) => isRecord(status) && status.type !== "idle");
       if (busy) throw new ApiError(409, "workspace_run_mode_busy", "Wait for all workspace sessions, including permission and question requests, to finish before changing run mode.");
@@ -5353,7 +5353,7 @@ export async function listEngineSessionsInFolder(
   const route = pool?.routeRequest("GET", "/experimental/session") ?? null;
   const connection = route ? null : resolveWorkspaceOpencodeConnection(config, workspace);
   const baseUrl = route?.target.baseUrl ?? connection?.baseUrl?.trim() ?? "";
-  if (!baseUrl) throw new ApiError(503, "opencode_unconfigured", "OpenCode base URL is missing for this workspace");
+  if (!baseUrl) throw new ApiError(503, "opencode_unconfigured", "OmniRush base URL is missing for this workspace");
   const headers = new Headers();
   // The header picks the folder's engine instance; with no `directory` query
   // the engine lists sessions of every folder and project.
@@ -5430,7 +5430,7 @@ async function engineInstanceHasActiveSessions(
     headers: { Authorization: buildEngineAuthProbeHeader(primary.username, primary.password) },
     signal: AbortSignal.timeout(5_000),
   });
-  if (!response.ok) throw new Error(`OpenCode session status probe failed with status ${response.status}`);
+  if (!response.ok) throw new Error(`OmniRush session status probe failed with status ${response.status}`);
   const payload: unknown = await response.json();
   if (!isRecord(payload)) return false;
   return Object.values(payload).some((status) => isRecord(status) && status.type !== "idle");
@@ -5459,7 +5459,7 @@ async function disposeIdleEngineInstance(
     headers: { Authorization: buildEngineAuthProbeHeader(primary.username, primary.password) },
     signal: AbortSignal.timeout(opencodeDisposeTimeoutMs()),
   });
-  if (!response.ok) throw new Error(`OpenCode instance dispose failed with status ${response.status}`);
+  if (!response.ok) throw new Error(`OmniRush instance dispose failed with status ${response.status}`);
 }
 
 /**
@@ -5570,7 +5570,7 @@ async function reloadOpencodeEngineInPlace(
   const connection = resolveWorkspaceOpencodeConnection(config, workspace);
   const baseUrl = connection.baseUrl?.trim() ?? "";
   if (!baseUrl) {
-    throw new ApiError(400, "opencode_unconfigured", "OpenCode base URL is missing for this workspace");
+    throw new ApiError(400, "opencode_unconfigured", "OmniRush base URL is missing for this workspace");
   }
 
   const directory = resolveOpencodeDirectory(workspace);
@@ -5597,20 +5597,20 @@ async function reloadOpencodeEngineInPlace(
       throw new ApiError(
         504,
         "opencode_reload_timeout",
-        "OpenCode dispose did not complete in time; the reload stays pending",
+        "OmniRush dispose did not complete in time; the reload stays pending",
         { baseUrl },
       );
     }
     throw new ApiError(
       503,
       "opencode_engine_unreachable",
-      "OpenCode engine is not reachable; a full engine restart is required",
+      "OmniRush engine is not reachable; a full engine restart is required",
       { baseUrl, cause: error instanceof Error ? error.message : String(error) },
     );
   }
   if (!response.ok) {
     const body = parseOpencodeErrorBody(await response.text());
-    throw new ApiError(502, "opencode_reload_failed", "OpenCode reload failed", {
+    throw new ApiError(502, "opencode_reload_failed", "OmniRush reload failed", {
       status: response.status,
       body,
     });
@@ -5976,7 +5976,7 @@ async function postMcpEntryWithRetry(
         name,
         status: response.status,
         registrationStatus: "failed",
-        message: "OpenCode rejected the MCP registration request",
+        message: "OmniRush rejected the MCP registration request",
       };
       if (response.status < 500) return { name, status: "failed", source: "transport_failure", errorSummary: null, failure };
     } catch (error) {
@@ -5984,7 +5984,7 @@ async function postMcpEntryWithRetry(
       failure = {
         name,
         registrationStatus: "failed",
-        message: "OpenCode MCP registration request failed",
+        message: "OmniRush MCP registration request failed",
       };
     }
   }
@@ -5996,7 +5996,7 @@ async function postMcpEntryWithRetry(
     failure: failure ?? {
       name,
       registrationStatus: "failed",
-      message: "OpenCode MCP registration request failed",
+      message: "OmniRush MCP registration request failed",
     },
   };
 }
@@ -6096,7 +6096,7 @@ async function readBoundedEngineMcpRegistrationResponse(response: Response): Pro
     const parsedLength = Number(contentLength);
     if (Number.isFinite(parsedLength) && parsedLength > ENGINE_MCP_REGISTRATION_RESPONSE_MAX_BYTES) {
       await response.body?.cancel().catch(() => undefined);
-      throw new Error("OpenCode MCP registration response exceeded the size limit");
+      throw new Error("OmniRush MCP registration response exceeded the size limit");
     }
   }
   if (!response.body) return "";
@@ -6112,7 +6112,7 @@ async function readBoundedEngineMcpRegistrationResponse(response: Response): Pro
       bytesRead += chunk.value.byteLength;
       if (bytesRead > ENGINE_MCP_REGISTRATION_RESPONSE_MAX_BYTES) {
         await reader.cancel().catch(() => undefined);
-        throw new Error("OpenCode MCP registration response exceeded the size limit");
+        throw new Error("OmniRush MCP registration response exceeded the size limit");
       }
       chunks.push(decoder.decode(chunk.value, { stream: true }));
     }

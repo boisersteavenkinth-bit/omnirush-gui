@@ -579,7 +579,12 @@ function RuntimeConfigSourceBlock(props: {
       <div>
         <div className="font-medium text-gray-12">{props.title}</div>
         <div className="text-[11px] text-gray-9">{props.description}</div>
-        {props.path ? <div className="mt-1 break-all font-mono text-[11px] text-gray-8">{props.path}</div> : null}
+        {props.path ? (
+          <details className="mt-1 text-[11px] text-gray-8">
+            <summary className="cursor-pointer">Reveal technical path</summary>
+            <div className="break-all font-mono">{props.path}</div>
+          </details>
+        ) : null}
         {props.exists !== undefined ? <div className="text-[11px] text-gray-9">{props.exists ? "Found" : "Not found"}</div> : null}
         <div className="text-[11px] text-gray-9">Keys: {formatKeys(props.keys)}</div>
       </div>
@@ -652,7 +657,7 @@ export function AdvancedRuntimeConfigSourcesSection(props: AdvancedRuntimeConfig
                   </div>
                 </div>
                 <RuntimeConfigSourceBlock
-                  title="Project opencode config"
+                  title="Project engine configuration"
                   description="Workspace-level omnirush.ai config owned by the user/project."
                   path={props.configStatus.sources.projectOpencode.path}
                   exists={props.configStatus.sources.projectOpencode.exists}
@@ -660,8 +665,8 @@ export function AdvancedRuntimeConfigSourcesSection(props: AdvancedRuntimeConfig
                   config={props.configStatus.sources.projectOpencode.config}
                 />
                 <RuntimeConfigSourceBlock
-                  title="Global opencode config"
-                  description="User-level omnirush.ai config under ~/.config/opencode."
+                  title="Global engine configuration"
+                  description="User-level engine configuration."
                   path={props.configStatus.sources.globalOpencode.path}
                   exists={props.configStatus.sources.globalOpencode.exists}
                   keys={props.configStatus.sources.globalOpencode.keys}
@@ -686,8 +691,11 @@ export function AdvancedRuntimeConfigSourcesSection(props: AdvancedRuntimeConfig
               <div>Stored keys: {formatKeys(props.configStatus.runtimeKeys)}</div>
             </div>
             <div>
-              <div className="font-medium text-gray-12">User opencode.jsonc</div>
-              <div className="break-all">{props.configStatus.userOpencode.path}</div>
+              <div className="font-medium text-gray-12">User engine configuration</div>
+              <details>
+                <summary className="cursor-pointer">Reveal technical path</summary>
+                <div className="break-all">{props.configStatus.userOpencode.path}</div>
+              </details>
               <div>{props.configStatus.userOpencode.exists ? "Found" : "Not found"}</div>
               <div>User-owned keys: {formatKeys(props.configStatus.userOpencode.keys)}</div>
             </div>

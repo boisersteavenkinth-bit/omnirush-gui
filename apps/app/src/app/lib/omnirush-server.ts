@@ -106,7 +106,7 @@ function parseEngineV2PreviewStatus(value: unknown): EngineV2PreviewStatus {
     !("skippedProviderIds" in value) || !Array.isArray(value.skippedProviderIds) || !value.skippedProviderIds.every((item) => typeof item === "string") ||
     !("catalogModelIds" in value) || !Array.isArray(value.catalogModelIds) || !value.catalogModelIds.every((item) => typeof item === "string")
   ) {
-    throw new Error("Invalid OpenCode v2 engine preview status response.");
+    throw new Error("Invalid OmniRush v2 engine preview status response.");
   }
   return {
     enabled: value.enabled,

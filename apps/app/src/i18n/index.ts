@@ -8,6 +8,7 @@ import fr from "./locales/fr";
 import ca from "./locales/ca";
 import es from "./locales/es";
 import ru from "./locales/ru";
+import { displayRuntimeBrand } from "../lib/display-runtime-brand";
 export const LANGUAGE_PREF_KEY = "omnirush.language";
 
 /**
@@ -68,6 +69,33 @@ const TRANSLATIONS: Record<Language, Record<string, string>> = {
   ru,
 };
 
+// These entries describe implementation file names or commands. Their English
+// copy uses product terms, so a localized runtime-name substitution would not
+// present a path or command that does not exist on the user's machine.
+const ENGINE_DETAIL_KEYS = new Set([
+  "context_panel.permission_source_global",
+  "context_panel.permission_source_workspace",
+  "extensions.create_workspace_skill_hint",
+  "mcp.auth.oauth_not_supported_hint",
+  "mcp.auth.reauth_cli_hint",
+  "plugins.add_hint",
+  "plugins.desc",
+  "session.cmd_reload_config_detail",
+  "settings.nuke_survives_workspaces",
+  "settings.environment.footer_hint",
+  "settings.environment.validation_reserved",
+  "settings.workspace_config_desc",
+  "skills.failed_load_opencode",
+  "skills.failed_parse_opencode",
+  "skills.failed_update_opencode",
+  "skills.no_opencode_found",
+  "skills.no_opencode_workspace",
+  "skills.no_skills",
+  "skills.plugin_already_listed",
+  "system.reload_body_config",
+  "system.reload_body_plugins",
+]);
+
 /**
  * Type guard to validate if a value is a Language
  * Replaces long chains like: value === "en" || value === "zh"
@@ -115,6 +143,7 @@ export const setLocale = (newLocale: Language) => {
  * Resolve a translation entry with the locale → English → null fallback chain.
  */
 const lookupEntry = (loc: Language, candidateKey: string): string | null => {
+  if (ENGINE_DETAIL_KEYS.has(candidateKey)) return TRANSLATIONS.en[candidateKey] ?? null;
   if (TRANSLATIONS[loc]?.[candidateKey]) return TRANSLATIONS[loc][candidateKey];
   if (loc !== "en" && TRANSLATIONS.en?.[candidateKey]) return TRANSLATIONS.en[candidateKey];
   return null;
@@ -179,11 +208,11 @@ export const t = (
     typeof params?.count === "number" ? resolvePluralKey(loc, key, params.count) : key;
 
   const result = lookupEntry(loc, lookupKey);
-  if (result === null) return key;
+  if (result === null) return displayRuntimeBrand(key);
 
-  if (!params) return result;
+  if (!params) return displayRuntimeBrand(result);
 
-  let out = result;
+  let out = displayRuntimeBrand(result);
   for (const [k, v] of Object.entries(params)) {
     if (k === "lng") continue;
     out = out.replace(`{${k}}`, String(v));

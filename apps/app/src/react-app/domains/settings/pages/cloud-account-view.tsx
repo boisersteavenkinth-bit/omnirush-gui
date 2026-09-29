@@ -182,7 +182,7 @@ function DenSignedOutPanel({
 
 const permissionLabels = {
   allowCustomProviders: "Add AI providers",
-  allowZenModel: "Use OpenCode models",
+  allowZenModel: "Use OmniRush models",
   allowMultipleWorkspaces: "Create more workspaces",
   allowControlSettings: "Change app settings",
   allowManageExtensions: "Add tools, skills & MCP servers",

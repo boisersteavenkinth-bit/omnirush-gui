@@ -149,7 +149,7 @@ async function resolveBinary(config: ServerConfig): Promise<ResolvedBinary> {
     return { bin: binary, source: "cache" };
   } catch (error) {
     throw new Error(
-      `Unable to resolve OpenCode v2 (${pathError}; verified download: ${errorMessage(error)}). Set OMNIRUSH_OPENCODE2_BIN to a working opencode2 binary.`,
+      `Unable to resolve OmniRush v2 (${pathError}; verified download: ${errorMessage(error)}). Configure a working runtime binary override in advanced settings.`,
     );
   }
 }
@@ -332,7 +332,7 @@ export function createEngineV2Preview(options: { config: ServerConfig; env?: Pic
     const pending = (async () => {
       if (previous) await previous.catch(() => undefined);
       const active = sidecar;
-      if (!active) throw new Error("OpenCode v2 is not running");
+      if (!active) throw new Error("OmniRush v2 is not running");
       const runtime = runtimeMcpMap(await readEffectiveRuntimeOpencodeConfig(config, workspaceId));
       const desired = new Map(Object.entries(runtime).flatMap(([name, value]) => {
         const mapped = mapRuntimeMcpToV2(value);
@@ -348,7 +348,7 @@ export function createEngineV2Preview(options: { config: ServerConfig; env?: Pic
         const result = await active.fetchJson(`/api/mcp/${encodeURIComponent(name)}`, {
           method: "DELETE", directory, timeoutMs: 15_000,
         });
-        if (result.status !== 204 && result.status !== 404) throw new Error(`OpenCode v2 MCP removal failed (${result.status})`);
+        if (result.status !== 204 && result.status !== 404) throw new Error(`OmniRush v2 MCP removal failed (${result.status})`);
         applied.delete(name);
         changed = true;
       }
@@ -358,7 +358,7 @@ export function createEngineV2Preview(options: { config: ServerConfig; env?: Pic
         const result = await active.fetchJson(`/api/mcp/${encodeURIComponent(name)}`, {
           method: "PUT", body: { config: mcpConfig }, directory, timeoutMs: 30_000,
         });
-        if (result.status !== 204) throw new Error(`OpenCode v2 MCP registration failed (${result.status})`);
+        if (result.status !== 204) throw new Error(`OmniRush v2 MCP registration failed (${result.status})`);
         applied.set(name, fingerprint);
         changed = true;
       }
@@ -367,7 +367,7 @@ export function createEngineV2Preview(options: { config: ServerConfig; env?: Pic
         while (true) {
           const result = await active.fetchJson("/api/mcp", { directory, timeoutMs: 5_000 });
           const entries = isRecord(result.json) ? result.json.data : undefined;
-          if (result.status !== 200 || !Array.isArray(entries)) throw new Error("OpenCode v2 MCP status is unavailable");
+          if (result.status !== 200 || !Array.isArray(entries)) throw new Error("OmniRush v2 MCP status is unavailable");
           const pending = [...desired.keys()].some((name) => {
             const entry = entries.find((entry) => isRecord(entry) && entry.name === name);
             return !isRecord(entry) || !isRecord(entry.status) || entry.status.status === "pending";
@@ -376,7 +376,7 @@ export function createEngineV2Preview(options: { config: ServerConfig; env?: Pic
           if (Date.now() >= deadline) {
             // Retry readiness on the next request rather than cache an
             // acknowledged registration as usable before its tools exist.
-            throw new Error("OpenCode v2 MCP connections did not settle");
+            throw new Error("OmniRush v2 MCP connections did not settle");
           }
           await new Promise((resolve) => setTimeout(resolve, 100));
         }
@@ -549,7 +549,7 @@ export function createEngineV2Preview(options: { config: ServerConfig; env?: Pic
 
   function recordStartError(error: unknown): void {
     running = false;
-    lastError = `${errorMessage(error)} Set OMNIRUSH_OPENCODE2_BIN to a working opencode2 binary to override resolution.`;
+    lastError = `${errorMessage(error)} Configure a working runtime binary override in advanced settings.`;
   }
 
   async function stopRuntime(): Promise<void> {
@@ -593,7 +593,7 @@ export function createEngineV2Preview(options: { config: ServerConfig; env?: Pic
   async function ensureWorkspaceReady(directory: string): Promise<void> {
     if (mirrorInFlight) await mirrorInFlight;
     const active = sidecar;
-    if (!active) throw new Error("OpenCode v2 is not running");
+    if (!active) throw new Error("OmniRush v2 is not running");
     const existing = workspaceReadiness.get(directory);
     if (existing) return existing;
     // V2 discovers configuration asynchronously for each new location. Its
@@ -609,7 +609,7 @@ export function createEngineV2Preview(options: { config: ServerConfig; env?: Pic
         )) return;
         await new Promise((resolve) => setTimeout(resolve, 100));
       } while (Date.now() < deadline);
-      throw new Error("OpenCode v2 workspace provider configuration did not become ready");
+      throw new Error("OmniRush v2 workspace provider configuration did not become ready");
     })();
     workspaceReadiness.set(directory, pending);
     try { await pending; } catch (error) {
