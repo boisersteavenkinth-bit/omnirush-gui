@@ -6,6 +6,7 @@ import {
   nextSubagentSetting,
   subagentEffortOptions,
   subagentModelUnavailable,
+  DEFAULT_SUBAGENT_SETTING,
   subagentSummary,
 } from "../src/react-app/domains/settings/subagent-model";
 import { BUILTIN_OMNIRUSH_MODEL_IDS } from "../src/app/constants";
@@ -24,6 +25,9 @@ const state: OmniRushSubagentModelState = {
 };
 
 describe("sub-agent model setting (app)", () => {
+  test("defaults new sessions to GPT-5.6 Sol", () => {
+    expect(DEFAULT_SUBAGENT_SETTING).toEqual({ model: "gpt-5.6-sol", effort: null });
+  });
   test("GPT 6 Sol is built in between Astra and GPT-5.6 Sol, with its display name", () => {
     expect([...BUILTIN_OMNIRUSH_MODEL_IDS]).toEqual(["gpt-6-astra", "gpt-6-sol", "gpt-5.6-sol"]);
     expect(resolveModelDisplayName("gpt-6-sol")).toBe("GPT 6 Sol");

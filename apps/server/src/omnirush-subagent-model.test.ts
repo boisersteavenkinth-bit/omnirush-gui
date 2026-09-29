@@ -32,13 +32,13 @@ async function config(): Promise<ServerConfig> {
 }
 
 describe("sub-agent model setting", () => {
-  test("untouched reads as same-as-main; unusable values read as unset", async () => {
+  test("missing settings default to GPT-5.6 Sol; explicit values remain safe", async () => {
     const cfg = await config();
-    expect(await readSubagentModelSetting(cfg)).toEqual({ model: null, effort: null });
+    expect(await readSubagentModelSetting(cfg)).toEqual({ model: "gpt-5.6-sol", effort: null });
     expect(sanitizeSubagentModelSetting({ model: "gpt-6-sol", effort: "HIGH" })).toEqual({ model: "gpt-6-sol", effort: "high" });
     expect(sanitizeSubagentModelSetting({ model: "../etc", effort: "turbo" })).toEqual({ model: null, effort: null });
     expect(sanitizeSubagentModelSetting({ model: "", effort: "ultra" })).toEqual({ model: null, effort: "max" });
-    expect(sanitizeSubagentModelSetting("nope")).toEqual({ model: null, effort: null });
+    expect(sanitizeSubagentModelSetting("nope")).toEqual({ model: "gpt-5.6-sol", effort: null });
   });
 
   test("persists atomically and survives a corrupt file", async () => {
@@ -46,7 +46,7 @@ describe("sub-agent model setting", () => {
     await writeSubagentModelSetting(cfg, { model: "meta-muse-spark", effort: "medium" });
     expect(await readSubagentModelSetting(cfg)).toEqual({ model: "meta-muse-spark", effort: "medium" });
     await writeFile(subagentModelSettingPath(cfg), "{not json", "utf8");
-    expect(await readSubagentModelSetting(cfg)).toEqual({ model: null, effort: null });
+    expect(await readSubagentModelSetting(cfg)).toEqual({ model: "gpt-5.6-sol", effort: null });
   });
 });
 

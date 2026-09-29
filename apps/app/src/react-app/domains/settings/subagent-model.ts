@@ -25,7 +25,7 @@ export const SUBAGENT_MODEL_HELP =
 export const SUBAGENT_EFFORT_HELP =
   "How hard sub-agents think. \"Same as main agent\" uses the main agent's effort, mapped to the nearest level the sub-agent model offers.";
 
-export const DEFAULT_SUBAGENT_SETTING: OmniRushSubagentModelSetting = { model: null, effort: null };
+export const DEFAULT_SUBAGENT_SETTING: OmniRushSubagentModelSetting = { model: "gpt-5.6-sol", effort: null };
 
 export function subagentModelQueryKey(client: SubagentModelClient | null): readonly unknown[] {
   return ["omnirush-subagent-model", client?.baseUrl?.trim() || "default"];
