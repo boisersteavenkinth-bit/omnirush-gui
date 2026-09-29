@@ -3,12 +3,13 @@ import { useCallback, useEffect, useEffectEvent, useLayoutEffect, useMemo, useRe
 import type { UIMessage } from "ai";
 import { useQuery } from "@tanstack/react-query";
 import type { SessionStatus } from "@opencode-ai/sdk/v2/client";
-import { Check, CirclePause, Minimize2 } from "lucide-react";
+import { Check, CirclePause, LoaderCircle, Minimize2 } from "lucide-react";
 import { toast } from "@/components/ui/sonner";
 
 import { captureAnalyticsEvent } from "@/app/lib/analytics";
 import { interruptSessionTurn, sessionNeedsStop, submitAfterInterruption, subscribeSessionInterruption } from "@/app/lib/opencode-interruption";
 import { createClient, createPromptMessageID, hasAcceptedPromptMessage, isPromptAdmissionUnknown, unwrap } from "@/app/lib/opencode";
+import { compactSession } from "@/app/lib/opencode-session";
 import { createClientV2, isOpencodeV2BaseUrl } from "@/app/lib/opencode-v2-adapter";
 import * as opencodeSessionNative from "@/app/lib/opencode-session-native";
 import type { NativeSessionSnapshotTarget } from "@/app/lib/opencode-session-native";
@@ -700,6 +701,26 @@ function resolveFindOwnerSessionId() {
   }
 
   return firstMountedSessionSurfaceId();
+}
+
+function ContextCompactionProgress() {
+  const label = t("session.compact_context_running");
+  return (
+    <div
+      className="mx-3 mb-2 rounded-xl border border-dls-border bg-gray-2/40 px-3 py-2"
+      data-testid="context-compaction-progress"
+      role="status"
+      aria-live="polite"
+    >
+      <div className="flex items-center gap-2 text-xs font-medium text-gray-11">
+        <LoaderCircle size={13} className="animate-spin text-gray-10" />
+        <span>{label}</span>
+      </div>
+      <div className="mt-2 h-1 overflow-hidden rounded-full bg-gray-4" aria-hidden="true">
+        <div className="h-full w-1/3 rounded-full bg-[var(--dls-accent)] animate-pulse" />
+      </div>
+    </div>
+  );
 }
 
 function statusLabel(snapshot: OmniRushSessionSnapshot | undefined, busy: boolean) {
@@ -1763,6 +1784,36 @@ export function SessionSurface(props: SessionSurfaceProps) {
       : showAssistantRespondingState
         ? "responding"
         : "idle";
+  const canCompactSession = baseRenderedMessages.length > 0
+    && !chatStreaming
+    && !sending
+    && !sessionModelUnavailable
+    && effectiveActivityStatus !== "compacting";
+  const handleCompactSession = useCallback(async () => {
+    if (!canCompactSession) return;
+    const activity = useSessionActivityStore.getState();
+    activity.setCompacting(props.workspaceId, props.sessionId, true);
+    try {
+      await compactSession(
+        opencodeClient,
+        props.sessionId,
+        sessionModel.selectedModel,
+        { directory: props.workspaceRoot.trim() || undefined },
+      );
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : t("app.error_request_failed"));
+    } finally {
+      activity.setCompacting(props.workspaceId, props.sessionId, false);
+    }
+  }, [
+    canCompactSession,
+    opencodeClient,
+    props.sessionId,
+    props.workspaceId,
+    props.workspaceRoot,
+    sessionModel.selectedModel,
+  ]);
+  const showCompactionProgress = effectiveActivityStatus === "compacting";
   useReactRenderWatchdog("SessionSurface", {
     sessionId: props.sessionId,
     workspaceId: props.workspaceId,
@@ -3252,6 +3303,9 @@ export function SessionSurface(props: SessionSurfaceProps) {
         onSteer={handleSteer}
         onQueue={handleQueue}
         onStop={async () => { await handleAbort(); }}
+        onCompact={handleCompactSession}
+        canCompact={canCompactSession}
+        compacting={showCompactionProgress}
         busy={chatStreaming}
         steering={steering}
         submissionPreparing={preparingCloudTools || sending || autoSending}
@@ -3305,10 +3359,11 @@ export function SessionSurface(props: SessionSurfaceProps) {
         isRemoteWorkspace={props.isRemoteWorkspace}
           isSandboxWorkspace={props.isSandboxWorkspace}
           onUploadInboxFiles={props.onUploadInboxFiles ?? handleUploadInboxFiles}
-          compactTopSpacing={Boolean(props.activeQuestion || (props.todos ?? []).some((todo) => todo.content.trim()) || props.activePermission || queuedItems.length > 0)}
+          compactTopSpacing={Boolean(showCompactionProgress || props.activeQuestion || (props.todos ?? []).some((todo) => todo.content.trim()) || props.activePermission || queuedItems.length > 0)}
           topAccessory={
-            props.activeQuestion || (props.todos ?? []).some((todo) => todo.content.trim()) || props.activePermission || queuedItems.length > 0 ? (
+            showCompactionProgress || props.activeQuestion || (props.todos ?? []).some((todo) => todo.content.trim()) || props.activePermission || queuedItems.length > 0 ? (
               <div>
+                {showCompactionProgress ? <ContextCompactionProgress /> : null}
                 {queuedItems.length > 0 ? (
                   <QueuedMessagesPanel
                     items={queuedItems}
