@@ -13,6 +13,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import { t } from "@/i18n";
+import { displayRuntimeBrand } from "@/lib/display-runtime-brand";
 import type { PendingPermission } from "@/app/types";
 
 type PermissionPresentation = {
@@ -65,7 +66,7 @@ function readablePermissionLabel(permission: string): string {
   if (permission === "todowrite") return t("session.permission_kind_todowrite");
   if (permission === "question") return t("session.permission_kind_question");
   if (permission === "skill") return t("session.permission_kind_skill");
-  return permission;
+  return displayRuntimeBrand(permission);
 }
 
 function permissionCopy(permission: string): Pick<PermissionPresentation, "title" | "message"> {
@@ -141,7 +142,7 @@ export function permissionDetailRows(metadata: Record<string, unknown>): Permiss
     seen.add(item.labelKey);
     rows.push({
       label: t(item.labelKey),
-      value,
+      value: displayRuntimeBrand(value),
       multiline: item.multiline,
     });
   }
@@ -150,7 +151,7 @@ export function permissionDetailRows(metadata: Record<string, unknown>): Permiss
 
 function stringifyMetadata(metadata: Record<string, unknown>, safeStringify?: (value: unknown) => string) {
   try {
-    return safeStringify ? safeStringify(metadata) : JSON.stringify(metadata, null, 2);
+    return displayRuntimeBrand(safeStringify ? safeStringify(metadata) : JSON.stringify(metadata, null, 2));
   } catch {
     return t("session.permission_metadata_unavailable");
   }
@@ -176,7 +177,7 @@ function describePermissionRequest(permission: PendingPermission): PermissionPre
       message: t("session.doom_loop_message"),
       permissionLabel: t("session.doom_loop_label"),
       scopeLabel: tool ? t("session.doom_loop_tool_label") : t("session.doom_loop_repeated_call_label"),
-      scopeValue: tool ?? (patterns.length ? patterns.join(", ") : t("session.doom_loop_repeated_tool_call")),
+      scopeValue: displayRuntimeBrand(tool ?? (patterns.length ? patterns.join(", ") : t("session.doom_loop_repeated_tool_call"))),
       isDoomLoop: true,
       note: t("session.doom_loop_note"),
     };
@@ -188,7 +189,7 @@ function describePermissionRequest(permission: PendingPermission): PermissionPre
     message: copy.message,
     permissionLabel: readablePermissionLabel(permission.permission),
     scopeLabel: t("session.scope_label"),
-    scopeValue: patterns.join(", ") || t("session.permission_scope_empty"),
+    scopeValue: displayRuntimeBrand(patterns.join(", ") || t("session.permission_scope_empty")),
     isDoomLoop: false,
     note: null,
   };
@@ -275,7 +276,7 @@ export function PermissionApprovalModal(props: PermissionApprovalModalProps) {
                   data-permission-source="child-session"
                   className="mt-2 text-[12px] font-medium text-amber-11"
                 >
-                  {t("session.permission_requested_by", { session: props.sourceTitle })}
+                  {t("session.permission_requested_by", { session: displayRuntimeBrand(props.sourceTitle) })}
                 </div>
               ) : null}
             </div>
@@ -402,7 +403,7 @@ export function PermissionApprovalPanel(props: PermissionApprovalModalProps) {
                   data-permission-source="child-session"
                   className="mt-1 text-[12px] font-medium leading-5 text-amber-11"
                 >
-                  {t("session.permission_requested_by", { session: props.sourceTitle })}
+                  {t("session.permission_requested_by", { session: displayRuntimeBrand(props.sourceTitle) })}
                 </div>
               ) : null}
               {presentation.note ? (

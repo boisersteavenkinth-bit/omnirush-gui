@@ -22,6 +22,7 @@ import {
 } from "@/lib/tool-aggregate"
 import { isToolPartInFlight } from "@/lib/tool-activity"
 import { isBashToolPart } from "@/lib/build-in-tools"
+import { displayRuntimeBrand } from "@/lib/display-runtime-brand"
 import { trackToolCallDuration } from "@/lib/tool-call-duration"
 import { cn } from "@/lib/utils"
 
@@ -122,10 +123,10 @@ export function DetailBox({ kind, text, expanded, onToggle }: DetailBoxProps) {
         {kind === "command" ? (
           <>
             <span className="shrink-0 text-muted-foreground/60">$</span>
-            <ShellCommandText command={text} className={textClassName} />
+            <ShellCommandText command={displayRuntimeBrand(text)} className={textClassName} />
           </>
         ) : (
-          <code className={textClassName}>{text}</code>
+          <code className={textClassName}>{displayRuntimeBrand(text)}</code>
         )}
         {expanded ? (
           <ChevronUp aria-hidden="true" className="size-4 shrink-0 text-muted-foreground/70" />
@@ -326,7 +327,7 @@ export function ToolAggregateGroup({ parts, thoughts = [], className }: ToolAggr
         aria-expanded={expanded}
         className="group flex min-w-0 max-w-full cursor-pointer items-center gap-1.5 text-start text-sm text-muted-foreground transition-colors hover:text-foreground"
       >
-        <span className="min-w-0 truncate">{summary}</span>
+        <span className="min-w-0 truncate">{displayRuntimeBrand(summary)}</span>
         {thoughts.length > 0 ? (
           <span data-tool-aggregate-thought-count className="shrink-0 text-xs text-muted-foreground/70">
             · {thoughts.length === 1 ? "1 thought" : `${thoughts.length} thoughts`}
@@ -377,7 +378,7 @@ export function ToolAggregateGroup({ parts, thoughts = [], className }: ToolAggr
           }
         >
           <span className="ow-text-shimmer block min-w-0 truncate">
-            {nowLabel}
+            {displayRuntimeBrand(nowLabel)}
           </span>
         </div>
       ) : null}
@@ -432,21 +433,21 @@ export function ToolAggregateGroup({ parts, thoughts = [], className }: ToolAggr
                               ? "Status unknown for"
                               : "Ran"}
                       </span>{" "}
-                      <span>{commandDescription}</span>
+                      <span>{displayRuntimeBrand(commandDescription)}</span>
                     </span>
                   ) : search ? (
                     <span className="min-w-0 break-words">
                       <span className={cn(status === "running" && "text-foreground ow-text-shimmer")}>
                         {search.verb}
                       </span>
-                      {search.scope ? <span> in {search.scope}</span> : null}
+                      {search.scope ? <span> in {displayRuntimeBrand(search.scope)}</span> : null}
                     </span>
                   ) : (() => {
                     const file = getAggregateRowFile(part)
                     if (!file) {
                       return (
                         <span className={cn("min-w-0 truncate", status === "running" && "ow-text-shimmer")}>
-                          {getAggregateRowLabel(part)}
+                          {displayRuntimeBrand(getAggregateRowLabel(part))}
                         </span>
                       )
                     }

@@ -98,6 +98,26 @@ describe("permission approval modal helpers", () => {
     expect(html).not.toContain("Approve todowrite?");
   });
 
+  test("brands guarded browser permissions without changing the permission request", () => {
+    const permission = pendingPermission({
+      permission: "opencode-chrome-devtools_browser_open",
+      patterns: ["opencode-chrome-devtools_browser_open"],
+      metadata: { tool: "opencode-chrome-devtools_browser_open", description: "OpenCode browser access" },
+    });
+    const original = structuredClone(permission);
+    const html = renderToStaticMarkup(React.createElement(PermissionApprovalPanel, {
+      permission,
+      sourceTitle: "OpenCode browser task",
+      respondPermission: () => {},
+    }));
+    expect(html).toContain("Approve omnirush-chrome-devtools_browser_open?");
+    expect(html).toContain("OmniRush browser access");
+    expect(html).toContain("Requested by OmniRush browser task");
+    expect(html.toLowerCase()).not.toContain("opencode");
+    expect(permission).toEqual(original);
+    expect(buttonText(html)).toEqual(["Deny", "Allow once", "Allow for session"]);
+  });
+
   test("identifies a permission requested by a child session", () => {
     const html = renderToStaticMarkup(
       React.createElement(PermissionApprovalPanel, {

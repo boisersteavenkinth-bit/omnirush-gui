@@ -1107,8 +1107,8 @@ function opencodeRequestFailure(stage: CloudMcpFailureStage, path: string, respo
       code: response.status >= 500 ? "opencode_engine_unreachable" : "opencode_mcp_sync_failed",
       stage,
       retryable: response.status >= 500,
-      recommendedAction: response.status >= 500 ? "Restart OpenCode or retry when the engine is reachable" : "Check OpenCode MCP status support",
-      message: "OpenCode request failed while checking MCP status.",
+      recommendedAction: response.status >= 500 ? "Restart OmniRush or retry when the engine is reachable" : "Check OmniRush MCP status support",
+      message: "OmniRush request failed while checking MCP status.",
       aliases: response.status >= 500 ? ["opencode_unreachable"] : ["cloud_connection_failed"],
       details: { path, status: response.status, error },
     });
@@ -1119,7 +1119,7 @@ function opencodeRequestFailure(stage: CloudMcpFailureStage, path: string, respo
       stage,
       retryable: false,
       recommendedAction: "Update OmniRush.ai",
-      message: "OpenCode does not support listing tool IDs.",
+      message: "OmniRush does not support listing tool IDs.",
       details: { path, status: response.status, error },
     });
   }
@@ -1127,8 +1127,8 @@ function opencodeRequestFailure(stage: CloudMcpFailureStage, path: string, respo
     code: stage === "provider_projection" ? "provider_tool_projection_missing" : "opencode_tool_ids_unavailable",
     stage,
     retryable: response.status >= 500,
-    recommendedAction: response.status >= 500 ? "Retry after OpenCode is healthy" : "Update OmniRush.ai",
-    message: "OpenCode request failed while checking omnirush-cloud MCP readiness.",
+    recommendedAction: response.status >= 500 ? "Retry after OmniRush is healthy" : "Update OmniRush.ai",
+    message: "OmniRush request failed while checking omnirush-cloud MCP readiness.",
     aliases: stage === "provider_projection" ? ["provider_projection_unavailable"] : undefined,
     details: { path, status: response.status, error },
   });
@@ -1139,8 +1139,8 @@ function thrownOpencodeFailure(stage: CloudMcpFailureStage, path: string, error:
     code: "opencode_engine_unreachable",
     stage,
     retryable: true,
-    recommendedAction: "Restart OpenCode or retry when the engine is reachable",
-    message: "OpenCode engine is not reachable.",
+    recommendedAction: "Restart OmniRush or retry when the engine is reachable",
+    message: "OmniRush engine is not reachable.",
     aliases: ["opencode_unreachable"],
     details: { path, error: error instanceof Error ? error.message : String(error) },
   });
@@ -1150,7 +1150,7 @@ async function withEngineProbeTimeout<T>(task: () => Promise<T>): Promise<T> {
   return await new Promise<T>((resolve, reject) => {
     const timeoutMs = engineProbeTimeoutMs();
     const handle = setTimeout(() => {
-      reject(new Error(`OpenCode health probe timed out after ${timeoutMs}ms`));
+      reject(new Error(`OmniRush health probe timed out after ${timeoutMs}ms`));
     }, timeoutMs);
     task()
       .then(resolve, reject)
@@ -1631,7 +1631,7 @@ async function readProviderCapability(input: {
         provider: input.providerModel.provider,
         model: input.providerModel.model,
         source: "provider_capability",
-        limitation: "Experimental OpenCode tool projection did not enumerate MCP tools; provider catalog capability could not be read.",
+        limitation: "Experimental OmniRush tool projection did not enumerate MCP tools; provider catalog capability could not be read.",
         present: input.experimentalSplit?.present ?? [],
         missing: input.experimentalSplit?.missing ?? expectedTools(),
         error: projectionFailure.details,
@@ -1643,7 +1643,7 @@ async function readProviderCapability(input: {
     const model = provider?.models[input.providerModel.model];
     const modelExists = Boolean(model);
     const toolCalling = model ? model.capabilities.toolcall === true : null;
-    const limitation = "OpenCode experimental tool APIs do not enumerate MCP tools on this engine; using provider/model tool-call capability from /provider.";
+    const limitation = "OmniRush experimental tool APIs do not enumerate MCP tools on this engine; using provider/model tool-call capability from /provider.";
     const projectionFailure = toolCalling
       ? undefined
       : failure({
@@ -1651,7 +1651,7 @@ async function readProviderCapability(input: {
           stage: "provider_projection",
           retryable: false,
           recommendedAction: "Choose a model that can use OmniRush.ai Cloud tools",
-          message: modelExists ? "The selected provider/model does not support tool calling." : "The selected provider/model was not found in OpenCode provider catalog.",
+          message: modelExists ? "The selected provider/model does not support tool calling." : "The selected provider/model was not found in OmniRush provider catalog.",
           aliases: ["provider_projection_missing"],
           details: {
             provider: input.providerModel.provider,
@@ -1681,7 +1681,7 @@ async function readProviderCapability(input: {
       provider: input.providerModel.provider,
       model: input.providerModel.model,
       source: "provider_capability",
-      limitation: "Experimental OpenCode tool projection did not enumerate MCP tools; provider catalog capability could not be read.",
+      limitation: "Experimental OmniRush tool projection did not enumerate MCP tools; provider catalog capability could not be read.",
       present: input.experimentalSplit?.present ?? [],
       missing: input.experimentalSplit?.missing ?? expectedTools(),
       error: projectionFailure.details,
@@ -1700,8 +1700,8 @@ function statusFailure(status: McpStatus | undefined): CloudMcpFailure {
       code: "cloud_mcp_missing",
       stage: "engine_delivery",
       retryable: true,
-      recommendedAction: "Run reconcile to register omnirush-cloud with OpenCode",
-      message: "OpenCode does not report an omnirush-cloud MCP status.",
+      recommendedAction: "Run reconcile to register omnirush-cloud with OmniRush",
+      message: "OmniRush does not report an omnirush-cloud MCP status.",
       aliases: ["cloud_status_missing"],
     });
   }
@@ -1981,7 +1981,7 @@ async function inspectOmniRushCloud(input: {
       code: "extensions_plugin_missing",
       stage: "plugin_load",
       retryable: true,
-      recommendedAction: "Reload the OpenCode engine so OmniRush.ai extensions are loaded",
+      recommendedAction: "Reload the OmniRush engine so OmniRush.ai extensions are loaded",
       message: "OmniRush.ai extension plugin canary tools are missing.",
       details: { missing: pluginCanaries.missing },
     }));
@@ -2017,7 +2017,7 @@ function experimentalToolIdsFromSplit(split: ToolSnapshot): CloudMcpExperimental
     present: split.present,
     missing: split.missing,
     includesMcpTools,
-    ...(includesMcpTools ? {} : { limitation: "This OpenCode engine's /experimental/tool/ids endpoint does not enumerate MCP tools; direct MCP tools/list is authoritative for Cloud readiness." }),
+    ...(includesMcpTools ? {} : { limitation: "This OmniRush engine's /experimental/tool/ids endpoint does not enumerate MCP tools; direct MCP tools/list is authoritative for Cloud readiness." }),
   };
 }
 
@@ -2053,7 +2053,7 @@ function experimentalProviderToolsFromProjection(projection: ProviderProjectionS
     present: projection.present,
     missing: projection.missing,
     includesMcpTools,
-    ...(includesMcpTools ? {} : { limitation: projection.limitation ?? "This OpenCode engine's /experimental/tool endpoint does not enumerate MCP tools for the selected provider/model." }),
+    ...(includesMcpTools ? {} : { limitation: projection.limitation ?? "This OmniRush engine's /experimental/tool endpoint does not enumerate MCP tools for the selected provider/model." }),
     ...(projection.error ? { error: projection.error } : {}),
   };
 }
@@ -2095,8 +2095,8 @@ function firstFailureFromDenies(denies: McpToolDeny[]): CloudMcpFailure | null {
     code: "cloud_tools_denied",
     stage: "prerequisites",
     retryable: false,
-    recommendedAction: "Remove project/global OpenCode tool denies for omnirush-cloud tools",
-    message: "OpenCode configuration denies one or more omnirush-cloud tools.",
+    recommendedAction: "Remove project/global OmniRush tool denies for omnirush-cloud tools",
+    message: "OmniRush configuration denies one or more omnirush-cloud tools.",
     details: { denies },
   });
 }
@@ -2203,8 +2203,8 @@ async function readOmniRushCloudMcpHealthInternal(
       code: "workspace_directory_ambiguous",
       stage: "prerequisites",
       retryable: false,
-      recommendedAction: "Set an explicit OpenCode directory for this remote workspace",
-      message: "Remote workspace has no exact OpenCode directory, so Cloud MCP readiness cannot be claimed.",
+      recommendedAction: "Set an explicit OmniRush directory for this remote workspace",
+      message: "Remote workspace has no exact OmniRush directory, so Cloud MCP readiness cannot be claimed.",
     }));
   }
   if (desired.present && input.directory && !baseUrlConfigured(input.config, input.workspace)) {
@@ -2212,8 +2212,8 @@ async function readOmniRushCloudMcpHealthInternal(
       code: "opencode_unconfigured",
       stage: "prerequisites",
       retryable: false,
-      recommendedAction: "Start or attach an OpenCode engine for this workspace",
-      message: "OpenCode base URL is missing for this workspace.",
+      recommendedAction: "Start or attach an OmniRush engine for this workspace",
+      message: "OmniRush base URL is missing for this workspace.",
     }));
   }
   const denyFailure = firstFailureFromDenies(toolDenies);
@@ -2351,8 +2351,8 @@ function registrationFailure(failures: CloudMcpRuntimeRegistrationFailure[]): Cl
     code: "opencode_mcp_sync_failed",
     stage: "engine_delivery",
     retryable: failures.some((item) => item.status === undefined || item.status >= 500),
-    recommendedAction: "Retry reconcile after OpenCode is reachable",
-    message: "Failed to dynamically register omnirush-cloud with OpenCode.",
+    recommendedAction: "Retry reconcile after OmniRush is reachable",
+    message: "Failed to dynamically register omnirush-cloud with OmniRush.",
     aliases: ["cloud_registration_failed"],
     details: { failures },
   });
@@ -2471,8 +2471,8 @@ export async function reconcileOmniRushCloudMcp(input: {
       code: "workspace_directory_ambiguous",
       stage: "prerequisites",
       retryable: false,
-      recommendedAction: "Set an explicit OpenCode directory for this remote workspace",
-      message: "Remote workspace has no exact OpenCode directory, so Cloud MCP readiness cannot be claimed.",
+      recommendedAction: "Set an explicit OmniRush directory for this remote workspace",
+      message: "Remote workspace has no exact OmniRush directory, so Cloud MCP readiness cannot be claimed.",
     });
     cloudMcpDeliveryState.markFailed(input.workspace, input.directory, desiredRevision, directoryFailure);
     return healthWithFailure(await readHealth(), directoryFailure);
@@ -2483,8 +2483,8 @@ export async function reconcileOmniRushCloudMcp(input: {
       code: "opencode_unconfigured",
       stage: "prerequisites",
       retryable: false,
-      recommendedAction: "Start or attach an OpenCode engine for this workspace",
-      message: "OpenCode base URL is missing for this workspace.",
+      recommendedAction: "Start or attach an OmniRush engine for this workspace",
+      message: "OmniRush base URL is missing for this workspace.",
     });
     cloudMcpDeliveryState.markFailed(input.workspace, input.directory, desiredRevision, unconfiguredFailure);
     return healthWithFailure(await readHealth(), unconfiguredFailure);

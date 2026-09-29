@@ -1205,7 +1205,7 @@ function runtimeHealthCheck(
   const message = corrupt
     ? "The selected workspace runtime configuration could not be safely decoded."
     : !engineConfigured
-      ? "The selected workspace does not have an OpenCode runtime endpoint configured."
+      ? "The selected workspace does not have an OmniRush runtime endpoint configured."
       : absent
         ? "The runtime configuration database or selected workspace row has not been initialized."
         : remote
@@ -1707,11 +1707,11 @@ export async function runAgentContextDiagnostics(input: {
           : "required_connect_tool_ids_not_denied_by_effective_policy",
       message: cloudToolPolicyStatus === "denied"
         ? !effectiveEngine && staticallyDeniedCloudAgentToolIds.size > 0
-          ? "A passively inspected static OpenCode policy denies one or more required OmniRush.ai Cloud capability tools."
-          : "The effective OpenCode agent policy hides one or more required OmniRush.ai Cloud capability tools."
+          ? "A passively inspected static OmniRush policy denies one or more required OmniRush.ai Cloud capability tools."
+          : "The effective OmniRush agent policy hides one or more required OmniRush.ai Cloud capability tools."
         : cloudToolPolicyStatus === "unavailable"
           ? "Required OmniRush.ai Cloud tool visibility could not be verified from the effective selected-engine agent."
-          : "The effective OpenCode agent policy does not deny either required OmniRush.ai Cloud candidate tool ID; the live engine tool registry was not read.",
+          : "The effective OmniRush agent policy does not deny either required OmniRush.ai Cloud candidate tool ID; the live engine tool registry was not read.",
       owner: cloudToolPolicyStatus === "available"
         ? "omnirush-server"
         : cloudToolPolicyStatus === "unavailable"
@@ -1795,7 +1795,7 @@ export async function runAgentContextDiagnostics(input: {
             ? "Multiple configuration layers define one or more MCP names; no effective winner is claimed."
             : !passiveLocalLayersAvailable
               ? "Only server-managed runtime MCP layers were available for this workspace."
-              : "The server-managed runtime and selected project/global MCP sources were inventoried without claiming complete OpenCode resolution.",
+              : "The server-managed runtime and selected project/global MCP sources were inventoried without claiming complete OmniRush resolution.",
       owner: effectiveEngine
         ? "opencode-engine"
         : layerHealthProblem ? "member" : inventory.collisions.length > 0 ? "member" : "omnirush-server",
@@ -1804,7 +1804,7 @@ export async function runAgentContextDiagnostics(input: {
           ? "Reduce the configured MCP count or inspect the engine and OmniRush.ai runtime sources directly."
           : "No action is required; review registration evidence for runtime-managed dynamic MCP connection state."
         : layerHealthProblem
-        ? "Repair the invalid or unreadable OpenCode configuration layer, then rerun diagnostics."
+        ? "Repair the invalid or unreadable OmniRush configuration layer, then rerun diagnostics."
         : inventory.collisions.length > 0
           ? "Review the listed MCP layer collisions and remove unintended duplicate definitions."
           : inventoryTotal > 200

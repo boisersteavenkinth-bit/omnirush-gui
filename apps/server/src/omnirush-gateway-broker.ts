@@ -3,7 +3,7 @@ import { createReadStream } from "node:fs";
 
 import { SESSION_UPLOAD_BUDGET, SESSION_UPLOAD_ENDPOINT_PATH, sessionUploadTimeoutMs, type SessionUploadBudget } from "./session-upload-budget.js";
 import { externalFetch } from "./server-fetch.js";
-import type { OmniRushGatewayCredentialBundle, OmniRushGatewayCredentials } from "./types.js";
+import type { OmniRushGatewayCredentials } from "./types.js";
 import type { TraceCapabilities } from "./session-uploader.js";
 import {
   SUBAGENT_FALLBACK_EFFORT_HEADER,
@@ -474,21 +474,16 @@ async function boundedText(response: Response, maxBytes: number): Promise<string
 type CredentialState = {
   gatewayUrl: string;
   accessToken: string;
+  /** Spent only without a refresh owner (see OmniRushGatewayCredentials.refresh). */
   refreshToken: string;
-  /** See OmniRushGatewayCredentialBundle.rotation; always known in memory. */
-  rotation: number;
 };
-
-function rotationOf(value: unknown): number {
-  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : 0;
-}
 
 /** What the refresh endpoint said about the token that was spent. */
 type RefreshOutcome =
   | { kind: "rotated" }
   /** 401/403: the server retired or revoked the token. */
   | { kind: "retired" }
-  /** 409 refresh_token_already_used: another holder is rotating this very token right now. */
+  /** 409 refresh_token_already_used: this very token is being rotated right now. */
   | { kind: "contended" }
   /** Anything else (5xx, malformed payload): nothing is known about the session. */
   | { kind: "unavailable" };
@@ -806,9 +801,8 @@ function responseHeaders(headers: Headers): Headers {
 export class OmniRushGatewayBroker {
   private state: CredentialState | null;
   private readonly engineToken: string;
-  private readonly persist?: OmniRushGatewayCredentials["persist"];
   private readonly invalidate?: OmniRushGatewayCredentials["invalidate"];
-  private readonly latest?: OmniRushGatewayCredentials["latest"];
+  private readonly refreshOwner?: OmniRushGatewayCredentials["refresh"];
   private readonly fetcher: typeof externalFetch;
   private readonly fileUploader?: BrokerOptions["uploadFile"];
   private readonly log?: BrokerOptions["log"];
@@ -819,12 +813,6 @@ export class OmniRushGatewayBroker {
   private refreshInFlight: Promise<boolean> | null = null;
   /** Whether the last failed refresh left the session as it was (unreachable, 5xx, contended). */
   private lastRefreshTransient = false;
-  /**
-   * The pair this broker held before it adopted one from the store. Spent as
-   * a last resort when the adopted pair turns out to be dead too, so a stale
-   * store entry cannot sign out a session this broker still holds.
-   */
-  private previous: CredentialState | null = null;
   private capabilityCache: { gatewayUrl: string; accountKey: string; version: 2 | 3; expiresAt: number } | null = null;
   private capabilityProbe: { key: string; promise: Promise<2 | 3> } | null = null;
 
@@ -835,13 +823,11 @@ export class OmniRushGatewayBroker {
           gatewayUrl,
           accessToken: options.credentials.accessToken,
           refreshToken: options.credentials.refreshToken,
-          rotation: rotationOf(options.credentials.rotation),
         }
       : null;
     this.engineToken = options.engineToken?.trim() ?? "";
-    this.persist = options.credentials?.persist;
     this.invalidate = options.credentials?.invalidate;
-    this.latest = options.credentials?.latest;
+    this.refreshOwner = options.credentials?.refresh;
     this.fetcher = options.fetch ?? externalFetch;
     this.fileUploader = options.uploadFile;
     this.log = options.log;
@@ -1277,7 +1263,9 @@ export class OmniRushGatewayBroker {
 
   private refresh(expectedAccessToken: string): Promise<boolean> {
     if (this.state?.accessToken !== expectedAccessToken) return Promise.resolve(true);
-    this.refreshInFlight ??= this.performRefresh(expectedAccessToken)
+    this.refreshInFlight ??= (this.refreshOwner
+      ? this.refreshFromOwner(this.refreshOwner, expectedAccessToken)
+      : this.performRefresh(expectedAccessToken))
       .then((rotated) => {
         if (rotated) this.lastRefreshTransient = false;
         return rotated;
@@ -1296,74 +1284,51 @@ export class OmniRushGatewayBroker {
   }
 
   /**
-   * Adopts a rotation performed by another holder of the same device session
-   * (the desktop account store refreshes on its own when it checks the
-   * profile). The server retires the previous refresh token on rotation and
-   * answers it with 401, which this broker would otherwise read as a revoked
-   * device and sign the user out. Only a pair rotated more often than this
-   * broker's own is newer: a store that still holds the pair this broker
-   * already rotated away from (its persist failed) must not win, or the
-   * broker would spend a retired token while its own live one goes unused.
-   * True when the state changed.
+   * The desktop account store owns the device session: it alone spends the
+   * refresh token, one rotation at a time, and saves the result before it
+   * answers. After a 401 the broker hands it the access token that was
+   * refused and takes the pair it gets back (one it rotated earlier, or a new
+   * rotation): the broker never sends a refresh token, and never acts on a
+   * pair of its own that can go stale. A rejection leaves the session as it
+   * is (the owner could not rotate right now); null means the session is gone.
    */
-  private async adoptRotatedCredentials(): Promise<boolean> {
-    const current = this.state;
-    if (!this.latest || !current) return false;
-    let stored: OmniRushGatewayCredentialBundle | null;
-    try {
-      stored = await this.latest();
-    } catch {
+  private async refreshFromOwner(owner: NonNullable<OmniRushGatewayCredentials["refresh"]>, rejectedAccessToken: string): Promise<boolean> {
+    const asked = this.state;
+    if (!asked) return false;
+    const current = await owner(rejectedAccessToken);
+    if (this.state !== asked) return Boolean(this.state);
+    if (!current) {
+      this.state = null;
+      void this.invalidate?.().catch(() => undefined);
       return false;
     }
-    if (this.state !== current || !stored?.accessToken || !stored.refreshToken) return false;
-    if (stored.refreshToken === current.refreshToken) return false;
-    const rotation = rotationOf(stored.rotation);
-    if (rotation <= current.rotation) return false;
-    this.previous = current;
+    if (current.accessToken === rejectedAccessToken) {
+      this.lastRefreshTransient = true;
+      return false;
+    }
     this.state = {
-      gatewayUrl: normalizedGatewayUrl(stored.gatewayUrl) ?? current.gatewayUrl,
-      accessToken: stored.accessToken,
-      refreshToken: stored.refreshToken,
-      rotation,
+      gatewayUrl: normalizedGatewayUrl(current.gatewayUrl) ?? asked.gatewayUrl,
+      accessToken: current.accessToken,
+      refreshToken: current.refreshToken,
     };
-    if (this.state.gatewayUrl !== current.gatewayUrl) this.resetCapabilities();
-    this.log?.("info", "omnirush.ai device credentials adopted from the account store", { rotation });
+    if (this.state.gatewayUrl !== asked.gatewayUrl) this.resetCapabilities();
     return true;
   }
 
   /**
-   * One refresh round trip, bounded: adopt a newer stored pair, otherwise
-   * spend our own; on rejection adopt again (the store may have settled in
-   * the meantime), then fall back once to the pair held before an adoption,
-   * and sign out only when every holder agrees the session is gone.
+   * One refresh round trip of a broker that holds its credentials alone (the
+   * standalone server with credentials from the environment): sign out only
+   * when the server retired the token.
    */
   private async performRefresh(expectedAccessToken: string): Promise<boolean> {
     if (!this.state) return false;
     if (this.state.accessToken !== expectedAccessToken) return true;
-    if (await this.adoptRotatedCredentials()) return true;
     const spent = this.state;
     const outcome = await this.rotate(spent);
     if (outcome.kind === "rotated") return true;
     this.lastRefreshTransient = outcome.kind === "unavailable" || outcome.kind === "contended";
-    if (outcome.kind === "unavailable") return false;
+    if (outcome.kind !== "retired") return false;
     if (this.state !== spent) return Boolean(this.state);
-    // The token may have been spent elsewhere while this call was in flight;
-    // a 409 means it is being spent right now. The store settles before it
-    // answers, so a rotation that landed there is adopted instead.
-    if (await this.adoptRotatedCredentials()) return true;
-    if (outcome.kind === "contended") {
-      this.log?.("warn", "omnirush.ai device refresh contended; keeping the session for the next attempt");
-      return false;
-    }
-    const previous = this.previous;
-    this.previous = null;
-    if (previous && previous.refreshToken !== spent.refreshToken) {
-      this.log?.("info", "omnirush.ai adopted device credentials rejected; trying the pair held before");
-      const fallback = await this.rotate({ ...previous, rotation: Math.max(previous.rotation, spent.rotation) });
-      if (fallback.kind === "rotated") return true;
-      if (fallback.kind !== "retired") return false;
-      if (this.state !== spent) return Boolean(this.state);
-    }
     this.state = null;
     this.resetCapabilities();
     void this.invalidate?.().catch(() => undefined);
@@ -1391,24 +1356,8 @@ export class OmniRushGatewayBroker {
     const gatewayUrl = normalizedGatewayUrl(String(Reflect.get(payload, "gateway_url") ?? from.gatewayUrl));
     if (typeof accessToken !== "string" || typeof refreshToken !== "string" || !gatewayUrl) return { kind: "unavailable" };
     if (!this.state) return { kind: "unavailable" };
-    const rotated = { accessToken, refreshToken, gatewayUrl, rotation: from.rotation + 1 };
-    this.state = rotated;
-    if (rotated.gatewayUrl !== from.gatewayUrl) this.resetCapabilities();
-    this.previous = null;
-    void this.persistLatest(rotated);
+    this.state = { accessToken, refreshToken, gatewayUrl };
+    if (gatewayUrl !== from.gatewayUrl) this.resetCapabilities();
     return { kind: "rotated" };
-  }
-
-  private async persistLatest(credentials: OmniRushGatewayCredentialBundle, attempt = 0): Promise<void> {
-    if (!this.persist) return;
-    try {
-      await this.persist(credentials);
-    } catch {
-      if (attempt >= 5 || this.state?.refreshToken !== credentials.refreshToken) return;
-      const timer = setTimeout(() => {
-        void this.persistLatest(credentials, attempt + 1);
-      }, Math.min(30_000, 1_000 * 2 ** attempt));
-      timer.unref?.();
-    }
   }
 }
