@@ -1790,7 +1790,7 @@ export function createRuntimeManager({
         resolvedSource: null,
         version: null,
         supportsServe: false,
-        notes: ["OpenCode binary not found in bundled sidecars or PATH."],
+        notes: ["OmniRush binary not found in bundled sidecars or PATH."],
         serveHelpStatus: null,
         serveHelpStdout: null,
         serveHelpStderr: null,
@@ -1801,10 +1801,10 @@ export function createRuntimeManager({
     const helpResult = spawnSync(resolved.path, ["serve", "--help"], { encoding: "utf8" });
     const notes = [`Using ${resolved.source}: ${resolved.path}`];
     if (versionResult.status !== 0) {
-      notes.push("OpenCode version probe failed.");
+      notes.push("OmniRush version probe failed.");
     }
     if (helpResult.status !== 0) {
-      notes.push("OpenCode serve --help probe failed.");
+      notes.push("OmniRush serve --help probe failed.");
     }
 
     return {
@@ -2493,7 +2493,7 @@ export function createRuntimeManager({
   async function engineRestart(options = {}) {
     const projectDir = engineState.projectDir;
     if (!projectDir) {
-      throw new Error("OpenCode is not configured for a local workspace");
+      throw new Error("OmniRush is not configured for a local workspace");
     }
     if (options.deferredRun === true) {
       const request = restartRequest(options, "deferred");
@@ -2592,7 +2592,7 @@ export function createRuntimeManager({
         status: -1,
         stdout: "",
         stderr:
-          "Guided install is not supported on Windows yet. Install the OmniRush.ai-pinned OpenCode version manually, then restart OmniRush.ai.",
+          "Guided install is not supported on Windows yet. Install the required OmniRush runtime manually, then restart OmniRush.ai.",
       };
     }
 
@@ -2622,7 +2622,7 @@ export function createRuntimeManager({
 
     const program = resolveBinary("opencode");
     if (!program) {
-      throw new Error("Failed to locate opencode.");
+      throw new Error("Failed to locate the local agent runtime.");
     }
 
     const result = await runShellCommand(program, ["mcp", "auth", safeServerName], {

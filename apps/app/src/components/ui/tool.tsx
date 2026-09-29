@@ -15,6 +15,7 @@ import {
 } from "@/components/tools/error-attribution"
 import { useChatToolReconnect } from "@/components/tools/use-chat-tool-reconnect"
 import { getToolActivityLabel, isToolPartInFlight } from "@/lib/tool-activity"
+import { displayRuntimeBrand } from "@/lib/display-runtime-brand"
 import { cn } from "@/lib/utils"
 import {
   Bot,
@@ -120,7 +121,7 @@ function diffLineClass(line: string) {
 function DiffLines({ diff }: { diff: string }) {
   return (
     <div className="max-h-60 overflow-auto rounded-md font-mono leading-relaxed">
-      {diff.split("\n").map((line, index) => (
+      {displayRuntimeBrand(diff).split("\n").map((line, index) => (
         <div
           key={`${index}:${line}`}
           className={cn(
@@ -164,7 +165,7 @@ const Tool = ({
     : isError && toolPart.errorText
       ? attributeChatToolError(toolPart.errorText)
       : null
-  const label = title ?? getToolActivityLabel(toolPart)
+  const label = displayRuntimeBrand(title ?? getToolActivityLabel(toolPart))
   const hasInput = input !== null && input !== undefined
   const hasOutput = "output" in toolPart && toolPart.output !== undefined
   const resultText = hasOutput
@@ -283,7 +284,7 @@ const Tool = ({
               <DiffLines diff={inputDiff} />
             ) : (
               <pre className="whitespace-pre-wrap wrap-break-word">
-                {formatValue(input)}
+                {displayRuntimeBrand(formatValue(input))}
               </pre>
             )
           ) : null}
@@ -292,13 +293,13 @@ const Tool = ({
               <DiffLines diff={toolPart.output} />
             ) : (
               <pre className="max-h-60 overflow-auto whitespace-pre-wrap wrap-break-word opacity-80">
-                {formatValue(toolPart.output)}
+                {displayRuntimeBrand(formatValue(toolPart.output))}
               </pre>
             )
           ) : null}
           {isError && toolPart.errorText ? (
             <pre className="text-destructive max-h-60 overflow-auto whitespace-pre-wrap wrap-break-word">
-              {toolPart.errorText}
+              {displayRuntimeBrand(toolPart.errorText)}
             </pre>
           ) : null}
           {inFlight && !hasInput ? (

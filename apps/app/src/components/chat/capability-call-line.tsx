@@ -19,6 +19,7 @@ import { getCapabilityCallQuote, getCapabilityCallSentence, parseRecord } from "
 import { normalizeErrorText } from "@/lib/error-text"
 import { trackToolCallDuration } from "@/lib/tool-call-duration"
 import { isToolPartInFlight } from "@/lib/tool-activity"
+import { displayRuntimeBrand } from "@/lib/display-runtime-brand"
 import { cn } from "@/lib/utils"
 import type { ConnectorToolIdentity } from "@/react-app/domains/connections/connector-tool-identity"
 
@@ -63,11 +64,11 @@ function ConnectorMark({ connector }: { connector: ConnectorToolIdentity }) {
 }
 
 function formatTechnicalValue(value: unknown): string {
-  if (typeof value === "string") return value
+  if (typeof value === "string") return displayRuntimeBrand(value)
   try {
-    return JSON.stringify(value, null, 2)
+    return displayRuntimeBrand(JSON.stringify(value, null, 2))
   } catch {
-    return String(value)
+    return displayRuntimeBrand(String(value))
   }
 }
 
@@ -78,7 +79,7 @@ function failureInstruction(part: DynamicToolUIPart, reconnectName: string | nul
   }
   const errorText = part.state === "output-error" ? part.errorText : null
   const attribution = errorText ? attributeChatToolError(errorText) : null
-  if (attribution) return attribution.description
+  if (attribution) return displayRuntimeBrand(attribution.description)
 
   // Structured provider errors ({ error, details: [{ message }] }) should
   // read as a sentence, never as raw JSON.
@@ -92,14 +93,14 @@ function failureInstruction(part: DynamicToolUIPart, reconnectName: string | nul
       : null
     const message = detailMessage ?? (typeof record.message === "string" ? record.message : null)
     const summary = [code?.replace(/_/g, " "), message].filter(Boolean).join(" — ")
-    if (summary) return `The provider rejected the call: ${summary}.`
+    if (summary) return displayRuntimeBrand(`The provider rejected the call: ${summary}.`)
   }
 
   const firstLine = errorText?.split("\n")[0]?.trim()
-  if (firstLine && !firstLine.startsWith("{") && !firstLine.startsWith("[") && !firstLine.startsWith("<")) return firstLine
+  if (firstLine && !firstLine.startsWith("{") && !firstLine.startsWith("[") && !firstLine.startsWith("<")) return displayRuntimeBrand(firstLine)
   if (firstLine?.startsWith("<") && errorText) {
     const normalizedFirstLine = normalizeErrorText(errorText, { cap: 500 }).display.split("\n")[0]?.trim()
-    if (normalizedFirstLine && !normalizedFirstLine.startsWith("<")) return normalizedFirstLine
+    if (normalizedFirstLine && !normalizedFirstLine.startsWith("<")) return displayRuntimeBrand(normalizedFirstLine)
   }
   return "The call failed. Full error is under Technical details."
 }
@@ -108,7 +109,7 @@ export function TechnicalDetailsPanel({ part, resultUnavailable = false }: { par
   return (
     <div className="mt-2 flex flex-col gap-2 rounded-lg bg-muted p-2 text-xs">
       <div className="font-mono text-[11px] text-muted-foreground">
-        {part.toolName} · {part.toolCallId}
+        {displayRuntimeBrand(part.toolName)} · {part.toolCallId}
       </div>
       {part.input !== undefined && part.input !== null ? (
         <pre className="max-h-40 overflow-auto whitespace-pre-wrap wrap-break-word">
@@ -125,7 +126,7 @@ export function TechnicalDetailsPanel({ part, resultUnavailable = false }: { par
       ) : null}
       {part.state === "output-error" && part.errorText ? (
         <pre className="max-h-60 overflow-auto whitespace-pre-wrap wrap-break-word opacity-80">
-          {part.errorText}
+          {displayRuntimeBrand(part.errorText)}
         </pre>
       ) : null}
     </div>
@@ -170,7 +171,7 @@ export function CapabilityCallLine({
   // + Reconnect/Retry, technical details).
   if (isFailed) {
     const sentence = getCapabilityCallSentence(part, { includeQuery: false })
-    const quote = getCapabilityCallQuote(part)
+    const quote = displayRuntimeBrand(getCapabilityCallQuote(part) ?? "")
     const initial = sentence.service?.charAt(0).toUpperCase() ?? null
     return (
       <Collapsible
@@ -181,10 +182,10 @@ export function CapabilityCallLine({
       >
         <CollapsibleTrigger
           className="group flex min-w-0 max-w-full cursor-pointer items-center gap-2 text-start text-sm text-muted-foreground transition-colors hover:text-foreground"
-          aria-label={open ? `${sentence.past}. Hide failure details` : `${sentence.past} failed. Show what to do next`}
+          aria-label={open ? `${displayRuntimeBrand(sentence.past)}. Hide failure details` : `${displayRuntimeBrand(sentence.past)} failed. Show what to do next`}
         >
           {connector ? <ConnectorMark connector={connector} /> : null}
-          <span className="min-w-0 truncate">{sentence.past}</span>
+          <span className="min-w-0 truncate">{displayRuntimeBrand(sentence.past)}</span>
           <span className="shrink-0 text-xs font-medium text-destructive">failed</span>
           {duration ? (
             <span className="shrink-0 text-xs tabular-nums text-muted-foreground/70">{duration}</span>
@@ -204,7 +205,7 @@ export function CapabilityCallLine({
                 </span>
               ) : null}
               <span className="min-w-0 truncate text-sm font-medium text-foreground">
-                {sentence.present}
+                {displayRuntimeBrand(sentence.present)}
               </span>
             </div>
             {quote ? (
@@ -267,7 +268,7 @@ export function CapabilityCallLine({
   }
 
   const sentence = getCapabilityCallSentence(part)
-  const line = statusUnknown ? `${sentence.present} — status unavailable` : inFlight ? sentence.present : sentence.past
+  const line = displayRuntimeBrand(statusUnknown ? `${sentence.present} — status unavailable` : inFlight ? sentence.present : sentence.past)
   return (
     <Collapsible data-capability-call={part.toolName} open={open} onOpenChange={setOpen} className={className}>
       <div className="flex min-w-0 items-center gap-2">

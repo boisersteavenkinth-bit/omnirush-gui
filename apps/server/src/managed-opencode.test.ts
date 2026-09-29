@@ -148,7 +148,7 @@ describe("managed OpenCode startup", () => {
 
     expect(thrown).toBeInstanceOf(Error);
     if (!(thrown instanceof Error)) throw new Error("Expected managed OpenCode startup to fail");
-    expect(thrown.message).toContain("OpenCode server exited with code 1");
+    expect(thrown.message).toContain("OmniRush server exited with code 1");
     expect(thrown.message).toContain("startup diagnostics from stdout");
     expect(thrown.message).toContain("fatal provider configuration mismatch");
     expect((await readFile(attemptsPath, "utf8")).trim().split("\n")).toEqual(["start"]);

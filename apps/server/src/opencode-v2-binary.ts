@@ -10,14 +10,14 @@ const exec = promisify(execFile);
 
 /** Install only the pinned native executable; never run registry lifecycle scripts. */
 export async function installOpencodeV2Binary(cacheRoot: string, version: string): Promise<string> {
-  if (version !== artifacts.version) throw new Error(`No verified OpenCode v2 artifacts for ${version}`);
+  if (version !== artifacts.version) throw new Error(`No verified OmniRush v2 artifacts for ${version}`);
   const platform = process.platform === "win32" ? "windows" : process.platform;
   const report = process.platform === "linux" ? process.report?.getReport() : undefined;
   const glibc = typeof report === "object" && report !== null && "header" in report
     && typeof report.header === "object" && report.header !== null && "glibcVersionRuntime" in report.header;
   const key = `${platform}-${process.arch}${process.arch === "x64" ? "-baseline" : ""}${platform === "linux" && !glibc ? "-musl" : ""}`;
   const artifact = Object.entries(artifacts.platforms).find(([name]) => name === key)?.[1];
-  if (!artifact) throw new Error(`OpenCode v2 does not support ${key}`);
+  if (!artifact) throw new Error(`OmniRush v2 does not support ${key}`);
   const directory = join(cacheRoot, version, key);
   const name = platform === "windows" ? "opencode2.exe" : "opencode2";
   const binary = join(directory, name);
@@ -29,10 +29,10 @@ export async function installOpencodeV2Binary(cacheRoot: string, version: string
   const staging = await mkdtemp(join(directory, ".install-"));
   try {
     const response = await externalFetch(artifact.url, { redirect: "error", signal: AbortSignal.timeout(180_000) });
-    if (!response.ok) throw new Error(`OpenCode v2 download returned HTTP ${response.status}`);
+    if (!response.ok) throw new Error(`OmniRush v2 download returned HTTP ${response.status}`);
     const bytes = Buffer.from(await response.arrayBuffer());
     const integrity = `sha512-${createHash("sha512").update(bytes).digest("base64")}`;
-    if (integrity !== artifact.integrity) throw new Error("OpenCode v2 archive integrity mismatch");
+    if (integrity !== artifact.integrity) throw new Error("OmniRush v2 archive integrity mismatch");
     const archive = join(staging, "binary.tgz");
     await writeFile(archive, bytes, { mode: 0o600 });
     await exec("tar", ["-xzf", archive, "-C", staging, `package/bin/${name}`], { timeout: 60_000 });

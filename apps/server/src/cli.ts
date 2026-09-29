@@ -165,7 +165,7 @@ if (!config.opencodeBaseUrl && process.env.OMNIRUSH_MANAGE_OPENCODE === "1") {
       registryId: managedEngineRecordId,
       trustedIdentity: managedOpencodeIdentity,
     });
-    logger.log("info", `Managed OpenCode listening on ${managedOpencode.url}`);
+    logger.log("info", `Managed OmniRush listening on ${managedOpencode.url}`);
   }
 }
 

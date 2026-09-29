@@ -67,7 +67,7 @@ type SessionUpdateParameters = SessionParameters & {
   time?: { archived?: number };
 };
 
-export const V2_SESSION_ARCHIVE_UNAVAILABLE = "Archiving and unarchiving are not available in the OpenCode v2 preview.";
+export const V2_SESSION_ARCHIVE_UNAVAILABLE = "Archiving and unarchiving are not available in the OmniRush v2 preview.";
 
 type PermissionReply = "once" | "always" | "reject";
 
@@ -634,9 +634,9 @@ function errorMessage(value: unknown): string {
     if ("error" in value) return errorMessage(value.error);
   }
   try {
-    return JSON.stringify(value) || "OpenCode v2 execution failed.";
+    return JSON.stringify(value) || "OmniRush v2 execution failed.";
   } catch {
-    return "OpenCode v2 execution failed.";
+    return "OmniRush v2 execution failed.";
   }
 }
 
@@ -1293,7 +1293,7 @@ function unsupportedResult<T>(baseUrl: string, operation: string, message?: stri
   return {
     error: { name: "UnsupportedInV2Preview", operation, ...(message ? { message } : {}) },
     request: new Request(`${baseUrl}/unsupported/${encodeURIComponent(operation)}`),
-    response: new Response(null, { status: 501, statusText: "Unsupported in OpenCode v2 preview" }),
+    response: new Response(null, { status: 501, statusText: "Unsupported in OmniRush v2 preview" }),
   };
 }
 
