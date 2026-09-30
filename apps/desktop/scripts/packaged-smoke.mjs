@@ -38,8 +38,14 @@ try {
   const archive = join(resources, "app.asar");
   if (!existsSync(archive)) throw new Error(`Missing packaged archive: ${archive}`);
   accessSync(binary, constants.X_OK);
-  const sidecar = join(resources, "sidecars/opencode");
+  const targetTriple = process.arch === "arm64"
+    ? "aarch64-unknown-linux-gnu"
+    : "x86_64-unknown-linux-gnu";
+  const sidecar = join(resources, `sidecars/opencode-${targetTriple}`);
   accessSync(sidecar, constants.X_OK);
+  if (existsSync(join(resources, "sidecars/opencode"))) {
+    throw new Error("Packaged sidecar unexpectedly contains the generic opencode alias");
+  }
   run("sidecar", sidecar, ["--version"], 10_000, {}, output);
   const embedded = pathToFileURL(join(archive, "server/dist/embedded.js")).href;
   run("server-import", binary, ["--input-type=module", "-e",

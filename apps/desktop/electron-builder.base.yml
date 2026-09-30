@@ -60,7 +60,6 @@ mac:
     - from: resources/sidecars
       to: sidecars
       filter:
-        - opencode
         - opencode-aarch64-apple-darwin
         - opencode-x86_64-apple-darwin
         - versions.json
@@ -84,7 +83,6 @@ linux:
     - from: resources/sidecars
       to: sidecars
       filter:
-        - opencode
         - opencode-aarch64-unknown-linux-gnu
         - opencode-x86_64-unknown-linux-gnu
         - versions.json
@@ -121,7 +119,6 @@ win:
     - from: resources/sidecars
       to: sidecars
       filter:
-        - opencode.exe
         - opencode-aarch64-pc-windows-msvc.exe
         - opencode-x86_64-pc-windows-msvc.exe
         - versions.json

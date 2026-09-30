@@ -140,21 +140,6 @@ function signComputerUseHelper(context) {
   }
 }
 
-function copyExecutableTargetToAlias(sidecarsDir, targetName, aliasName) {
-  const targetPath = path.join(sidecarsDir, targetName);
-  if (!fs.existsSync(targetPath)) {
-    throw new Error(`Missing packaged sidecar for target: ${targetName}`);
-  }
-
-  const aliasPath = path.join(sidecarsDir, aliasName);
-  fs.copyFileSync(targetPath, aliasPath);
-  try {
-    fs.chmodSync(aliasPath, 0o755);
-  } catch {
-    // Windows and some filesystems may ignore chmod.
-  }
-}
-
 async function afterPack(context) {
   verifyRuntimeDependencies(context);
   verifyUiControlMcpBundle(context);
@@ -169,10 +154,10 @@ async function afterPack(context) {
   const keep = new Set();
 
   for (const base of sidecarBases) {
-    const aliasName = `${base}${executableSuffix}`;
     const targetName = `${base}-${triple}${executableSuffix}`;
-    copyExecutableTargetToAlias(sidecarsDir, targetName, aliasName);
-    keep.add(aliasName);
+    if (!fs.existsSync(path.join(sidecarsDir, targetName))) {
+      throw new Error(`Missing packaged sidecar for target: ${targetName}`);
+    }
     keep.add(targetName);
   }
 
