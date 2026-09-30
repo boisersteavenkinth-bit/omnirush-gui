@@ -9,7 +9,7 @@
 import { execFile } from "node:child_process";
 import path from "node:path";
 
-import type { OmniRushGatewayBroker } from "./omnirush-gateway-broker.js";
+import { grantExhaustedCopy, type OmniRushGatewayBroker } from "./omnirush-gateway-broker.js";
 
 /** 125 s of 16 kHz mono WAV plus multipart overhead; the backend enforces the same cap. */
 export const VOICE_MAX_UPLOAD_BYTES = 4 * 1024 * 1024;
@@ -59,7 +59,7 @@ export function voiceStatusFromBody(body: unknown): VoiceAvailabilityState {
   };
 }
 
-type VoiceBroker = Pick<OmniRushGatewayBroker, "enabled" | "modelCatalog" | "voiceStatus" | "transcribe">;
+type VoiceBroker = Pick<OmniRushGatewayBroker, "enabled" | "consoleUrl" | "modelCatalog" | "voiceStatus" | "transcribe">;
 type VoiceLog = (level: "info" | "warn", message: string, attributes?: Record<string, unknown>) => void;
 
 export class OmniRushVoiceService {
@@ -175,6 +175,9 @@ export class OmniRushVoiceService {
     if (response.status === 404 && !code) {
       return Response.json({ error: { code: "voice_unavailable", message: "Voice input is not available on this account yet." } }, { status: 503 });
     }
+    // Voice runs on the model grant: say which limit ran out and when it resets.
+    const grant = code === "daily_grant_exhausted" ? grantExhaustedCopy(response.headers, this.broker.consoleUrl) : null;
+    if (grant) return Response.json({ error: { code, message: grant } }, { status: response.status, headers });
     return new Response(text, { status: response.status, headers });
   }
 }

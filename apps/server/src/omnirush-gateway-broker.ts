@@ -154,6 +154,42 @@ export function gatewayErrorMessage(code: string, detail?: string | null): strin
   return why ? `omnirush.ai: ${copy} (${why})` : `omnirush.ai: ${copy}`;
 }
 
+/** The user's clock for a grant reset; tests pin it, the app uses the system's. */
+export type GrantClock = { now?: number; timeZone?: string; hourCycle?: Intl.DateTimeFormatOptions["hourCycle"] };
+
+/**
+ * What a `daily_grant_exhausted` refusal ran out of, from the gateway's
+ * `x-omnirush-grant-scope` ('day' | 'week' | 'empty') and
+ * `x-omnirush-grant-resets-at` (UTC ISO 8601), with the reset on the user's
+ * clock: "Today's tokens are used up. They refill at 5:30 AM (in 3 h)."
+ * Null without a known scope (an older gateway): the caller keeps its
+ * general copy.
+ */
+export function grantExhaustedCopy(headers: Headers, consoleUrl: string | null, clock: GrantClock = {}): string | null {
+  const scope = headers.get("x-omnirush-grant-scope")?.trim().toLowerCase();
+  if (scope === "empty") {
+    return `You have no tokens left. Link Discord or connect GitHub in the console to earn tokens every day${consoleUrl ? `: ${consoleUrl}` : "."}`;
+  }
+  if (scope !== "day" && scope !== "week") return null;
+  const at = Date.parse(headers.get("x-omnirush-grant-resets-at") ?? "");
+  const when = Number.isFinite(at) ? localReset(at, scope, clock) : scope === "day" ? "00:00 UTC" : "Monday 00:00 UTC";
+  return scope === "day" ? `Today's tokens are used up. They refill at ${when}.` : `This week's cap is reached. It resets ${when}.`;
+}
+
+/** "5:30 AM (in 3 h)", or "Monday 5:30 AM (in 4 days)" for the week: English words, the user's time zone and 12/24-hour style. */
+function localReset(at: number, scope: "day" | "week", clock: GrantClock): string {
+  const { timeZone } = clock;
+  const hourCycle = clock.hourCycle ?? new Intl.DateTimeFormat(undefined, { hour: "numeric" }).resolvedOptions().hourCycle;
+  const time = new Intl.DateTimeFormat("en-US", { hour: "numeric", minute: "2-digit", hourCycle, timeZone }).format(at);
+  const local = scope === "week" ? `${new Intl.DateTimeFormat("en-US", { weekday: "long", timeZone }).format(at)} ${time}` : time;
+  const left = at - (clock.now ?? Date.now());
+  if (left <= 0) return local;
+  const minutes = Math.max(1, Math.round(left / 60_000));
+  const hours = Math.round(minutes / 60);
+  const relative = minutes < 60 ? `${minutes} min` : hours < 48 ? `${hours} h` : `${Math.round(hours / 24)} days`;
+  return `${local} (in ${relative})`;
+}
+
 function stringField(value: unknown): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
@@ -411,9 +447,10 @@ export function guardEventStream(
  * A gateway error body with readable copy for the codes the gateway and the
  * relay use (`{"detail":"<code>"}` from the gateway itself, or an
  * OpenAI-shaped `{"error":{code,message}}`), in the OpenAI shape the engine
- * reads its message from. Null leaves the body as it came.
+ * reads its message from. Null leaves the body as it came. `grant` is a
+ * spent grant's copy (grantExhaustedCopy), used for `daily_grant_exhausted`.
  */
-function readableErrorBody(text: string): string | null {
+function readableErrorBody(text: string, grant: string | null): { body: string; code: string } | null {
   let payload: unknown;
   try {
     payload = JSON.parse(text);
@@ -425,21 +462,30 @@ function readableErrorBody(text: string): string | null {
   const bareCode = stringField(payload.detail) ?? stringField(payload.error);
   const code = bareCode ?? stringField(nested?.code);
   if (!code) return null;
-  const message = gatewayErrorMessage(code, stringField(nested?.message))
+  const message = (grant && code === "daily_grant_exhausted" ? `omnirush.ai: ${grant.charAt(0).toLowerCase()}${grant.slice(1)}` : null)
+    ?? gatewayErrorMessage(code, stringField(nested?.message))
     ?? (bareCode ? `omnirush.ai could not complete the model request (${code}).` : null);
   if (!message) return null;
   const param = stringField(nested?.param);
-  return JSON.stringify({
-    error: { message, type: stringField(nested?.type) ?? "omnirush_error", code, ...(param ? { param } : {}) },
-  });
+  return {
+    body: JSON.stringify({
+      error: { message, type: stringField(nested?.type) ?? "omnirush_error", code, ...(param ? { param } : {}) },
+    }),
+    code,
+  };
 }
 
-async function readableErrorResponse(response: Response): Promise<Response> {
+async function readableErrorResponse(response: Response, consoleUrl: string | null): Promise<Response> {
   const text = await response.text().catch(() => "");
-  return new Response(readableErrorBody(text) ?? text, {
+  const readable = readableErrorBody(text, grantExhaustedCopy(response.headers, consoleUrl));
+  const headers = responseHeaders(response.headers);
+  // A spent grant stays spent until its reset: the engine would otherwise
+  // resend the request ten times, each after the 429's Retry-After (60 s).
+  if (readable?.code === "daily_grant_exhausted") headers.set("x-should-retry", "false");
+  return new Response(readable?.body ?? text, {
     status: response.status,
     statusText: response.statusText,
-    headers: responseHeaders(response.headers),
+    headers,
   });
 }
 
@@ -841,6 +887,11 @@ export class OmniRushGatewayBroker {
     return Boolean(this.state && this.engineToken);
   }
 
+  /** The console's Account page on the account's server (where Discord and GitHub are linked). */
+  get consoleUrl(): string | null {
+    return this.state ? new URL("/console/account", this.state.gatewayUrl).toString() : null;
+  }
+
   async handle(request: Request, path: string): Promise<Response> {
     if (!this.enabled || !this.state) return Response.json({ error: "omnirush_account_required" }, { status: 401 });
     if (!secureEqual(bearerToken(request), this.engineToken)) {
@@ -902,7 +953,7 @@ export class OmniRushGatewayBroker {
     // Sign-in failures keep their own answer above; every other gateway
     // refusal reaches the user as readable copy instead of a bare code.
     if (!response.ok && response.status !== 401 && contentType.includes("application/json")) {
-      return await readableErrorResponse(response);
+      return await readableErrorResponse(response, this.consoleUrl);
     }
     const streamed = response.ok && response.body && contentType.includes("text/event-stream");
     const responseBody = streamed && response.body

@@ -16,6 +16,7 @@ import {
 const execFileAsync = promisify(execFile);
 
 /** @typedef {import("@omnirush/types/desktop-ipc").OmniRushAccountStatus} AccountStatus */
+/** @typedef {import("@omnirush/types/desktop-ipc").OmniRushAccountUsage} AccountUsage */
 /** @typedef {import("@omnirush/types/desktop-ipc").OmniRushAccountSignOutReason} SignOutReason */
 /** @typedef {{ remoteRevoked: boolean, reason: SignOutReason }} SignOutOutcome */
 /**
@@ -187,17 +188,49 @@ function displayNameFromEmail(email) {
     .join(" ");
 }
 
+/** An ISO time the backend sent, or null. */
+function isoTime(value) {
+  return typeof value === "string" && Number.isFinite(Date.parse(value)) ? value : null;
+}
+
+/**
+ * /device/me `usage`: what can be used now (`token_limit`, `used_tokens`,
+ * `remaining_tokens`: the grant left plus the pot) and, from a backend with
+ * daily grants, today's allowance, the weekly cap over it and the one-time
+ * pot, so the app says which limit binds and when it resets.
+ * @returns {AccountUsage | null}
+ */
+function accountUsage(usage) {
+  if (!usage || typeof usage !== "object") return null;
+  const day = usage.day && typeof usage.day === "object" ? usage.day : null;
+  const week = usage.week && typeof usage.week === "object" ? usage.week : null;
+  return {
+    tokenLimit: Number(usage.token_limit) || 0,
+    usedTokens: Number(usage.used_tokens) || 0,
+    remainingTokens: Number(usage.remaining_tokens) || 0,
+    period: usage.period === "week" ? "week" : "day",
+    grantModel: usage.grant_model === "daily" || usage.grant_model === "weekly" ? usage.grant_model : null,
+    limitScope: usage.limit_scope === "day" || usage.limit_scope === "week" ? usage.limit_scope : null,
+    day: day
+      ? {
+          allowance: Number(day.allowance) || 0,
+          used: Number(day.used) || 0,
+          reserved: Number(day.reserved) || 0,
+          resetsAt: isoTime(day.resets_at),
+        }
+      : null,
+    week: week
+      ? { limit: Number(week.limit) || 0, used: Number(week.used) || 0, resetsAt: isoTime(week.resets_at) }
+      : null,
+    pot: usage.pot && typeof usage.pot === "object" ? Math.max(0, Number(usage.pot.balance) || 0) : 0,
+  };
+}
+
 function accountProfile(value) {
   if (!value || typeof value !== "object") return null;
   const email = normalizeCredential(value.email);
   if (!email) return null;
-  const usage = value.usage && typeof value.usage === "object"
-    ? {
-        tokenLimit: Number(value.usage.token_limit) || 0,
-        usedTokens: Number(value.usage.used_tokens) || 0,
-        remainingTokens: Number(value.usage.remaining_tokens) || 0,
-      }
-    : null;
+  const usage = accountUsage(value.usage);
   return {
     email,
     displayName: normalizeCredential(value.display_name) ?? displayNameFromEmail(email),

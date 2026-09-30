@@ -38,6 +38,7 @@ import { LazyMotion, Reorder, domMax, m, useDragControls } from "motion/react";
 
 import { getDisplaySessionTitle } from "../../../../app/lib/session-title";
 import { omnirushAccountStatus, type WorkspaceInfo } from "../../../../app/lib/desktop";
+import { omnirushUsageSummary } from "../../../../app/lib/omnirush-usage";
 import { isDesktopRuntime } from "../../../../app/lib/runtime-env";
 import { OmniRushDenHelpLink } from "../../workspace/omnirush-den-help-link";
 import { NotificationBell } from "../../../shell/notification-center";
@@ -975,13 +976,6 @@ function OmniRushWordmark({ className }: { className?: string }) {
   );
 }
 
-function compactTokenCount(value: number): string {
-  return new Intl.NumberFormat(undefined, {
-    notation: "compact",
-    maximumFractionDigits: 1,
-  }).format(Math.max(0, value));
-}
-
 function NativeAccountFooter({ onOpenAccountSettings }: { onOpenAccountSettings: () => void }) {
   const [status, setStatus] = React.useState<NativeAccountStatus | null>(null);
 
@@ -1004,15 +998,12 @@ function NativeAccountFooter({ onOpenAccountSettings }: { onOpenAccountSettings:
   const accountLabel = connected
     ? status?.displayName?.trim() || status?.email?.trim() || "Your account"
     : "sign in to omnirush.ai";
-  const usage = connected ? status?.usage : null;
-  const usagePercent = usage && usage.tokenLimit > 0
-    ? Math.min(100, Math.max(0, (usage.usedTokens / usage.tokenLimit) * 100))
-    : 0;
+  const usage = connected && status?.usage ? omnirushUsageSummary(status.usage) : null;
   // The account server label ("omnirush.ai", "localhost:8090 (local API)")
   // only matters while connected; a signed-out footer keeps the sign-in hint.
   const serverHost = connected ? status?.gatewayHost?.trim() || null : null;
   const accountDetail = usage
-    ? `${compactTokenCount(usage.remainingTokens)} tokens left today${serverHost ? ` · ${serverHost}` : ""}`
+    ? `${usage.short}${serverHost ? ` · ${serverHost}` : ""}`
     : connected
       ? serverHost
         ? `connected to ${serverHost}`
@@ -1055,7 +1046,7 @@ function NativeAccountFooter({ onOpenAccountSettings }: { onOpenAccountSettings:
               </span>
               {usage ? (
                 <span className="mt-1 block h-0.5 overflow-hidden rounded-full bg-sidebar-border" aria-hidden="true">
-                  <span className="block h-full rounded-full bg-[#b9f45a]" style={{ width: `${usagePercent}%` }} />
+                  <span className="block h-full rounded-full bg-[#b9f45a]" style={{ width: `${usage.percent}%` }} />
                 </span>
               ) : null}
             </span>

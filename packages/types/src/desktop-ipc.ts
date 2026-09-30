@@ -150,6 +150,26 @@ export type OmniRushAccountSignOutResult = {
   reason: OmniRushAccountSignOutReason;
 };
 
+/**
+ * The account's tokens (/device/me `usage`). The first three are what can be
+ * used now (the grant left plus the pot). With daily grants (`grantModel`
+ * "daily"), `day` is today's allowance (resets 00:00 UTC), `week` the weekly
+ * cap over it (resets Monday 00:00 UTC) and `pot` the one-time tokens used
+ * once either runs out; `limitScope` "week" means only the weekly cap binds.
+ * The grant fields are optional: an older desktop bridge leaves them out.
+ */
+export type OmniRushAccountUsage = {
+  tokenLimit: number;
+  usedTokens: number;
+  remainingTokens: number;
+  period?: "day" | "week";
+  grantModel?: "weekly" | "daily" | null;
+  limitScope?: "day" | "week" | null;
+  day?: { allowance: number; used: number; reserved: number; resetsAt: string | null } | null;
+  week?: { limit: number; used: number; resetsAt: string | null } | null;
+  pot?: number;
+};
+
 export type OmniRushAccountStatus = {
   connected: boolean;
   gatewayConfigured: boolean;
@@ -157,7 +177,7 @@ export type OmniRushAccountStatus = {
   email?: string | null;
   displayName?: string | null;
   accountStatus?: string | null;
-  usage?: { tokenLimit: number; usedTokens: number; remainingTokens: number } | null;
+  usage?: OmniRushAccountUsage | null;
   /** Gateway URL the connected account uses, or the configured default while signed out. */
   gatewayUrl?: string | null;
   /** Display label for the account server, e.g. "omnirush.ai" or "localhost:8090 (local API)". */

@@ -1,9 +1,81 @@
 import { describe, expect, test } from "bun:test";
 
+import type { OmniRushAccountUsage } from "@omnirush/types/desktop-ipc";
+
+import { omnirushUsageSummary, type UsageClock } from "../src/app/lib/omnirush-usage";
 import {
   accountServerLine,
   accountSignOutMessage,
 } from "../src/react-app/domains/settings/pages/general-view";
+
+describe("account usage in words", () => {
+  // Wednesday 21:00 UTC; the day resets at 00:00 UTC, the week on Monday.
+  const clock: UsageClock = { now: Date.parse("2026-09-30T21:00:00Z"), timeZone: "Asia/Kolkata", hourCycle: "h12" };
+  const daily = (day: Partial<NonNullable<OmniRushAccountUsage["day"]>>, extra: Partial<OmniRushAccountUsage> = {}): OmniRushAccountUsage => ({
+    tokenLimit: 0,
+    usedTokens: 0,
+    remainingTokens: 0,
+    period: "day",
+    grantModel: "daily",
+    limitScope: "day",
+    day: { allowance: 10_000_000, used: 0, reserved: 0, resetsAt: "2026-10-01T00:00:00Z", ...day },
+    week: { limit: 50_000_000, used: 0, resetsAt: "2026-10-05T00:00:00Z" },
+    pot: 0,
+    ...extra,
+  });
+
+  test("today's allowance, when it refills, and the bonus pot", () => {
+    expect(omnirushUsageSummary(daily({ used: 6_800_000 }, { pot: 500_000 }), clock)).toEqual({
+      short: "3.2M tokens left today",
+      line: "3.2M of 10M tokens left today · refills at 5:30 AM (in 3 h) · 500K bonus pot",
+      percent: 68,
+    });
+  });
+
+  test("says which limit ran out and when it resets", () => {
+    expect(omnirushUsageSummary(daily({ used: 10_000_000 }), clock)).toEqual({
+      short: "Today's tokens used up",
+      line: "Today's tokens are used up. They refill at 5:30 AM (in 3 h).",
+      percent: 100,
+    });
+    expect(omnirushUsageSummary(daily({ used: 1_000_000 }, { week: { limit: 50_000_000, used: 50_000_000, resetsAt: "2026-10-05T00:00:00Z" }, pot: 400_000 }), clock)).toEqual({
+      short: "Weekly cap reached · 400K bonus pot",
+      line: "This week's cap is reached. It resets Monday 5:30 AM (in 4 days). Your 400K bonus pot covers you until then.",
+      percent: 100,
+    });
+    // The cap leaves less than today's allowance: it is what binds.
+    expect(omnirushUsageSummary(daily({ used: 1_000_000 }, { week: { limit: 50_000_000, used: 48_000_000, resetsAt: "2026-10-05T00:00:00Z" } }), clock).line)
+      .toBe("2M tokens left today (weekly cap) · cap resets Monday 5:30 AM (in 4 days)");
+  });
+
+  test("an account without daily tokens: the one-time pot, and how to earn every day", () => {
+    expect(omnirushUsageSummary(daily({ allowance: 0 }, { pot: 500_000 }), clock)).toEqual({
+      short: "500K one-time tokens left",
+      line: "500K one-time tokens left. Link Discord or GitHub to get tokens every day.",
+      percent: 0,
+    });
+    expect(omnirushUsageSummary(daily({ allowance: 0 }), clock).line).toBe("No tokens left. Link Discord or GitHub to get tokens every day.");
+  });
+
+  test("an account with only its own weekly cap meters the week", () => {
+    const usage = daily({}, { limitScope: "week", week: { limit: 200_000_000, used: 50_000_000, resetsAt: "2026-10-05T00:00:00Z" } });
+    expect(omnirushUsageSummary(usage, clock)).toEqual({
+      short: "150M tokens left this week",
+      line: "150M of 200M tokens left this week · resets Monday 5:30 AM (in 4 days)",
+      percent: 25,
+    });
+  });
+
+  test("the weekly model and an older backend read as before", () => {
+    const legacy: OmniRushAccountUsage = { tokenLimit: 100_000, usedTokens: 1_234, remainingTokens: 98_766 };
+    expect(omnirushUsageSummary(legacy, clock)).toEqual({
+      short: "98.8K tokens left today",
+      line: "98.8K of 100K tokens left today",
+      percent: 1.234,
+    });
+    expect(omnirushUsageSummary({ ...legacy, period: "week", grantModel: "weekly" }, clock).short).toBe("98.8K tokens left this week");
+  });
+});
 
 describe("settings sign-out message", () => {
   test("says exactly what happened to the remote device session", () => {

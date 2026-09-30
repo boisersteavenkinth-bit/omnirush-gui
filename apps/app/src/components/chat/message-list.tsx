@@ -849,6 +849,7 @@ const MessageComponent = React.memo(
           showDescriptionOnResume={presentation?.kind === "provider-incomplete"}
           resumePrompt={presentation?.recoveryPrompt}
           technicalDetails={presentation?.technicalDetails}
+          action={presentation?.action}
         />
       )
     }
@@ -946,6 +947,8 @@ interface ErrorMessageProps {
   resumePrompt?: string | null
   /** Error type, status, provider, code, response body — for bug reports and support. */
   technicalDetails?: string | null
+  /** A page that fixes the error ("Open console"), opened in the browser. */
+  action?: { label: string; link: string } | null
 }
 
 /**
@@ -1010,7 +1013,7 @@ function SessionErrorTechnicalDetails({ details, tone }: { details: string; tone
   )
 }
 
-function ErrorMessage({ error, description, showDescriptionOnResume, resumePrompt, technicalDetails }: ErrorMessageProps) {
+function ErrorMessage({ error, description, showDescriptionOnResume, resumePrompt, technicalDetails, action }: ErrorMessageProps) {
   const { onResumeInterrupted, developerMode } = useMessageList()
   // Status codes, provider names, and response bodies are for developers,
   // admins, and support — not the plain-language card end users see. They
@@ -1059,6 +1062,17 @@ function ErrorMessage({ error, description, showDescriptionOnResume, resumePromp
               <p className="whitespace-pre-wrap text-destructive">{error}</p>
               {description && (!resumePrompt || showDescriptionOnResume) ? (
                 <p className="text-sm text-destructive/80 whitespace-pre-wrap">{description}</p>
+              ) : null}
+              {action?.link ? (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  data-testid="session-error-action"
+                  className="mt-1 h-7 w-fit text-xs"
+                  onClick={() => void openDesktopUrl(action.link)}
+                >
+                  {action.label}
+                </Button>
               ) : null}
             </div>
           </div>

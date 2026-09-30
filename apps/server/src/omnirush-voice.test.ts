@@ -92,6 +92,26 @@ describe("voice through the gateway broker", () => {
     expect((await service.availability()).available).toBeNull();
   });
 
+  test("a spent model grant says which limit ran out; without its headers the answer passes as it came", async () => {
+    const refusal = (headers: Record<string, string>) => new OmniRushVoiceService(broker(() => Response.json(
+      { detail: "daily_grant_exhausted" },
+      { status: 429, headers: { "retry-after": "60", ...headers } },
+    )));
+    const empty = await refusal({ "x-omnirush-grant-scope": "empty" }).transcribe(segmentUpload());
+    expect(empty.status).toBe(429);
+    expect(empty.headers.get("retry-after")).toBe("60");
+    expect(await empty.json()).toEqual({
+      error: {
+        code: "daily_grant_exhausted",
+        message: "You have no tokens left. Link Discord or connect GitHub in the console to earn tokens every day: https://gateway.example/console/account",
+      },
+    });
+    const day = await refusal({ "x-omnirush-grant-scope": "day" }).transcribe(segmentUpload());
+    expect(((await day.json()) as { error: { message: string } }).error.message).toBe("Today's tokens are used up. They refill at 00:00 UTC.");
+    const older = await refusal({}).transcribe(segmentUpload());
+    expect(await older.json()).toEqual({ detail: "daily_grant_exhausted" });
+  });
+
   test("an older backend without the route (404) reads as voice unavailable", async () => {
     const service = new OmniRushVoiceService(broker(() => new Response("not found", { status: 404 })));
     const response = await service.transcribe(segmentUpload());

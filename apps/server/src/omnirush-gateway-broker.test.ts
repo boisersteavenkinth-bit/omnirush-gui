@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { OmniRushGatewayBroker, guardEventStream } from "./omnirush-gateway-broker.js";
+import { OmniRushGatewayBroker, grantExhaustedCopy, guardEventStream, type GrantClock } from "./omnirush-gateway-broker.js";
 import { OmniRushReasoningEffort } from "./opencode-plugins/omnirush-reasoning-effort.js";
 import type { OmniRushGatewayCredentialBundle } from "./types.js";
 
@@ -938,6 +938,69 @@ describe("readable gateway errors", () => {
       expect(payload.error.message).toStartWith("omnirush.ai: ");
       expect(payload.error.message).toContain(entry.copy);
     }
+  });
+
+  test("a spent grant says which limit ran out and when it resets, and is never resent", async () => {
+    const spent = (headers: Record<string, string>) => refusingBroker(429, JSON.stringify({ detail: "daily_grant_exhausted" }), {
+      "content-type": "application/json",
+      "retry-after": "60",
+      "x-ratelimit-limit-tokens": "5000000",
+      "x-ratelimit-remaining-tokens": "0",
+      ...headers,
+    }).handle(gatewayRequest({ model: "gpt-6-astra", input: "hi", stream: true }), "responses");
+
+    const resetsAt = new Date(Date.now() + 3 * 3_600_000).toISOString();
+    const day = await spent({ "x-omnirush-grant-scope": "day", "x-omnirush-grant-resets-at": resetsAt });
+    expect(day.status).toBe(429);
+    // The engine would otherwise resend it ten times, a Retry-After apart.
+    expect(day.headers.get("x-should-retry")).toBe("false");
+    expect(day.headers.get("retry-after")).toBe("60");
+    expect(day.headers.get("x-omnirush-grant-scope")).toBe("day");
+    const dayError = (await day.json() as { error: { message: string; code: string } }).error;
+    expect(dayError.code).toBe("daily_grant_exhausted");
+    expect(dayError.message).toMatch(/^omnirush\.ai: today's tokens are used up\. They refill at \d{1,2}:\d{2}( [AP]M)? \(in 3 h\)\.$/);
+
+    const week = await spent({ "x-omnirush-grant-scope": "week", "x-omnirush-grant-resets-at": new Date(Date.now() + 4 * 86_400_000).toISOString() });
+    expect((await week.json() as { error: { message: string } }).error.message)
+      .toMatch(/^omnirush\.ai: this week's cap is reached\. It resets [A-Z][a-z]+day \d{1,2}:\d{2}( [AP]M)? \(in 4 days\)\.$/);
+
+    const empty = await spent({ "x-omnirush-grant-scope": "empty" });
+    expect((await empty.json() as { error: { message: string } }).error.message).toBe(
+      "omnirush.ai: you have no tokens left. Link Discord or connect GitHub in the console to earn tokens every day: https://gateway.example/console/account",
+    );
+
+    // An older gateway without the headers: the general copy, still not resent.
+    const older = await spent({});
+    expect(older.headers.get("x-should-retry")).toBe("false");
+    expect((await older.json() as { error: { message: string } }).error.message).toBe(
+      "omnirush.ai: you have used today's model allowance. It refills at 00:00 UTC.",
+    );
+  });
+
+  test("grant copy on the user's clock: local time, then how long until it", () => {
+    const now = Date.parse("2026-09-30T21:00:00Z");
+    const headers = (scope: string, resetsAt?: string) => new Headers({
+      "x-omnirush-grant-scope": scope,
+      ...(resetsAt ? { "x-omnirush-grant-resets-at": resetsAt } : {}),
+    });
+    const india: GrantClock = { now, timeZone: "Asia/Kolkata", hourCycle: "h12" };
+    expect(grantExhaustedCopy(headers("day", "2026-10-01T00:00:00Z"), null, india))
+      .toBe("Today's tokens are used up. They refill at 5:30 AM (in 3 h).");
+    expect(grantExhaustedCopy(headers("week", "2026-10-05T00:00:00Z"), null, india))
+      .toBe("This week's cap is reached. It resets Monday 5:30 AM (in 4 days).");
+    // West of UTC the week resets on Sunday afternoon; 24-hour clocks stay 24-hour.
+    expect(grantExhaustedCopy(headers("week", "2026-10-05T00:00:00Z"), null, { now, timeZone: "America/Los_Angeles", hourCycle: "h12" }))
+      .toBe("This week's cap is reached. It resets Sunday 5:00 PM (in 4 days).");
+    expect(grantExhaustedCopy(headers("day", "2026-09-30T21:40:00Z"), null, { now, timeZone: "Europe/Berlin", hourCycle: "h23" }))
+      .toBe("Today's tokens are used up. They refill at 23:40 (in 40 min).");
+    // Without a reset time the known UTC reset; a scope in another case still reads.
+    expect(grantExhaustedCopy(headers("DAY"), null, india)).toBe("Today's tokens are used up. They refill at 00:00 UTC.");
+    expect(grantExhaustedCopy(headers("week"), null, india)).toBe("This week's cap is reached. It resets Monday 00:00 UTC.");
+    expect(grantExhaustedCopy(headers("empty"), null, india))
+      .toBe("You have no tokens left. Link Discord or connect GitHub in the console to earn tokens every day.");
+    // No scope, or one this app does not know: the caller's general copy.
+    expect(grantExhaustedCopy(new Headers(), null, india)).toBeNull();
+    expect(grantExhaustedCopy(headers("month", "2026-10-01T00:00:00Z"), null, india)).toBeNull();
   });
 
   test("keep what a provider error names as refused", async () => {
