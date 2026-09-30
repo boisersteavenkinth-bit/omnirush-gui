@@ -426,6 +426,31 @@ describe("live events and read-back agree", () => {
     expect(translator.childSessionOf("ses_other", tasks[0]!.callID)).toBeUndefined();
   });
 
+  test("a sub-agent call's child is remembered only until the engine's own record names it", async () => {
+    const translator = new EventTranslator({ version: "2.0.18" });
+    const progress = (sessionID: string, id: string, child: string) =>
+      translator.translate({ type: "session.tool.progress", data: { sessionID, id, metadata: { sessionID: child, status: "running" } } });
+    await progress("ses_p", "call_ok", "ses_c1");
+    await progress("ses_p", "call_bad", "ses_c2");
+    await progress("ses_p", "call_bad_named", "ses_c3");
+    await progress("ses_q", "call_other", "ses_c4");
+
+    // Success names the child (the engine stores it from then on): forgotten.
+    await translator.translate({ type: "session.tool.success", data: { sessionID: "ses_p", id: "call_ok", metadata: { sessionID: "ses_c1", status: "completed" } } });
+    expect(translator.childSessionOf("ses_p", "call_ok")).toBeUndefined();
+    // A failure that does not name the child keeps it, so its card stays linked.
+    await translator.translate({ type: "session.tool.failed", data: { sessionID: "ses_p", id: "call_bad", error: "aborted" } });
+    expect(translator.childSessionOf("ses_p", "call_bad")).toBe("ses_c2");
+    // A failure that names it is forgotten like a success.
+    await translator.translate({ type: "session.tool.failed", data: { sessionID: "ses_p", id: "call_bad_named", error: "boom", metadata: { sessionID: "ses_c3" } } });
+    expect(translator.childSessionOf("ses_p", "call_bad_named")).toBeUndefined();
+
+    // Deleting the parent session forgets its calls, and only its calls.
+    await translator.translate({ type: "session.deleted", data: { sessionID: "ses_p" } });
+    expect(translator.childSessionOf("ses_p", "call_bad")).toBeUndefined();
+    expect(translator.childSessionOf("ses_q", "call_other")).toBe("ses_c4");
+  });
+
   test("busy and idle come from the execution lifecycle", async () => {
     const translator = new EventTranslator({ version: "2.0.18" });
     const started = await translator.translate({ type: "session.execution.started", data: { sessionID: "ses_a" } });

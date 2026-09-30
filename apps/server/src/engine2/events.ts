@@ -77,7 +77,15 @@ function modelRef(value: unknown): ModelRef | undefined {
   return variant && variant !== "default" ? { providerID, modelID, variant } : { providerID, modelID };
 }
 
-/** How many sub-agent calls' child sessions the translator remembers. */
+/** The child session a sub-agent call's progress or end metadata names. */
+function childSessionIn(metadata: unknown): string | undefined {
+  return isRecord(metadata) && typeof metadata.sessionID === "string" && metadata.sessionID ? metadata.sessionID : undefined;
+}
+
+/**
+ * A backstop on the remembered child sessions: an entry normally goes when its
+ * call ends, so this only bounds calls that never report an end (engine crash).
+ */
 const MAX_CHILD_SESSIONS = 2000;
 
 export class EventTranslator {
@@ -102,12 +110,26 @@ export class EventTranslator {
   }
 
   private noteChildSession(sessionID: string, callID: string, metadata: unknown): void {
-    const child = isRecord(metadata) && typeof metadata.sessionID === "string" && metadata.sessionID ? metadata.sessionID : undefined;
+    const child = childSessionIn(metadata);
     if (!child) return;
     const key = `${sessionID}\u0000${callID}`;
     this.childSessions.delete(key);
     this.childSessions.set(key, child);
     if (this.childSessions.size > MAX_CHILD_SESSIONS) this.childSessions.delete(this.childSessions.keys().next().value as string);
+  }
+
+  /**
+   * Forgets a call's child once its end event names it: the engine's own record
+   * of the call carries it from then on. An end that does not name it (a failure
+   * the engine may store without it) keeps the entry, so the card stays linked.
+   */
+  private settleChildSession(sessionID: string, callID: string, metadata: unknown): void {
+    if (childSessionIn(metadata)) this.childSessions.delete(`${sessionID}\u0000${callID}`);
+  }
+
+  private forgetChildSessionsOf(sessionID: string): void {
+    const prefix = `${sessionID}\u0000`;
+    for (const key of this.childSessions.keys()) if (key.startsWith(prefix)) this.childSessions.delete(key);
   }
 
   /** The 1.x status of every session the stream saw busy or retrying. */
@@ -319,6 +341,7 @@ export class EventTranslator {
         const info = this.session(sessionID).info ?? { id: sessionID };
         const out = [this.scoped(sessionID, "session.deleted", { sessionID, info })];
         this.sessions.delete(sessionID);
+        this.forgetChildSessionsOf(sessionID);
         return out;
       }
       case "session.agent.selected": {
@@ -561,8 +584,9 @@ export class EventTranslator {
       }
       case "session.tool.success":
       case "session.tool.failed": {
-        const live = this.liveFor(data);
         const callID = str(data, "id");
+        if (sessionID && callID) this.settleChildSession(sessionID, callID, data.metadata);
+        const live = this.liveFor(data);
         if (!live || !callID) return [];
         const entry = this.toolEntry(live, callID);
         const state = record(entry, "state") ?? {};
