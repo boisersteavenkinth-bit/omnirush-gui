@@ -181,10 +181,12 @@ import {
   resolveSubagentModel,
   sanitizeSubagentModelSetting,
   subagentModelRefusals,
+  subagentSettingFor,
   writeSubagentModelSetting,
   type EngineModelRef,
   type SubagentModelSetting,
 } from "./omnirush-subagent-model.js";
+import { modelsNamedIn } from "./omnirush-swarm.js";
 import { findManagedEngineWorkspace } from "./workspaces.js";
 import { startThreadApprovalReplayer, type ThreadApprovalReplayer } from "./thread-approvals.js";
 import { CloudProviderSync, parseCloudProviderDenSession } from "./cloud-provider-sync.js";
@@ -3687,12 +3689,24 @@ function createRoutes(
     return jsonResponse({ ok: true, setting: saved });
   });
 
+  // Whether the user's message names a model a task asked for, by id or by its catalog name
+  // (the swarm plugin keeps the task's model only then).
+  addRoute(routes, "POST", "/omnirush/subagent-model/named", "policy", async (ctx) => {
+    const body = await readJsonBody(ctx.request);
+    const model = typeof body.model === "string" ? body.model.trim() : "";
+    const text = typeof body.text === "string" ? body.text.slice(0, 100_000) : "";
+    if (!model) throw new ApiError(400, "invalid_payload", "model is required");
+    const catalog = await readOmniRushModelCatalog(config);
+    const models = [...catalog.map((entry) => ({ id: entry.id, name: entry.display_name })), { id: model }];
+    return jsonResponse({ named: modelsNamedIn(text, models).has(model) });
+  });
+
   addRoute(routes, "POST", "/omnirush/subagent-model/resolve", "policy", async (ctx) => {
     const body = await readJsonBody(ctx.request);
     const inherited = engineModelRef(body.inherited);
     if (!inherited) throw new ApiError(400, "invalid_payload", "inherited model is required");
-    const setting = await readSubagentModelSetting(config);
-    if (!setting.model && !setting.effort) return jsonResponse({});
+    const setting = subagentSettingFor(await readSubagentModelSetting(config), engineModelRef(body.requested));
+    if (!setting || (!setting.model && !setting.effort)) return jsonResponse({});
     const refusals = subagentModelRefusals(config);
     const resolution = resolveSubagentModel({
       setting,
