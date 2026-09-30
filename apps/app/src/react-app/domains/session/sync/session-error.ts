@@ -11,7 +11,19 @@ export type OpencodeSessionErrorPresentation = {
   description: string | null;
   technicalDetails: string;
   recoveryPrompt: string | null;
+  /** A page that fixes the error, opened in the browser (omnirush.ai's console for an account out of tokens). */
+  action?: { label: string; link: string } | null;
 };
+
+/**
+ * An omnirush.ai error that ends with its console page ("… earn tokens every
+ * day: https://omnirush.ai/console/account"): the sentence without the link,
+ * and the link as the card's "Open console" button.
+ */
+function consoleLinkAction(message: string | null): { text: string; action: { label: string; link: string } } | null {
+  const [, text, link] = (message && /^(omnirush\.ai: [\s\S]+?):\s*(https?:\/\/\S+\/console\/account)\s*$/.exec(message)) || [];
+  return text && link ? { text: `${text}.`, action: { label: "Open console", link } } : null;
+}
 
 export const interruptedTaskRecoveryPrompt = [
   "Continue the interrupted task from the current state.",
@@ -198,13 +210,15 @@ function technicalErrorDetails(error: unknown, fallback: string, fields: ReturnT
 export function presentOpencodeSessionError(error: unknown, fallback = "Session failed"): OpencodeSessionErrorPresentation {
   const fields = sessionErrorFields(error, fallback);
   const kind = sessionErrorKind(fields.name, fields.message, fields.code, fields.responseBody);
-  const fallbackTitle = normalizeSessionError(fields.message ?? defaultErrorMessage(fields.name, fallback));
+  const consoleLink = consoleLinkAction(fields.message);
+  const fallbackTitle = normalizeSessionError(consoleLink?.text ?? fields.message ?? defaultErrorMessage(fields.name, fallback));
   return {
     kind,
     title: errorTitle(kind, fallbackTitle),
     description: errorDescription(kind),
     technicalDetails: technicalErrorDetails(error, fallback, fields),
     recoveryPrompt: errorRecoveryPrompt(kind),
+    ...(consoleLink ? { action: consoleLink.action } : {}),
   };
 }
 

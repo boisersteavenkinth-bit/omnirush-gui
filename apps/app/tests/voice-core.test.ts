@@ -471,6 +471,20 @@ describe("remote transcriber", () => {
     if (status === 429) expect((error as VoiceError).retryAfterMs).toBe(2_000);
   });
 
+  test("a spent model grant reads the local broker's words for which limit ran out", async () => {
+    const message = "This week's cap is reached. It resets Monday 5:30 AM (in 4 days).";
+    const spent = (body: unknown) => new RemoteTranscriber({
+      url: "http://x",
+      fetch: async () => new Response(JSON.stringify(body), { status: 429, headers: { "retry-after": "60" } }),
+    }).transcribe(request, new AbortController().signal).catch((e: unknown) => e);
+    const worded = await spent({ error: { code: "daily_grant_exhausted", message } });
+    expect(worded).toBeInstanceOf(VoiceError);
+    expect((worded as VoiceError).message).toBe(message);
+    expect((worded as VoiceError).retryable).toBe(false);
+    const bare = await spent({ detail: "daily_grant_exhausted" });
+    expect((bare as VoiceError).message).toBe("You have used today's model allowance, which voice falls back on. It refills at 00:00 UTC.");
+  });
+
   test("a connection failure is a retryable network error", async () => {
     const transcriber = new RemoteTranscriber({ url: "http://x", fetch: async () => { throw new TypeError("fetch failed"); } });
     const error = await transcriber.transcribe(request, new AbortController().signal).catch((e: unknown) => e);

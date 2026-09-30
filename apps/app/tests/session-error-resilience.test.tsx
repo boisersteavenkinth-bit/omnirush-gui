@@ -291,6 +291,40 @@ describe("session error resilience", () => {
     expect(html).not.toContain("bg-destructive/5")
   })
 
+  test("an account out of tokens gets the console as a button, not a bare link", () => {
+    const error = {
+      name: "APIError",
+      data: {
+        message: "omnirush.ai: you have no tokens left. Link Discord or connect GitHub in the console to earn tokens every day: https://omnirush.ai/console/account",
+        statusCode: 429,
+        isRetryable: false,
+      },
+    }
+    const presentation = presentOpencodeSessionError(error)
+    expect(presentation.title).toBe(
+      "omnirush.ai: you have no tokens left. Link Discord or connect GitHub in the console to earn tokens every day.",
+    )
+    expect(presentation.action).toEqual({ label: "Open console", link: "https://omnirush.ai/console/account" })
+    // It survives the reload: the synthetic message keeps the button.
+    expect(sessionErrorPresentationFromUIMessage(createSessionErrorUIMessage("turn", presentation))?.action)
+      .toEqual(presentation.action)
+
+    const html = renderErrorTranscriptWithResume(error)
+    expect(html).toContain('data-testid="session-error-action"')
+    expect(html).toContain(">Open console<")
+    expect(html).not.toContain("https://omnirush.ai/console/account")
+    expect(html).not.toContain('data-testid="session-error-resume"')
+
+    // A spent day or week is words only.
+    const day = presentOpencodeSessionError({
+      name: "APIError",
+      data: { message: "omnirush.ai: today's tokens are used up. They refill at 5:30 AM (in 3 h).", statusCode: 429 },
+    })
+    expect(day.title).toBe("omnirush.ai: today's tokens are used up. They refill at 5:30 AM (in 3 h).")
+    expect(day.action).toBeUndefined()
+    expect(renderErrorTranscriptWithResume({ name: "APIError", data: { message: day.title } })).not.toContain("session-error-action")
+  })
+
   test("keeps the destructive card for errors that cannot be resumed", () => {
     const html = renderErrorTranscriptWithResume({
       name: "ProviderAuthError",

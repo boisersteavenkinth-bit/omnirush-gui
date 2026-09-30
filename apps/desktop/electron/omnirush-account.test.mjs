@@ -175,6 +175,48 @@ test("profile lookup refreshes an expired device credential and persists the rot
   assert.match(await readFile(options.filePath, "utf8"), /rotated-refresh/);
 });
 
+test("status carries today's allowance, the weekly cap and the pot of daily grants", async () => {
+  const options = await storeOptions({
+    env: {
+      OMNIRUSH_DEV_MODE: "1",
+      OMNIRUSH_GATEWAY_URL: "http://localhost:8090/omnirush/v1",
+      OMNIRUSH_ACCESS_TOKEN: "access",
+      OMNIRUSH_REFRESH_TOKEN: "refresh",
+    },
+    fetchImpl: async (url) => {
+      assert.match(new URL(url).pathname, /\/device\/me$/);
+      return Response.json({
+        email: "person@example.com",
+        status: "active",
+        usage: {
+          token_limit: 10_500_000,
+          used_tokens: 6_800_000,
+          remaining_tokens: 3_700_000,
+          period: "day",
+          resets_at: "2026-10-01T00:00:00Z",
+          grant_model: "daily",
+          limit_scope: "day",
+          day: { allowance: 10_000_000, used: 6_800_000, reserved: 0, discord: 5_000_000, github: 5_000_000, power: 0, resets_at: "2026-10-01T00:00:00Z" },
+          week: { limit: 50_000_000, used: 20_000_000, resets_at: "2026-10-05T00:00:00Z" },
+          pot: { balance: 500_000 },
+        },
+      });
+    },
+  });
+  const status = await createDesktopOmniRushAccountStore(options).status();
+  assert.deepEqual(status.usage, {
+    tokenLimit: 10_500_000,
+    usedTokens: 6_800_000,
+    remainingTokens: 3_700_000,
+    period: "day",
+    grantModel: "daily",
+    limitScope: "day",
+    day: { allowance: 10_000_000, used: 6_800_000, reserved: 0, resetsAt: "2026-10-01T00:00:00Z" },
+    week: { limit: 50_000_000, used: 20_000_000, resetsAt: "2026-10-05T00:00:00Z" },
+    pot: 500_000,
+  });
+});
+
 test("sign out prevents legacy credentials from being imported again", async () => {
   let logoutBody = null;
   const options = await storeOptions({

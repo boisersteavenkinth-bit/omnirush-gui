@@ -35,8 +35,20 @@ export function errorCode(body: unknown): string | null {
   return null;
 }
 
-/** Maps a transcription service answer to the error the user reads. */
-export function voiceErrorFromResponse(status: number, code: string | null, retryAfter: number | null): VoiceError {
+/** The readable message of `{"error":{"message":"x"}}`, which the local broker writes for a spent grant. */
+function errorMessage(body: unknown): string | null {
+  if (!body || typeof body !== "object") return null;
+  const error = (body as Record<string, unknown>).error;
+  const message = error && typeof error === "object" ? (error as Record<string, unknown>).message : null;
+  return typeof message === "string" && message.trim() ? message.trim() : null;
+}
+
+/**
+ * Maps a transcription service answer to the error the user reads. `message`
+ * is the service's own words for a spent grant (which limit ran out and when
+ * it resets); without them the general copy stands.
+ */
+export function voiceErrorFromResponse(status: number, code: string | null, retryAfter: number | null, message: string | null = null): VoiceError {
   if (status === 401 || code === "omnirush_account_required") {
     return new VoiceError("signed_out", "Sign in to omnirush.ai to use voice.", { status });
   }
@@ -57,7 +69,7 @@ export function voiceErrorFromResponse(status: number, code: string | null, retr
     return new VoiceError(
       "rate_limited",
       code === "daily_grant_exhausted"
-        ? "You have used today's model allowance, which voice falls back on. It refills at 00:00 UTC."
+        ? message ?? "You have used today's model allowance, which voice falls back on. It refills at 00:00 UTC."
         : budget ? "You have used today's voice allowance. It refills at 00:00 UTC." : "Voice is busy. Try again in a moment.",
       { status, retryable: !budget, retryAfterMs: retryAfter },
     );
@@ -125,7 +137,7 @@ export class RemoteTranscriber implements Transcriber {
     } catch {
       body = null;
     }
-    if (!response.ok) throw voiceErrorFromResponse(response.status, errorCode(body), retryAfterMs(response));
+    if (!response.ok) throw voiceErrorFromResponse(response.status, errorCode(body), retryAfterMs(response), errorMessage(body));
     const value = body && typeof body === "object" ? (body as Record<string, unknown>).text : null;
     if (typeof value !== "string") {
       throw new VoiceError("network", "The transcription service sent an unexpected answer.", { retryable: true, status: response.status });

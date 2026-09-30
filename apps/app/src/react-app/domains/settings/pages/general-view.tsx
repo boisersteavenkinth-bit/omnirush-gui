@@ -25,6 +25,7 @@ import {
   omnirushAccountStatus,
 } from "../../../../app/lib/desktop";
 import type { OmniRushRuntimeApprovals } from "../../../../app/lib/omnirush-server";
+import { omnirushUsageSummary } from "../../../../app/lib/omnirush-usage";
 import { isElectronRuntime } from "../../../../app/utils";
 import {
   FULL_PERMISSIONS_HELP,
@@ -96,13 +97,6 @@ function SettingsCard(props: {
       <ArrowRight size={14} className="shrink-0 text-dls-secondary" />
     </button>
   );
-}
-
-function compactTokenCount(value: number): string {
-  return new Intl.NumberFormat(undefined, {
-    notation: "compact",
-    maximumFractionDigits: 1,
-  }).format(Math.max(0, value));
 }
 
 export type AccountSignOutOutcome = {
@@ -226,6 +220,7 @@ export function GeneralSettingsView(props: GeneralSettingsViewProps) {
   }
 
   const serverLine = account ? accountServerLine(account) : null;
+  const usage = account?.connected && account.usage ? omnirushUsageSummary(account.usage) : null;
 
   return (
     <div className="w-full max-w-3xl space-y-8">
@@ -252,8 +247,8 @@ export function GeneralSettingsView(props: GeneralSettingsViewProps) {
               ) : null}
               <div className="mt-0.5 text-[11px] text-dls-secondary">
                 {accountMessage || (account.connected
-                  ? account.usage
-                    ? `${compactTokenCount(account.usage.remainingTokens)} of ${compactTokenCount(account.usage.tokenLimit)} tokens left today`
+                  ? usage
+                    ? usage.line
                     : "omnirush.ai models are ready on this Mac."
                   : account.gatewayConfigured
                     ? account.reauthorizationRequired
@@ -268,11 +263,11 @@ export function GeneralSettingsView(props: GeneralSettingsViewProps) {
                   Signed in. Your system has no keyring, so the sign-in is kept in a private file on this computer.
                 </div>
               ) : null}
-              {account.connected && account.usage?.tokenLimit ? (
-                <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-dls-hover" aria-label={`${account.usage.usedTokens} tokens used today`}>
+              {usage ? (
+                <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-dls-hover" aria-label={`${Math.round(usage.percent)}% used`}>
                   <div
                     className="h-full rounded-full bg-[#b9f45a]"
-                    style={{ width: `${Math.min(100, Math.max(0, (account.usage.usedTokens / account.usage.tokenLimit) * 100))}%` }}
+                    style={{ width: `${usage.percent}%` }}
                   />
                 </div>
               ) : null}
