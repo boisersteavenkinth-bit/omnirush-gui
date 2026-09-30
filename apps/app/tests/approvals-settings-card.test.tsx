@@ -7,7 +7,8 @@ import {
   applyFullPermissions,
   type ApprovalsClient,
 } from "../src/react-app/domains/settings/approval-mode";
-import { ApprovalsCard } from "../src/react-app/domains/settings/pages/general-view";
+import { ApprovalsCard, BestPracticesCard, GeneralSettingsView } from "../src/react-app/domains/settings/pages/general-view";
+import { BEST_PRACTICES_HELP, bestPracticesChangeMessage, type BestPracticesClient } from "../src/react-app/domains/settings/best-practices";
 
 function fakeClient(options: { reloadError?: Error } = {}) {
   const calls: string[] = [];
@@ -94,5 +95,48 @@ describe("approvals settings card", () => {
     expect(idle.calls).toEqual(["set:full"]);
     expect(saved.status).toBe("Full permissions on. Reload the engine to apply it.");
     expect(saved.tone).toBe("warning");
+  });
+});
+
+describe("best practices settings card", () => {
+  test("shows the global guide switch while the workspace client is still loading", () => {
+    const bestPracticesClient: BestPracticesClient = {
+      getBestPractices: async () => ({ enabled: true }),
+      setBestPractices: async (enabled) => ({ ok: true, changed: true, enabled, engine: { status: "applied" } }),
+    };
+    const markup = renderToStaticMarkup(
+      <GeneralSettingsView
+        developerMode={false}
+        onNavigateTab={() => {}}
+        omnirushClient={null}
+        bestPracticesClient={bestPracticesClient}
+      />,
+    );
+    expect(switchMarkup(markup)).toContain('aria-label="Best practices"');
+    expect(switchMarkup(markup)).toContain('aria-disabled="true"');
+    expect(markup).not.toContain('aria-label="Full permissions"');
+  });
+
+  test("labels the switch, describes only guides, and waits for the server choice", () => {
+    const on = renderToStaticMarkup(<BestPracticesCard enabled={true} busy={false} status="" onToggle={() => {}} />);
+    expect(on).toContain(BEST_PRACTICES_HELP);
+    expect(switchMarkup(on)).toContain('aria-label="Best practices"');
+    expect(switchMarkup(on)).toContain('aria-describedby="best-practices-help"');
+    expect(switchMarkup(on)).toContain('aria-checked="true"');
+    expect(on.toLowerCase()).not.toContain("upload");
+    const loading = renderToStaticMarkup(<BestPracticesCard enabled={null} busy={false} status="" onToggle={() => {}} />);
+    expect(switchMarkup(loading)).toContain('aria-disabled="true"');
+    const off = renderToStaticMarkup(<BestPracticesCard enabled={false} busy={true} status="Saving best practices…" onToggle={() => {}} />);
+    expect(switchMarkup(off)).toContain('aria-checked="false"');
+    expect(switchMarkup(off)).toContain('aria-disabled="true"');
+    expect(off).toContain('role="status"');
+  });
+
+  test("distinguishes applied, deferred, failed, and not started choices", () => {
+    const result = { ok: true, changed: true, enabled: false };
+    expect(bestPracticesChangeMessage({ ...result, engine: { status: "applied" } })).toBe("Best practices off. Ready for your next request.");
+    expect(bestPracticesChangeMessage({ ...result, engine: { status: "deferred" } })).toBe("Best practices off saved. This change waits until the engine is idle.");
+    expect(bestPracticesChangeMessage({ ...result, engine: { status: "failed" } })).toBe("Best practices off saved. The engine change could not be confirmed. Use Reload in Settings to apply it.");
+    expect(bestPracticesChangeMessage({ ...result, engine: { status: "unconfigured" } })).toBe("Best practices off saved. The choice will apply when the engine starts.");
   });
 });

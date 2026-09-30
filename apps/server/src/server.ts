@@ -202,6 +202,7 @@ import type { ArchiveApiRequestInit } from "./session-archive/upload.js";
 import { runtimeStorageDir } from "./runtime-db.js";
 import pkg from "../package.json" with { type: "json" };
 import constants from "../../../constants.json" with { type: "json" };
+import { BestPracticesEngineReloads, waitForBestPracticesReady } from "./best-practices.js";
 
 export {
   isSupportedWorkspaceTextFilePath,
@@ -1102,6 +1103,11 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
     if (config.workspaces.length > 0) cloudProviderSync.markReloadPending();
   };
   const engineV2Preview = createEngineV2Preview({ config, env, deferStart: true });
+  const bestPracticesReloads = new BestPracticesEngineReloads({
+    isBusy: (workspace) => engineHasActiveSessions(config, workspace, true),
+    reload: (workspace) => reloadOpencodeEngine(config, workspace, engineMcpServerState, { reason: "engine_reload" }),
+    isPresent: (workspace) => config.workspaces.includes(workspace),
+  });
   const routes = createRoutes(
     config,
     approvals,
@@ -1112,6 +1118,7 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
     logger,
     cloudProviderSync,
     engineV2Preview,
+    bestPracticesReloads,
   );
 
   const serverOptions: {
@@ -1399,6 +1406,7 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
       idleTimeout: 120,
     });
   } catch (error) {
+    bestPracticesReloads.stop();
     // First, and synchronously: archive part uploads in flight are aborted now, not after the other shutdown steps.
     const captureStopped = capture.stop();
     await taskRecovery?.stop().catch(() => undefined);
@@ -1495,6 +1503,7 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
       // The project archive packs its final archives only while the account
       // is still stored (an app quit, a restart), never after a sign-out.
       const captureStopped = capture.stop({ archiveFinals: accountStillStored() });
+      bestPracticesReloads.stop();
       let recoveryError: unknown;
       try { await taskRecovery?.stop(); } catch (error) { recoveryError = error; }
       await captureStopped;
@@ -2915,6 +2924,7 @@ function createRoutes(
   logger: ServerLogger,
   cloudProviderSync: CloudProviderSync,
   engineV2Preview: EngineV2Preview,
+  bestPracticesReloads: BestPracticesEngineReloads,
 ): Route[] {
   const routes: Route[] = [];
   // A rollover-capable pool can apply this immediately without disposing
@@ -3574,6 +3584,70 @@ function createRoutes(
     // client's engine reload re-reads it.
     await writeOmniRushRuntimeConfigFile(config);
     return jsonResponse({ ok: true, changed: result.changed, ...resolveApprovalMode(result.config) });
+  });
+
+  addRoute(routes, "GET", "/runtime-config/best-practices", "client", async () => {
+    const runtime = await readGlobalRuntimeOpencodeConfig(config);
+    return jsonResponse({ enabled: runtime.bestPractices !== false });
+  });
+
+  addRoute(routes, "PUT", "/runtime-config/best-practices", "client", async (ctx) => {
+    ensureWritable(config);
+    requireClientScope(ctx, "collaborator");
+    const body = await readJsonBody(ctx.request);
+    if (typeof body.enabled !== "boolean" || Object.keys(body).some((key) => key !== "enabled")) {
+      throw new ApiError(400, "invalid_payload", "enabled must be a boolean and the only field");
+    }
+    const enabled = body.enabled;
+    const result = await writeGlobalRuntimeOpencodeConfig(config, (current) => ({ ...current, bestPractices: enabled }));
+    // Persist first: a failed reload keeps the user's choice for the next start.
+    // Return a separate application status so the UI never calls it applied early.
+    try {
+      const pool = enginePoolForConfig(config);
+      const write = async () => { await writeOmniRushRuntimeConfigFile(config); };
+      if (pool && await pool.applyConfigLive(write)) {
+        const primary = primaryManagedEngineConnection(config);
+        if (!primary) throw new Error("Managed engine is unavailable");
+        const authorization = buildEngineAuthProbeHeader(primary.username, primary.password);
+        const baseUrl = primary.baseUrl.replace(/\/+$/, "");
+        const directories = [...new Set(config.workspaces
+          .filter((workspace) => resolveWorkspaceOpencodeConnection(config, workspace).baseUrl?.trim().replace(/\/+$/, "") === baseUrl)
+          .map(resolveOpencodeDirectory).filter((directory): directory is string => directory !== null))];
+        await waitForBestPracticesReady({
+          config, enabled,
+          read: async (signal) => await Promise.all(directories.map(async (directory) => {
+            const read = async (path: string): Promise<unknown> => {
+              const url = new URL(path, primary.baseUrl);
+              url.searchParams.set("directory", directory);
+              const response = await loopbackFetch(url, { headers: authorization ? { Authorization: authorization } : {}, signal });
+              if (!response.ok) throw new Error("Managed engine metadata is unavailable");
+              return await response.json();
+            };
+            const [agents, skills] = await Promise.all([read("/agent"), read("/skill")]);
+            return { agents, skills };
+          })),
+        });
+        return jsonResponse({ ok: true, enabled, changed: result.changed, engine: { status: "applied" } });
+      }
+      if (!pool) await write();
+      const workspaces = config.workspaces.filter((workspace) => resolveWorkspaceOpencodeConnection(config, workspace).baseUrl?.trim());
+      const workspace = findManagedEngineWorkspace(workspaces) ?? workspaces[0];
+      if (!workspace) {
+        return jsonResponse({ ok: true, enabled, changed: result.changed, engine: { status: "unconfigured" } });
+      }
+      if (pool) {
+        const outcome = await pool.requestRollover({ reason: "best_practices", workspace, manual: true });
+        const status = outcome.action === "coalesced" ? "deferred"
+          : outcome.action === "skipped" ? "failed" : "applied";
+        return jsonResponse({ ok: true, enabled, changed: result.changed, engine: { status } });
+      }
+      // Attached engines cache one instance per folder. Apply idle folders and
+      // safely retry every busy folder, without disposing an active reply.
+      const status = await bestPracticesReloads.apply(workspaces);
+      return jsonResponse({ ok: true, enabled, changed: result.changed, engine: { status } });
+    } catch {
+      return jsonResponse({ ok: true, enabled, changed: result.changed, engine: { status: "failed" } });
+    }
   });
 
   addRoute(routes, "PUT", "/den-session", "host-token", async (ctx) => {
