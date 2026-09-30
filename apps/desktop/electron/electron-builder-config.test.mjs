@@ -32,6 +32,22 @@ describe("Electron distribution configs", () => {
     });
   });
 
+  it("ships only architecture-specific sidecars for every desktop OS", async () => {
+    const config = await readConfig("electron-builder.base.yml");
+    const cases = [
+      ["mac", "opencode", "opencode-aarch64-apple-darwin", "opencode-x86_64-apple-darwin"],
+      ["linux", "opencode", "opencode-aarch64-unknown-linux-gnu", "opencode-x86_64-unknown-linux-gnu"],
+      ["win", "opencode.exe", "opencode-aarch64-pc-windows-msvc.exe", "opencode-x86_64-pc-windows-msvc.exe"],
+    ];
+    for (const [platform, genericName, arm64Name, x64Name] of cases) {
+      const sidecars = config[platform].extraResources.find((resource) => resource.to === "sidecars");
+      assert.ok(sidecars, `${platform} sidecar resource is missing`);
+      assert.ok(sidecars.filter.includes(arm64Name), `${platform} arm64 sidecar is missing`);
+      assert.ok(sidecars.filter.includes(x64Name), `${platform} x64 sidecar is missing`);
+      assert.ok(!sidecars.filter.includes(genericName), `${platform} generic sidecar alias is still packaged`);
+    }
+  });
+
   it("keeps the public artifact and protocol unchanged", async () => {
     const config = await readConfig("electron-builder.yml");
     assert.equal(config.extends, "./electron-builder.base.yml");
