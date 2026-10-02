@@ -2327,6 +2327,24 @@ async function gitPriorityPaths(root: string): Promise<Set<string>> {
 }
 
 /**
+ * Folders whose content is reinstalled or rebuilt from the lockfiles (the
+ * reproducible-task rule's "not needed"): a touched or locked path in one is
+ * never archived for being ignored, and an ignored output in one is never an
+ * artifact.
+ */
+export const REGENERABLE_DIR_NAMES = new Set([
+  "node_modules", ".venv", "venv", "__pycache__", ".tox", ".nox", ".mypy_cache", ".pytest_cache", ".ruff_cache",
+  "dist", "build", "target", "out", ".next", ".nuxt", ".svelte-kit", ".turbo", ".parcel-cache", ".cache",
+  ".gradle", ".dart_tool", "Pods", "DerivedData", "vendor", "bower_components", "site-packages",
+]);
+
+/** Whether a workspace-relative portable path lies in a regenerable folder (or is `.git/` content). */
+export function inRegenerableDir(path: string): boolean {
+  const parts = path.split("/");
+  return parts.slice(0, -1).some((part) => part === ".git" || REGENERABLE_DIR_NAMES.has(part));
+}
+
+/**
  * Files inside the workspace that git does not track but does not ignore
  * either: the outputs an agent leaves next to the source. A workspace without
  * git has no tracked tree, so every eligible file counts.
@@ -2344,9 +2362,48 @@ async function listUntrackedFiles(root: string): Promise<string[]> {
   }
 }
 
+const MAX_IGNORED_OUTPUT_FILES = 5_000;
+
+/**
+ * The gitignored untracked files outside the regenerable folders (a build's
+ * `outputs/plot.png`, a downloaded `data.pdf`): `git ls-files --ignored
+ * --directory` names a wholly ignored folder once, and only the folders that
+ * are not regenerable are listed further. Empty outside a git work tree
+ * (walkFallback already lists every file there) or when git fails.
+ */
+async function listIgnoredOutputFiles(root: string): Promise<string[]> {
+  const listed = async (args: string[]): Promise<string[]> => {
+    const { stdout } = await execFileAsync("git", ["-C", root, "ls-files", "--others", "--ignored", "--exclude-standard", "-z", ...args], {
+      encoding: "buffer",
+      maxBuffer: 16 * 1024 * 1024,
+      timeout: 15_000,
+    });
+    return Buffer.from(stdout).toString("utf8").split("\0").filter(Boolean);
+  };
+  try {
+    const paths: string[] = [];
+    for (const path of await listed(["--directory"])) {
+      if (paths.length >= MAX_IGNORED_OUTPUT_FILES) break;
+      if (!path.endsWith("/")) {
+        if (!inRegenerableDir(path)) paths.push(path);
+        continue;
+      }
+      const dir = path.slice(0, -1);
+      if (inRegenerableDir(`${dir}/x`)) continue;
+      for (const inner of await listed(["--", dir])) {
+        if (paths.length >= MAX_IGNORED_OUTPUT_FILES) break;
+        if (!inRegenerableDir(inner)) paths.push(inner);
+      }
+    }
+    return filterListing(paths).paths;
+  } catch {
+    return [];
+  }
+}
+
 async function artifactStats(root: string): Promise<Map<string, ArtifactStat>> {
   const stats = new Map<string, ArtifactStat>();
-  for (const path of await listUntrackedFiles(root)) {
+  for (const path of [...(await listUntrackedFiles(root)), ...(await listIgnoredOutputFiles(root))]) {
     try {
       if (workspaceRelativePath(root, path) === null) continue;
       const absolute = resolve(root, path);
@@ -4320,8 +4377,8 @@ export class SessionUploader {
   }
 
   /**
-   * Emits one "artifact" event per untracked-but-not-ignored file the turn
-   * created or modified. Tracked files are already covered by the change
+   * Emits one "artifact" event per untracked file (gitignored ones outside the
+   * regenerable folders too) the turn created or modified. Tracked files are already covered by the change
    * snapshot and touched_paths; this adds the outputs git would not list.
    */
   private async captureArtifacts(state: SessionState): Promise<void> {

@@ -1564,11 +1564,11 @@ describe("session uploader trace additions", () => {
     expect(photo?.data).toEqual({ name: "photo.png", mime: "image/png", bytes: 12, sha256: sha256("png"), text: null, text_truncated: false });
   });
 
-  test("emits artifact events for untracked outputs a turn creates or modifies", async () => {
+  test("emits artifact events for untracked outputs a turn creates or modifies, gitignored ones outside the regenerable folders too", async () => {
     const root = await mkdtemp(join(tmpdir(), "omnirush-upload-artifacts-"));
     roots.push(root);
     await git(root, "init", "-q");
-    await writeFile(join(root, ".gitignore"), "ignored/\n");
+    await writeFile(join(root, ".gitignore"), "ignored/\nnode_modules/\n");
     await writeFile(join(root, "tracked.txt"), "tracked\n");
     await writeFile(join(root, "stale.txt"), "already there\n");
     await git(root, "add", ".gitignore", "tracked.txt");
@@ -1587,13 +1587,16 @@ describe("session uploader trace additions", () => {
     await writeFile(join(root, "notes.md"), "generated notes\n");
     await mkdir(join(root, "ignored"));
     await writeFile(join(root, "ignored", "cache.txt"), "ignored output\n");
+    await mkdir(join(root, "node_modules", "dep"), { recursive: true });
+    await writeFile(join(root, "node_modules", "dep", "index.js"), "module.exports = 1;\n");
     sessionUploader.captureSnapshot(sessionId, "turn_completed");
     await sessionUploader.idle(sessionId);
     sessionUploader.flushTrace(sessionId);
     await sessionUploader.stop();
 
     const artifacts = traceEvents(uploads).filter((event) => event.type === "artifact").map((event) => event.data);
-    expect(artifacts.map((artifact) => artifact?.path).sort()).toEqual(["notes.md", "out/report.bin"]);
+    expect(artifacts.map((artifact) => artifact?.path).sort()).toEqual(["ignored/cache.txt", "notes.md", "out/report.bin"]);
+    expect(artifacts.find((artifact) => artifact?.path === "ignored/cache.txt")).toEqual({ path: "ignored/cache.txt", sha256: sha256("ignored output\n"), bytes: 15 });
     expect(artifacts.find((artifact) => artifact?.path === "out/report.bin")).toEqual({
       path: "out/report.bin",
       sha256: createHash("sha256").update(Buffer.from([0, 1, 2, 3, 255])).digest("hex"),

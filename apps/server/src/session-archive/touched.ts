@@ -7,12 +7,13 @@
  * disk, and scanTouchedFiles turns them into archive entries at capture
  * time: regular files inside the root only, never through a symlinked
  * folder, a touched folder never expanded, with the whole-folder scan's
- * exclusions, and never a file git ignores (`ignore.ts`). Nothing outside the root is ever opened or stat'ed: a path is
+ * exclusions, and never a file git ignores (`ignore.ts`) unless the caller
+ * keeps ignored files (includeIgnored: the archiver always does). Nothing outside the root is ever opened or stat'ed: a path is
  * checked lexically first, then walked from the root one lstat at a time.
  */
 import { createHash } from "node:crypto";
 import type { BigIntStats } from "node:fs";
-import { appendFile, lstat, open, readFile, readlink, realpath, rm, writeFile } from "node:fs/promises";
+import { appendFile, lstat, open, readdir, readFile, readlink, realpath, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import {
@@ -38,6 +39,7 @@ import {
 } from "./manifest.js";
 import { stateKey } from "./files.js";
 import { touchedIgnoredPaths } from "./ignore.js";
+import { REGENERABLE_DIR_NAMES } from "../session-uploader.js";
 import type { ArchiveLog } from "./upload.js";
 
 /** A session keeps at most this many touched paths; later ones are not archived (one log line). */
@@ -60,6 +62,8 @@ export type TouchedScanOptions = {
   hashCache?: ArchiveHashCache;
   /** Stops the scan between paths: it then rejects with the signal's reason. */
   signal?: AbortSignal;
+  /** Gitignored files are kept (the reproducible-task rule: touched files and lockfiles are archived even when ignored). */
+  includeIgnored?: boolean;
   /** Tests: every absolute path the scan lstats, reads a link of or opens, before it does. */
   onAccess?: (path: string) => void;
 };
@@ -109,6 +113,49 @@ function linkTargetInside(path: string, target: string, roots: readonly string[]
     if (rel && rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel)) return portable(rel);
   }
   return null;
+}
+
+/** Lockfiles and dependency pins, archived in full wherever they sit (outside the regenerable folders). */
+const LOCKFILE_NAMES = new Set([
+  "package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml", "bun.lock", "bun.lockb", "deno.lock",
+  "Cargo.lock", "poetry.lock", "Pipfile.lock", "uv.lock", "pdm.lock", "pixi.lock", "conda-lock.yml",
+  "Gemfile.lock", "composer.lock", "go.sum", "go.work.sum", "mix.lock", "pubspec.lock", "Package.resolved",
+  "packages.lock.json", "gradle.lockfile", "flake.lock", "Podfile.lock", "Cartfile.resolved",
+]);
+const LOCKFILE_MAX_DEPTH = 6;
+const LOCKFILE_MAX_DIRS = 5_000;
+const LOCKFILE_MAX_FOUND = 200;
+
+/**
+ * The lockfiles under `root`, workspace-relative and portable: a bounded walk
+ * (depth, folders visited, results) that never follows a symlink and skips
+ * `.git/` and the regenerable folders. scanTouchedFiles checks each one again
+ * before anything is archived. Never throws.
+ */
+export async function findLockfiles(root: string, signal?: AbortSignal): Promise<string[]> {
+  const found: string[] = [];
+  let visited = 0;
+  const walk = async (rel: string, depth: number): Promise<void> => {
+    if (depth > LOCKFILE_MAX_DEPTH || visited >= LOCKFILE_MAX_DIRS || found.length >= LOCKFILE_MAX_FOUND || signal?.aborted) return;
+    visited += 1;
+    let entries;
+    try {
+      entries = await readdir(rel ? join(root, ...rel.split("/")) : root, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    entries.sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0));
+    for (const entry of entries) {
+      const path = rel ? `${rel}/${entry.name}` : entry.name;
+      if (entry.isFile() && LOCKFILE_NAMES.has(entry.name)) {
+        if (found.length < LOCKFILE_MAX_FOUND) found.push(path);
+      } else if (entry.isDirectory() && entry.name !== ".git" && !REGENERABLE_DIR_NAMES.has(entry.name)) {
+        await walk(path, depth + 1);
+      }
+    }
+  };
+  await walk("", 0);
+  return found;
 }
 
 /**
@@ -235,8 +282,8 @@ export async function scanTouchedFiles(root: string, paths: Iterable<string>, op
 
   await forEachBounded([...paths], STAT_CONCURRENCY, (path) => visit(path, 0));
 
-  // Git's answer for just the files found, so the folder is never walked.
-  const ignoredPaths = await touchedIgnoredPaths(base, entries.map((entry) => entry.path), signal);
+  // Git's answer for just the files found, so the folder is never walked (none asked when ignored files are kept).
+  const ignoredPaths = options.includeIgnored === true ? new Set<string>() : await touchedIgnoredPaths(base, entries.map((entry) => entry.path), signal);
   signal?.throwIfAborted();
   if (ignoredPaths.size > 0) {
     let kept = 0;
@@ -534,7 +581,12 @@ export class TouchedPathStore {
       session.torn = loaded.torn;
     }
     const known = session.known;
-    if (session.pending.size === 0) return;
+    if (session.pending.size === 0) {
+      // Nothing to write to a file that has no header yet: it is loaded (and started) again by the next write,
+      // else that write would append to a file without its header, unreadable after a restart.
+      if (header) session.known = null;
+      return;
+    }
     const batch = [...session.pending];
     session.pending = new Set();
     session.writing = batch;
