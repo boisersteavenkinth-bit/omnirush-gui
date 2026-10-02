@@ -76,12 +76,8 @@ jobs:
             target: aarch64-apple-darwin
             builder_args: --mac --arm64
             update_manifest: latest-mac.yml
-          - name: Windows x64
-            runner: windows-2022
-            platform: windows
-            target: x86_64-pc-windows-msvc
-            builder_args: --win --x64
-            update_manifest: latest.yml
+          # No Windows build: Windows installs and updates are no longer
+          # offered, so no installer and no latest.yml feed are published.
           - name: Linux x64
             runner: ubuntu-22.04
             platform: linux
