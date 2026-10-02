@@ -16,6 +16,9 @@ permissions:
   contents: read
 jobs:
   native-window-journey:
+    # Off while Computer Use is paused (COMPUTER_USE_PAUSED): the journeys are
+    # skipped, and the eval runner fails a run in which every test skipped.
+    if: ${{ false }}
     strategy:
       fail-fast: false
       matrix:
