@@ -1446,7 +1446,7 @@ export const ReactSessionComposer = memo(function ReactSessionComposer(props: Co
             />
 
             {/* Respond to the pane width, including desktop split views. */}
-            <div data-composer-toolbar className="mt-2 grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-1.5 gap-y-2 @min-[560px]/composer:flex">
+            <div data-composer-toolbar className="mt-2 grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-1.5 gap-y-2 @min-[400px]/composer:flex">
               <div className="contents">
                 <div className="col-start-1 row-start-2 flex shrink-0 items-center gap-1.5">
                 <input
@@ -1722,13 +1722,15 @@ export const ReactSessionComposer = memo(function ReactSessionComposer(props: Co
                     title={props.compacting ? t("session.compact_context_running") : t("app.compact_command_desc")}
                   >
                     {props.compacting ? <LoaderCircle size={13} className="animate-spin" /> : <RefreshCw size={13} />}
-                    <span>{props.compacting ? t("session.compact_context_running") : t("session.compact_context")}</span>
+                    <span className="hidden @min-[900px]/composer:inline">{props.compacting ? t("session.compact_context_running") : t("session.compact_context")}</span>
                   </button>
                 ) : null}
 
                 </div>
 
-                <div data-composer-settings className="col-span-2 row-start-1 flex min-w-0 flex-wrap items-center gap-1 border-b border-dls-border pb-2 @min-[560px]/composer:flex-1 @min-[560px]/composer:border-0 @min-[560px]/composer:pb-0">
+                {/* One row: the settings never wrap; labels give way to icons (with
+                    tooltips) as the composer narrows, so the model selector keeps its room. */}
+                <div data-composer-settings className="col-span-2 row-start-1 flex min-w-0 flex-nowrap items-center gap-1 border-b border-dls-border pb-2 @min-[400px]/composer:flex-1 @min-[400px]/composer:border-0 @min-[400px]/composer:pb-0">
                 {/* Agent picker (#2101/#1971). Only shown once a non-default
                     agent is selected. Switching back to Default agent lives in
                     this menu and in the + tools menu. */}

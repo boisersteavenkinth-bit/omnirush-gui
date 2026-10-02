@@ -86,7 +86,8 @@ function FullPermissionsSwitch(props: { client: ApprovalsClient; workspaceId: st
         }
       >
         {busy ? <LoaderCircle className="size-4 animate-spin" /> : full ? <ShieldAlert className="size-4" /> : <ShieldCheck className="size-4" />}
-        <span className="whitespace-nowrap">Full permissions</span>
+        {/* An icon (its label in the tooltip and aria-label) until the composer is wide enough. */}
+        <span className="hidden whitespace-nowrap @min-[760px]/composer:inline">Full permissions</span>
       </TooltipTrigger>
       <TooltipContent>{hint}</TooltipContent>
     </Tooltip>
