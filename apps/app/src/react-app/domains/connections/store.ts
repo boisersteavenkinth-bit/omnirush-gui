@@ -8,6 +8,7 @@ import { t } from "../../../i18n";
 import {
   getMcpServerName,
   isBuiltInOmniRushExtension,
+  COMPUTER_USE_PAUSED,
   MCP_QUICK_CONNECT,
   type McpDirectoryInfo,
 } from "../../../app/constants";
@@ -220,7 +221,7 @@ export function createConnectionsStore(options: {
     entries: McpServerEntry[],
     observedStatuses: Record<string, unknown>,
   ) => {
-    if (!isDesktopRuntime() || options.workspaceType() !== "local" || !directory) return;
+    if (COMPUTER_USE_PAUSED || !isDesktopRuntime() || options.workspaceType() !== "local" || !directory) return;
     const entry = entries.find((candidate) => candidate.name === "computer-use" || candidate.id === "computer-use");
     if (!entry || entry.config.type !== "local" || entry.config.enabled === false) return;
     if (state.mcpConnectingName) return;

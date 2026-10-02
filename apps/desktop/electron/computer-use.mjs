@@ -12,8 +12,14 @@ import { createComputerUseHost } from "./computer-use-host.mjs";
 import { createPortableComputerUseHost } from "./computer-use-portable-host.mjs";
 import { captureComputerWindow, createComputerPreview } from "./computer-use-preview.mjs";
 
+// Computer Use is paused for now: no host starts, so an already configured
+// Computer Use connection fails to start instead of controlling the desktop.
+const COMPUTER_USE_PAUSED = true;
+const COMPUTER_USE_PAUSED_MESSAGE = "Computer Use is paused for now.";
+
 let hostPromise;
 async function computerUseHost() {
+  if (COMPUTER_USE_PAUSED) throw new Error(COMPUTER_USE_PAUSED_MESSAGE);
   if (!hostPromise) {
     if (process.platform === "win32" || process.platform === "linux") {
       hostPromise = createPortableComputerUseHost({ profile: app.getPath("userData"), capture: captureComputerWindow, preview: createComputerPreview() }).catch((error) => { hostPromise = null; throw error; });
@@ -47,6 +53,7 @@ function computerUseHelperAppPath() {
 }
 
 async function getComputerUseMcpCommand() {
+  if (COMPUTER_USE_PAUSED) throw new Error(COMPUTER_USE_PAUSED_MESSAGE);
   if (process.platform !== "darwin") {
     const host = await computerUseHost();
     if (!host.availability.supported) throw new Error(host.availability.error);
