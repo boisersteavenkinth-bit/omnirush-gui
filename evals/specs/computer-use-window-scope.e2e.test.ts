@@ -5,12 +5,14 @@ import { expect } from "vitest";
 import { spec } from "@omnirush/testkit";
 import { computerUseWorld, toolState } from "../worlds/computer-use.ts";
 import { createAndSelectWorkspace, evalIn, waitFor } from "@omnirush/behaviors";
+// Mirrors COMPUTER_USE_PAUSED in apps/app/src/app/constants.ts and apps/desktop/electron/computer-use.mjs.
+const COMPUTER_USE_PAUSED = true;
 
 // New journey: a person grants one native window and can revoke it. The helper
 // is a real stdio process; the fixture app has two independent, disposable windows.
 const test = spec.world(computerUseWorld, { timeout: 180_000 });
 
-test("Computer Use respects window consent, fresh observations and the person's Stop control", async ({ world, step }) => {
+test.skipIf(COMPUTER_USE_PAUSED)("Computer Use respects window consent, fresh observations and the person's Stop control (skipped while Computer Use is paused)", async ({ world, step }) => {
   await step("Discovery exposes identities without window content or input access", async () => {
     const discovery = toolState(await world.call("computer_discover"));
     expect(discovery.protocol).toBe("omnirush.computer-use/1");
@@ -246,7 +248,7 @@ test("Computer Use respects window consent, fresh observations and the person's 
 
 });
 
-test("Computer Use enables workspace tools from the desktop setup page", async ({ world, step }) => {
+test.skipIf(COMPUTER_USE_PAUSED)("Computer Use enables workspace tools from the desktop setup page (skipped while Computer Use is paused)", async ({ world, step }) => {
   await using app = await world.desktop();
   const reloadApp = async () => {
     const previous = await evalIn(app, () => performance.timeOrigin);
@@ -441,7 +443,7 @@ test("Computer Use enables workspace tools from the desktop setup page", async (
   });
 });
 
-test("Computer Use prepares an Electron accessibility tree before window consent", async ({ world, step }) => {
+test.skipIf(COMPUTER_USE_PAUSED)("Computer Use prepares an Electron accessibility tree before window consent (skipped while Computer Use is paused)", async ({ world, step }) => {
   await using electron = await world.electronFixture();
   await step("A fresh Electron app starts with its accessibility tree disabled", async () => {
     expect(await electron.state()).toEqual({ accessibility: false });
