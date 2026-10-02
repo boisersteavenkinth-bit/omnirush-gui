@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { MCP_QUICK_CONNECT, type McpDirectoryInfo } from "../src/app/constants";
+import { COMPUTER_USE_PAUSED, MCP_QUICK_CONNECT, type McpDirectoryInfo } from "../src/app/constants";
 import {
   matchesExtensionFilter,
   taxonomyForDirectoryEntry,
@@ -14,9 +14,13 @@ function builtInEntry(id: string): McpDirectoryInfo {
 
 describe("extension taxonomy", () => {
   test("built-ins are apps because they run on this device", () => {
-    for (const id of ["omnirush-browser", "computer-use", "ollama"]) {
+    for (const id of ["omnirush-browser", ...(COMPUTER_USE_PAUSED ? [] : ["computer-use"]), "ollama"]) {
       expect(taxonomyForDirectoryEntry(builtInEntry(id))).toBe("app");
     }
+  });
+
+  test("Computer Use is not offered while it is paused", () => {
+    expect(MCP_QUICK_CONNECT.some((entry) => entry.id === "computer-use")).toBe(!COMPUTER_USE_PAUSED);
   });
 
   test("Google Workspace is not a built-in app; it arrives as an org connection", () => {

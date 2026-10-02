@@ -3,10 +3,12 @@ import { createAndSelectWorkspace, evalIn, waitFor } from "@omnirush/behaviors";
 import { browserScript } from "@omnirush/testkit";
 import { spec } from "@omnirush/testkit";
 import { portableComputerUseWorld, toolState } from "../worlds/computer-use.ts";
+// Mirrors COMPUTER_USE_PAUSED in apps/app/src/app/constants.ts and apps/desktop/electron/computer-use.mjs.
+const COMPUTER_USE_PAUSED = true;
 
 const test = spec.world(portableComputerUseWorld, { timeout: 180_000 });
 
-test("Windows and Linux X11 Computer Use keeps native input within the approved window", async ({ world, step }) => {
+test.skipIf(COMPUTER_USE_PAUSED)("Windows and Linux X11 Computer Use keeps native input within the approved window (skipped while Computer Use is paused)", async ({ world, step }) => {
   await step("Desktop readiness exposes supported modes and discovery reveals no window contents", async () => {
     expect(world.permissions).toMatchObject({ ok: true, supported: true, modes: ["observe", "control"], backgroundControl: false });
     const discovered = toolState(await world.call("computer_discover"));
@@ -156,7 +158,7 @@ test("Windows and Linux X11 Computer Use keeps native input within the approved 
 });
 
 
-test("Computer Use setup and approval work from the main app on Windows and Linux X11", async ({ world, step }) => {
+test.skipIf(COMPUTER_USE_PAUSED)("Computer Use setup and approval work from the main app on Windows and Linux X11 (skipped while Computer Use is paused)", async ({ world, step }) => {
   await using app = await world.desktop();
   const { workspaceId } = await createAndSelectWorkspace(app, { path: world.workspacePath });
   await step("Setup explains foreground control and offers the supported modes", async () => {
