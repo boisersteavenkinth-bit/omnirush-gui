@@ -93,6 +93,8 @@ linux:
     - deb
     - tar.gz
     - pacman
+    # Fedora / RHEL (`sudo dnf install ./omnirush-linux-<arch>-<version>.rpm`).
+    - rpm
 # Arch Linux package (`sudo pacman -U omnirush-linux-<arch>-<version>.pacman`).
 # electron-builder's default pacman dependencies name packages Arch no longer
 # ships (http-parser) or moved to the AUR (libappindicator-gtk3), which makes
