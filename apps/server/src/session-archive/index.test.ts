@@ -1026,10 +1026,10 @@ describe("SessionArchiver touched files", () => {
     // The agent reads the PDF, writes a binary, and names a credential file and a link out of the folder.
     subject.recordTouched(id, "brief.pdf");
     const render = randomBytes(300 * 1024);
-    await mkdir(join(root, "out"));
-    await writeFile(join(root, "out/render.png"), render);
-    subject.recordTouched(id, "out/render.png");
-    subject.recordTouched(id, "out");
+    await mkdir(join(root, "renders"));
+    await writeFile(join(root, "renders/render.png"), render);
+    subject.recordTouched(id, "renders/render.png");
+    subject.recordTouched(id, "renders");
     subject.recordTouched(id, ".env");
     subject.recordTouched(id, "link-out");
 
@@ -1038,20 +1038,20 @@ describe("SessionArchiver touched files", () => {
     const [base] = server.objects();
     expect(base!.request).toMatchObject({ session_id: id, kind: "base", sequence: 0, turn: 1, parent_archive_id: null, marker: "touched" });
     const members = await openArchive(base!.object!);
-    expect(members.map((member) => member.name)).toEqual(["__omnirush__/manifest.json", "brief.pdf", "out/render.png"]);
+    expect(members.map((member) => member.name)).toEqual(["__omnirush__/manifest.json", "brief.pdf", "renders/render.png"]);
     expect(members[1]!.content.equals(brief)).toBe(true);
     expect(members[2]!.content.equals(render)).toBe(true);
     const manifest = manifestOf(members);
     expect(manifest).toMatchObject({ kind: "base", turn: 1, scope: "touched", workspace: { label: "report", marker: "touched", git: null }, excluded: { credential: 1, special: 1 } });
     expect(manifest.files).toEqual([
       { path: "brief.pdf", type: "file", mode: expect.any(Number), size: brief.length, sha256: sha256(brief) },
-      { path: "out/render.png", type: "file", mode: expect.any(Number), size: render.length, sha256: sha256(render) },
+      { path: "renders/render.png", type: "file", mode: expect.any(Number), size: render.length, sha256: sha256(render) },
     ]);
     expect("deleted" in manifest).toBe(false);
 
     // The next turn: the binary is rewritten, the PDF deleted, a new file created; notes.txt is still untouched.
     const rerender = randomBytes(1024);
-    await writeFile(join(root, "out/render.png"), rerender);
+    await writeFile(join(root, "renders/render.png"), rerender);
     await rm(join(root, "brief.pdf"));
     await writeFile(join(root, "summary.md"), "# summary\n");
     subject.recordTouched(id, "summary.md");
@@ -1061,7 +1061,7 @@ describe("SessionArchiver touched files", () => {
     const delta = server.objects()[1]!;
     expect(delta.request).toMatchObject({ kind: "delta", sequence: 1, turn: 2, marker: "touched", parent_archive_id: base!.request.archive_id });
     const deltaMembers = await openArchive(delta.object!);
-    expect(deltaMembers.slice(1).map((member) => member.name)).toEqual(["out/render.png", "summary.md"]);
+    expect(deltaMembers.slice(1).map((member) => member.name)).toEqual(["renders/render.png", "summary.md"]);
     expect(deltaMembers[1]!.content.equals(rerender)).toBe(true);
     expect(manifestOf(deltaMembers)).toMatchObject({ kind: "delta", trigger: "turn", scope: "touched", deleted: ["brief.pdf"] });
 
@@ -1074,7 +1074,7 @@ describe("SessionArchiver touched files", () => {
     }
   });
 
-  test("a git folder is archived as today with touched_files on, and keeps no touched paths", async () => {
+  test("a git folder is archived as today with touched_files on, and keeps its touched paths (reproducible tasks)", async () => {
     const { server, state, make } = await touchedSetup();
     const { root } = await project();
     const subject = make();
@@ -1085,7 +1085,7 @@ describe("SessionArchiver touched files", () => {
     expect(await names(server.objects()[0]!)).toEqual(expect.arrayContaining([".git/HEAD", "assets/scene.blend", "src/app.ts"]));
     expect(manifestOf(await openArchive(server.objects()[0]!.object!))).not.toHaveProperty("scope");
     await subject.stop();
-    expect(await readdir(join(state, ARCHIVE_STATE_DIRECTORY, "touched"))).toEqual([]);
+    expect(await readdir(join(state, ARCHIVE_STATE_DIRECTORY, "touched"))).toHaveLength(1);
   });
 
   test("all_folders wins over touched_files: the whole folder", async () => {

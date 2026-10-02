@@ -121,6 +121,18 @@ describe("scanTouchedFiles and gitignored files", () => {
     expect(change.files.map((entry) => entry.path)).toEqual([".gitignore"]);
     expect(change.next.map((entry) => entry.path)).toEqual([".gitignore", "app/main.py", "clone/src.c"]);
   });
+
+  test("includeIgnored keeps the touched files git ignores (the reproducible-task rule), byte for byte", async () => {
+    const root = await tempDir("touched-include-ignored");
+    await writeFile(join(root, ".gitignore"), "outputs/\nCargo.lock\n");
+    await mkdir(join(root, "outputs"));
+    await writeFile(join(root, "outputs/plot.png"), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 255]));
+    await writeFile(join(root, "Cargo.lock"), "# lock\n");
+    const scan = await scanTouchedFiles(root, ["outputs/plot.png", "Cargo.lock"], { includeIgnored: true });
+    expect(scan.entries.map((entry) => entry.path)).toEqual(["Cargo.lock", "outputs/plot.png"]);
+    expect(scan.ignored).toBe(0);
+    expect(scan.gone.size).toBe(0);
+  });
 });
 
 describe("touchedChange", () => {
@@ -181,6 +193,19 @@ describe("TouchedPathStore", () => {
     second.note("ses_touched_01", "later.txt");
     await second.flush();
     expect(await readdir(dir)).toEqual([]);
+  });
+
+  test("a snapshot taken before any path is written leaves the file readable: the header comes with the first path", async () => {
+    const dir = await tempDir("touched-header");
+    const { store: first } = store(dir, "tracked");
+    expect([...(await first.snapshot("ses_touched_03"))]).toEqual([]);
+    expect(await readdir(dir)).toEqual([]);
+    first.note("ses_touched_03", "outputs/plot.png");
+    await first.flush();
+    const [file] = await readdir(dir);
+    expect((await readFile(join(dir, file!), "utf8")).split("\n")).toEqual(['{"v":1,"session_id":"ses_touched_03"}', '"outputs/plot.png"', ""]);
+    const { store: second } = store(dir, "tracked");
+    expect([...(await second.snapshot("ses_touched_03"))]).toEqual(["outputs/plot.png"]);
   });
 
   test("a session the record says is something else keeps nothing; clear() drops what is in memory", async () => {

@@ -33,6 +33,7 @@ import {
   ArchiveHashCache,
   archiveLabel,
   baselineChunks,
+  compareArchivePaths,
   computeArchiveDelta,
   isArchiveDeltaEmpty,
   manifestSource,
@@ -50,7 +51,8 @@ import {
 import { writeSealedArchive } from "./pack.js";
 import { POLICY_OFF, type ArchivePolicy } from "./policy.js";
 import { SEAL_CONTENT } from "./seal.js";
-import { scanTouchedFiles, touchedChange, TouchedPathStore } from "./touched.js";
+import { findLockfiles, scanTouchedFiles, touchedChange, TouchedPathStore } from "./touched.js";
+import { inRegenerableDir } from "../session-uploader.js";
 import {
   ARCHIVE_MARKER_NOT_ALLOWED,
   ArchiveUploader,
@@ -379,7 +381,9 @@ export class SessionArchiver {
       modeOf: async (sessionId) => {
         const state = await this.loadSession(sessionId);
         if (!state) return "unknown";
-        return state.marker === TOUCHED_MARKER && !state.stopped && !state.ended ? "tracked" : "ignored";
+        // Every archived chain keeps its touched paths, a whole-folder one for
+        // the ignored files the agent touched (archived with the lockfiles).
+        return !state.stopped && !state.ended ? "tracked" : "ignored";
       },
       log: this.log,
       ...(options.touchedFlushMs !== undefined ? { flushMs: options.touchedFlushMs } : {}),
@@ -730,9 +734,11 @@ export class SessionArchiver {
     const probe: { fetched: KeyResult | null } = { fetched: null };
     const gate = await isArchivableProject(root, [...this.detectors, this.folderDetector(generation, probe)], { appDirs: this.appDirs });
     const touched = gate.marker === TOUCHED_MARKER;
-    // Whatever else the gate said, the session keeps no touched paths.
-    if (!touched) await this.touched.forget(sessionId);
-    if (!gate.archivable || !gate.marker) return { status: "skipped", reason: "not_archivable" };
+    // A session that is not archived keeps no touched paths; any other keeps them.
+    if (!gate.archivable || !gate.marker) {
+      await this.touched.forget(sessionId);
+      return { status: "skipped", reason: "not_archivable" };
+    }
     // The key and the consent check (7.2): a probe made for this base already holds them; else the full fetch.
     const fetched = probe.fetched ?? await this.uploader.fetchKey();
     if (!probe.fetched) this.rememberPolicy(fetched, generation, false);
@@ -742,7 +748,7 @@ export class SessionArchiver {
     }
     // The policy was turned off since the answer this folder was let in on.
     if (fetched.status === "ok" && !markerAllowed(gate.marker, fetched.policy)) {
-      if (touched) await this.touched.forget(sessionId);
+      await this.touched.forget(sessionId);
       return { status: "skipped", reason: "not_archivable" };
     }
     const state: SessionState = {
@@ -759,7 +765,7 @@ export class SessionArchiver {
       ...(touched ? { turn_seen: turn } : {}),
       last_activity_at: this.now().toISOString(),
     };
-    if (touched) this.touched.track(sessionId);
+    this.touched.track(sessionId);
     if (fetched.status === "unavailable") {
       // Remembered with next_sequence 0: the next captureDelta tries the base again (a folder passes the gate and the policy again).
       if (generation === this.generation) await this.saveSession(state);
@@ -954,10 +960,12 @@ export class SessionArchiver {
         await this.markStopped(sessionId, "baseline_missing");
         return { status: "skipped", reason: "stopped" };
       }
-      // Every path the session touched, and every file the chain holds (to see it go).
-      const paths = await this.touched.snapshot(sessionId);
+      // Every path the session touched and every lockfile, outside the
+      // regenerable folders, and every file the chain holds (to see it go).
+      // Gitignored files the agent touched are archived too.
+      const paths = new Set([...(await this.touched.snapshot(sessionId)), ...(await findLockfiles(state.root, signal))].filter((path) => !inRegenerableDir(path)));
       for (const entry of baseline) paths.add(entry.path);
-      const scan = await scanTouchedFiles(state.root, paths, { excludedDirs: this.appDirs, includeCredentialFiles: this.includeCredentials, hashCache: cache, ...(signal ? { signal } : {}) });
+      const scan = await scanTouchedFiles(state.root, paths, { excludedDirs: this.appDirs, includeCredentialFiles: this.includeCredentials, includeIgnored: true, hashCache: cache, ...(signal ? { signal } : {}) });
       const change = touchedChange(baseline, scan);
       if (change.files.length === 0 && change.deleted.length === 0) {
         if (cache.changed) await this.saveHashCache(rootKey, cache);
@@ -975,6 +983,15 @@ export class SessionArchiver {
       const withGit = state.marker !== FOLDER_MARKER;
       const gitReading = kind === "base" && withGit ? readArchiveGit(state.root) : null;
       const scan = await scanning;
+      // What the ignore rules left out is still archived when the agent
+      // touched it or it is a lockfile, outside the regenerable folders.
+      const held = new Set(scan.entries.map((entry) => entry.path));
+      const keepers = [...(await this.touched.snapshot(sessionId)), ...(await findLockfiles(state.root, signal))]
+        .filter((path) => !held.has(path) && !inRegenerableDir(path));
+      if (keepers.length > 0) {
+        const kept = await scanTouchedFiles(state.root, keepers, { excludedDirs: this.appDirs, includeCredentialFiles: this.includeCredentials, includeIgnored: true, hashCache: cache, ...(signal ? { signal } : {}) });
+        if (kept.entries.length > 0) scan.entries = [...scan.entries, ...kept.entries].sort((left, right) => compareArchivePaths(left.path, right.path));
+      }
       files = scan.entries;
       excluded = scan.excluded;
       ignored = scan.ignored;
@@ -1605,10 +1622,10 @@ export class SessionArchiver {
     for (const name of await readdir(this.dirs.hashCache)) {
       if (name.endsWith(".tmp")) await rm(join(this.dirs.hashCache, name), { force: true });
     }
-    // Touched paths only of touched-files sessions still archiving.
+    // Touched paths only of sessions still archiving (every archived chain keeps them).
     for (const name of await readdir(this.dirs.touched)) {
       const session = name.endsWith(".jsonl") ? sessions.get(name.slice(0, -".jsonl".length)) : undefined;
-      if (!session || session.marker !== TOUCHED_MARKER || session.stopped || session.ended) await rm(join(this.dirs.touched, name), { force: true });
+      if (!session || session.stopped || session.ended) await rm(join(this.dirs.touched, name), { force: true });
     }
   }
 }
