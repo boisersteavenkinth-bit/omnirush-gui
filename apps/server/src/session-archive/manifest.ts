@@ -18,6 +18,8 @@ import { ArchiveIgnore, gitCeilingDirectories, scopeIgnores, type IgnoreScope, t
 
 export const ARCHIVE_SCHEMA = "omnirush.archive.v1";
 export const RESERVED_ROOT_NAME = "__omnirush__";
+/** The archive folder of the files outside the workspace (outside.ts); a workspace entry of that name is reserved too. */
+export const OUTSIDE_ROOT_NAME = "__outside__";
 export const STAT_CONCURRENCY = 64;
 export const HASH_CONCURRENCY = 6;
 export const HASH_READ_BYTES = 128 * 1024;
@@ -559,7 +561,7 @@ export async function scanArchiveTree(root: string, options: ScanOptions = {}): 
       for (const bytes of raw) {
         const name = decodeName(bytes);
         if (name === null) excluded.non_utf8 += 1;
-        else if (!dir.rel && name === RESERVED_ROOT_NAME) excluded.reserved += 1;
+        else if (!dir.rel && (name === RESERVED_ROOT_NAME || name === OUTSIDE_ROOT_NAME)) excluded.reserved += 1;
         else {
           listed.push(name);
           if (name.toLowerCase() === ".git") hasGit = true;

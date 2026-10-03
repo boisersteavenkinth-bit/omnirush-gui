@@ -22,6 +22,7 @@ import {
 } from "./manifest.js";
 import { hintGarbageCollection } from "./files.js";
 import { SealStream, type SealOptions } from "./seal.js";
+import { isOutsideArchivePath, outsideFolderIsReal, outsideSourcePath } from "./outside.js";
 
 export const MANIFEST_MEMBER = "__omnirush__/manifest.json";
 export const UNSTABLE_MEMBER = "__omnirush__/unstable.json";
@@ -320,8 +321,11 @@ class TarWriter {
         continue;
       }
       const parts = entry.path.split("/");
-      const absolute = join(input.root, ...parts);
-      const parentsInRoot = await this.parentsInRoot(parts);
+      // A file outside the workspace (`__outside__/...`) is read from its own absolute path.
+      const outside = isOutsideArchivePath(entry.path);
+      const source = outside ? outsideSourcePath(entry.path) : null;
+      const absolute = source ?? join(input.root, ...parts);
+      const parentsInRoot = outside ? source !== null && entry.type === "file" && (await outsideFolderIsReal(source)) : await this.parentsInRoot(parts);
       if (entry.type === "symlink") {
         const target = entry.target ?? "";
         await this.put(tarMemberHeader({ name: entry.path, mode: entry.mode, size: 0, mtime: entry.mtime, typeflag: "2", linkname: target }));
