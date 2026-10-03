@@ -20,6 +20,8 @@ let upstream: ReturnType<typeof Bun.serve>;
 let facade: EngineFacade;
 let configDir = "";
 const written: unknown[] = [];
+/** Sessions the mock engine reports running (`/api/session/active`). */
+let activeSessions: Record<string, unknown> = {};
 
 const auth = { authorization: `Basic ${Buffer.from("user:secret").toString("base64")}`, "x-opencode-directory": encodeURIComponent(DIRECTORY) };
 const get = (path: string) => fetch(`${facade.url}${path}`, { headers: auth });
@@ -64,7 +66,7 @@ beforeAll(async () => {
         const end = start + limit;
         return json({ data: messages.slice(start, end), cursor: { next: end < messages.length ? btoa(JSON.stringify([order, end])) : null } });
       }
-      if (url.pathname === "/api/session/active") return json({ data: {} });
+      if (url.pathname === "/api/session/active") return json({ data: activeSessions });
       if (url.pathname === "/api/session" && request.method === "POST") return json({ data: { ...tree.session, id: "ses_new", title: undefined } });
       if (url.pathname === "/api/permission/request") {
         return json({ location: { directory: DIRECTORY }, data: [{ id: "per_1", sessionID: SESSION, action: "shell", resources: ["rm -rf build"], metadata: {} }] });
@@ -86,6 +88,7 @@ beforeAll(async () => {
     writeEngineConfig: async (config) => {
       written.push(config);
     },
+    reloadPollMs: 50,
   });
 });
 
@@ -311,5 +314,55 @@ describe("revert events", () => {
     const translator = make({});
     const out = await translator.translate({ type: "session.revert.committed", data: { sessionID: "ses_r", to: "msg_c" } });
     expect(out.map((item) => item.event.type)).toEqual(["message.removed", "session.updated"]);
+  });
+});
+
+describe("location reloads (/instance/dispose)", () => {
+  const reloads = () => recorded.filter((entry) => entry.method === "POST" && entry.path === "/api/location/reload").length;
+  const waitFor = async (check: () => boolean, ms = 3_000) => {
+    const deadline = Date.now() + ms;
+    while (!check() && Date.now() < deadline) await Bun.sleep(20);
+    return check();
+  };
+
+  test("an idle engine reloads at once", async () => {
+    activeSessions = {};
+    const before = reloads();
+    expect((await post("/instance/dispose", {})).status).toBe(200);
+    expect(reloads()).toBe(before + 1);
+  });
+
+  test("a reload asked while a session runs waits until no session runs", async () => {
+    // A 2.x location reload closes every location: the running step's tool
+    // calls (a subagent start among them) would be declined with
+    // "Interaction cancelled because the location shut down".
+    activeSessions = { [SESSION]: { type: "running" } };
+    const before = reloads();
+    const configsBefore = written.length;
+    expect((await post("/instance/dispose", {})).status).toBe(200);
+    expect(written.length).toBe(configsBefore + 1); // the config is re-rendered at once
+    expect((await post("/instance/dispose", {})).status).toBe(200);
+    await Bun.sleep(200);
+    expect(reloads()).toBe(before);
+    activeSessions = {};
+    expect(await waitFor(() => reloads() === before + 1)).toBe(true);
+    await Bun.sleep(200);
+    expect(reloads()).toBe(before + 1); // both requests are served by one reload
+  });
+
+  test("the next prompt runs a deferred reload first once the engine is idle", async () => {
+    activeSessions = { other: { type: "running" } };
+    const before = reloads();
+    expect((await post("/instance/dispose", {})).status).toBe(200);
+    activeSessions = {};
+    const sent = recorded.length;
+    expect((await post(`/session/${SESSION}/prompt_async`, { parts: [{ type: "text", text: "next" }] })).status).toBe(204);
+    const after = recorded.slice(sent).map((entry) => `${entry.method} ${entry.path}`);
+    const reloadAt = after.indexOf("POST /api/location/reload");
+    const promptAt = after.indexOf(`POST /api/session/${SESSION}/prompt`);
+    expect(reloadAt).toBeGreaterThanOrEqual(0);
+    expect(promptAt).toBeGreaterThan(reloadAt);
+    await Bun.sleep(200);
+    expect(reloads()).toBe(before + 1);
   });
 });

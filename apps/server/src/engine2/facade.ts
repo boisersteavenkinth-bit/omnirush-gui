@@ -64,6 +64,8 @@ export type EngineFacadeOptions = {
   fetch?: typeof globalThis.fetch;
   /** How long a prompt waits for the engine to serve its model (see ensureModelServed). */
   modelWaitMs?: number;
+  /** How often a location reload deferred behind a running session checks for an idle engine. */
+  reloadPollMs?: number;
 };
 
 export type EngineFacade = {
@@ -261,6 +263,72 @@ export async function startEngineFacade(options: EngineFacadeOptions): Promise<E
   const refreshConfig = async (): Promise<void> => {
     v1ConfigCache = await readV1Config();
     if (options.writeEngineConfig) await options.writeEngineConfig(buildEngine2Config({ v1: v1ConfigCache, apiKeys, plugins: options.plugins }));
+  };
+
+  // ---- location reloads ---------------------------------------------------
+  /*
+   * `/instance/dispose` is a 2.x `location/reload`, which closes every cached
+   * location, not just the requested one. A step running when its location
+   * closes keeps the old services, whose permission service now declines
+   * every request: each tool call of that step fails with "Interaction
+   * cancelled because the location shut down" (a subagent call fails before
+   * it creates its child session). So a reload asked while any session runs
+   * waits until no session runs: it is retried on a timer, and the next
+   * prompt runs it first when the engine is idle by then. The config itself
+   * is re-rendered at once; the engine applies config changes live.
+   */
+  const reloadPollMs = options.reloadPollMs ?? 500;
+  let reloadPending = false;
+  let reloadTimer: ReturnType<typeof setTimeout> | null = null;
+  let reloadChain: Promise<void> = Promise.resolve();
+  let facadeClosed = false;
+  /** Whether any session runs; an unreadable answer counts as running. */
+  const engineBusy = async (): Promise<boolean> => {
+    try {
+      const active = unwrap(await call("GET", "/api/session/active"));
+      return isRecord(active) && Object.keys(active).length > 0;
+    } catch {
+      return true;
+    }
+  };
+  /** Reloads now; reloads are serialized so a later request never joins one that read older config. */
+  const reloadLocations = (directory?: string): Promise<void> => {
+    reloadPending = false;
+    const run = reloadChain.then(() => call("POST", "/api/location/reload", { directory, body: {} }).then(() => undefined, () => undefined));
+    reloadChain = run;
+    return run;
+  };
+  const scheduleDeferredReload = () => {
+    if (reloadTimer || facadeClosed) return;
+    reloadTimer = setTimeout(() => {
+      reloadTimer = null;
+      void (async () => {
+        if (!reloadPending || facadeClosed) return;
+        if (await engineBusy()) {
+          scheduleDeferredReload();
+          return;
+        }
+        if (reloadPending) await reloadLocations();
+      })();
+    }, reloadPollMs);
+    reloadTimer.unref?.();
+  };
+  /** `/instance/dispose`: reloads now when no session runs, else once none does. */
+  const requestLocationReload = async (directory: string): Promise<"reloaded" | "deferred"> => {
+    if (await engineBusy()) {
+      if (!reloadPending) log("location reload deferred while a session runs", { directory });
+      reloadPending = true;
+      scheduleDeferredReload();
+      return "deferred";
+    }
+    await reloadLocations(directory);
+    return "reloaded";
+  };
+  /** Before a prompt: a deferred reload runs now if the engine went idle. */
+  const settleDeferredReload = async (): Promise<void> => {
+    if (!reloadPending) return;
+    if (await engineBusy()) return;
+    if (reloadPending) await reloadLocations();
   };
 
   // ---- sessions & messages -----------------------------------------------
@@ -491,6 +559,7 @@ export async function startEngineFacade(options: EngineFacadeOptions): Promise<E
 
   /** Applies a 1.x prompt's model, agent and system prompt to the session before it is sent. */
   const prepareSession = async (sessionID: string, body: JsonRecord, directory: string): Promise<void> => {
+    await settleDeferredReload();
     const current = selected.get(sessionID) ?? {};
     const model = modelRefFromBody(body);
     if (model) {
@@ -934,6 +1003,7 @@ export async function startEngineFacade(options: EngineFacadeOptions): Promise<E
         case "shell": {
           if (method !== "POST") break;
           const body = ((await readBody(req)) ?? {}) as JsonRecord;
+          await settleDeferredReload();
           await commitRevert(encoded);
           await call("POST", `/api/session/${encoded}/shell`, { body: { command: String(body.command ?? "") } });
           json(res, 200, { id: "", sessionID, role: "assistant" });
@@ -1318,7 +1388,7 @@ export async function startEngineFacade(options: EngineFacadeOptions): Promise<E
     }
     if (method === "POST" && (path === "/instance/dispose" || path === "/global/dispose")) {
       await refreshConfig();
-      await call("POST", "/api/location/reload", { directory: dir, body: {} }).catch(() => undefined);
+      await requestLocationReload(dir);
       json(res, 200, true);
       return;
     }
@@ -1370,6 +1440,9 @@ export async function startEngineFacade(options: EngineFacadeOptions): Promise<E
     url,
     refreshConfig,
     close: async () => {
+      facadeClosed = true;
+      if (reloadTimer) clearTimeout(reloadTimer);
+      reloadTimer = null;
       streamController.abort();
       // Event streams stay open until ended; end them so the server can close.
       for (const subscriber of subscribers) {
