@@ -8,7 +8,7 @@
  * named by plain data (EngineTarget) so the target can cross threads.
  */
 import { loopbackFetch } from "./server-fetch.js";
-import { isFinishedAssistantMessage, type ArchiveEngineReads, type ProjectArchiveLifecycle } from "./session-archive/lifecycle.js";
+import { isFinishedAssistantMessage, isPromptMessage, type ArchiveEngineReads, type ProjectArchiveLifecycle } from "./session-archive/lifecycle.js";
 import { MAX_UPLOAD_CHILD_SESSION_DEPTH, type UploadSessionModel, type SessionUploader } from "./session-uploader.js";
 
 /** The engine a captured request went to: base URL, request headers (the engine's auth), query and API generation. */
@@ -463,19 +463,69 @@ async function* engineMessages(fetchEngine: EngineFetch, path: string, paged: bo
   }
 }
 
+/** What of a user message's part turn counting reads: its type, and whether it is synthetic (never its text). */
+const OUTLINED_USER_PARTS = new Set(["text", "file", "agent", "subtask", "compaction"]);
+
 /**
  * What turn counting, the model and the checkpoint read of a message: its
- * info, less a user message's diff summary (whole-file patches), and its
- * finish parts. Other shapes (v2 context entries) are kept as they are.
+ * info, less a user message's diff summary (whole-file patches), its finish
+ * parts and, for a user message, the type of each content part and whether
+ * it is synthetic (a compaction's request or a synthetic notice is no
+ * prompt, see isPromptMessage). Other shapes (v2 context entries) are kept
+ * as they are.
  */
-function messageOutline(message: unknown): unknown {
+export function messageOutline(message: unknown): unknown {
   if (!isRecord(message) || !isRecord(message.info)) return message;
   const { summary, ...info } = message.info;
   const parts = Array.isArray(message.parts) ? message.parts : [];
+  const user = message.info.role === "user";
   return {
     info: isRecord(summary) ? info : message.info,
-    parts: parts.filter((part) => isRecord(part) && ["step-finish", "finish", "error"].includes(String(part.type))),
+    parts: parts.flatMap((part) => {
+      if (!isRecord(part)) return [];
+      const type = String(part.type);
+      if (["step-finish", "finish", "error"].includes(type)) return [part];
+      if (user && OUTLINED_USER_PARTS.has(type)) return [part.synthetic === true ? { type, synthetic: true } : { type }];
+      return [];
+    }),
   };
+}
+
+export type TurnOutcome = "completed" | "stopped" | "error" | "no_reply" | "incomplete";
+
+/**
+ * How the session's latest turn ended, from its messages in outline: its
+ * last assistant message ended normally ("completed"), was stopped (Esc,
+ * the engine's MessageAbortedError: "stopped") or failed ("error"), had not
+ * ended ("incomplete"), or the prompt got no answer at all ("no_reply").
+ * Null without a prompt.
+ */
+export function turnOutcome(outline: readonly unknown[]): TurnOutcome | null {
+  let prompt = -1;
+  for (let index = outline.length - 1; index >= 0; index -= 1) {
+    const message = outline[index];
+    if (isRecord(message) && isPromptMessage(message)) {
+      prompt = index;
+      break;
+    }
+  }
+  if (prompt < 0) return null;
+  let last: Record<string, unknown> | null = null;
+  for (const message of outline.slice(prompt + 1)) {
+    if (!isRecord(message)) continue;
+    const info = isRecord(message.info) ? message.info : message;
+    // A compaction's summary is the engine's, not the turn's answer.
+    if (info.summary === true || info.agent === "compaction" || info.mode === "compaction") continue;
+    if ((info.role ?? info.type) === "assistant") last = message;
+  }
+  if (!last) return "no_reply";
+  const info = isRecord(last.info) ? last.info : last;
+  const error = info.error;
+  if (error != null) {
+    const name = isRecord(error) ? error.name ?? error.type : error;
+    return name === "MessageAbortedError" || name === "aborted" ? "stopped" : "error";
+  }
+  return isFinishedAssistantMessage(last) ? "completed" : "incomplete";
 }
 
 async function messageOutlines(messages: AsyncIterable<EngineMessage>): Promise<unknown[]> {
@@ -850,7 +900,9 @@ export function observeUploadedSession(input: {
       }
     }
     room(newest.bytes);
-    sessionUploader.recordTrace(sessionId, "session.idle", { status });
+    // How the turn ended, so a turn stopped with Esc reads as stopped, not as answered.
+    const outcome = history ? turnOutcome(history.outline) : null;
+    sessionUploader.recordTrace(sessionId, "session.idle", outcome ? { status, outcome } : { status });
     // The turn snapshot runs first so the artifacts it discovers are part of
     // the trace flushed right behind it.
     captureTurnSnapshot();

@@ -7,6 +7,7 @@ import { zstdDecompressSync } from "node:zlib";
 import {
   createSessionObservers,
   engineReplaced,
+  messageOutline,
   observeUploadedSession,
   projectArchiveEngineReads,
   promptDispatched,
@@ -14,6 +15,7 @@ import {
   type ObservedUploader,
   type ObserverTiming,
   type SessionObservers,
+  turnOutcome,
 } from "./session-upload-observer.js";
 import type { CaptureResult, DrainResult, FinalReason } from "./session-archive/index.js";
 import { ProjectArchiveLifecycle, type ProjectArchiver } from "./session-archive/lifecycle.js";
@@ -784,4 +786,44 @@ describe("session upload observer with the session uploader", () => {
     expect(kept).toEqual(["msg_user_0004", ...Array.from({ length: 10 }, (_, index) => `msg_huge_${String(index + 3).padStart(4, "0")}`)]);
     for (const envelope of omitted) expect(document(envelope)).toMatchObject({ trace_truncated: false, dropped_event_count: 0 });
   }, 60_000);
+});
+
+describe("message outlines and turn outcomes", () => {
+  test("a user message's outline keeps what turn counting reads of its parts, never their text", () => {
+    const outline = messageOutline({
+      info: { id: "u1", role: "user", summary: { diffs: [{ file: "a.ts", before: "x", after: "y" }] } },
+      parts: [
+        { id: "p1", type: "text", text: "secret prompt", synthetic: true },
+        { id: "p2", type: "text", text: "typed" },
+        { id: "p3", type: "file", url: "file:///a.png" },
+        { id: "p4", type: "compaction", auto: true },
+      ],
+    });
+    expect(outline).toEqual({
+      info: { id: "u1", role: "user" },
+      parts: [{ type: "text", synthetic: true }, { type: "text" }, { type: "file" }, { type: "compaction" }],
+    });
+    // An assistant message keeps only its finish parts.
+    expect(messageOutline({ info: { id: "a1", role: "assistant" }, parts: [{ type: "text", text: "answer" }, { type: "step-finish", reason: "stop" }] }))
+      .toEqual({ info: { id: "a1", role: "assistant" }, parts: [{ type: "step-finish", reason: "stop" }] });
+  });
+
+  test("how the latest turn ended", () => {
+    const prompt = { info: { role: "user" }, parts: [{ type: "text" }] };
+    expect(turnOutcome([])).toBeNull();
+    expect(turnOutcome([prompt, { info: { role: "assistant", time: { completed: 2 } } }])).toBe("completed");
+    // Stopped with Esc: the 1.x engine (and the 2.x adapter) record MessageAbortedError, the 2.x context an "aborted" error.
+    expect(turnOutcome([prompt, { info: { role: "assistant", finish: "tool-calls" } }, { info: { role: "assistant", error: { name: "MessageAbortedError" } } }])).toBe("stopped");
+    expect(turnOutcome([{ type: "user" }, { type: "assistant", error: { type: "aborted", message: "Aborted" } }])).toBe("stopped");
+    expect(turnOutcome([prompt, { info: { role: "assistant", error: { name: "APIError" } } }])).toBe("error");
+    expect(turnOutcome([prompt, { info: { role: "assistant" } }])).toBe("incomplete");
+    expect(turnOutcome([prompt, { info: { role: "assistant", time: { completed: 1 } } }, prompt])).toBe("no_reply");
+    // A compaction's summary after the reply does not hide how the turn ended.
+    expect(turnOutcome([
+      prompt,
+      { info: { role: "assistant", error: { name: "MessageAbortedError" } } },
+      { info: { role: "user", agent: "compaction" }, parts: [{ type: "compaction" }] },
+      { info: { role: "assistant", summary: true, finish: "stop" } },
+    ])).toBe("stopped");
+  });
 });

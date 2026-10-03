@@ -87,8 +87,29 @@ export function isFinishedAssistantMessage(message: Record<string, unknown>): bo
 }
 
 /**
- * Completed turns in an engine message list: prompts answered by an assistant
- * message that ended (several assistant steps of one turn count once). Each
+ * A user message that is a prompt someone sent: not a compaction's request
+ * (a "compaction" part, or the 2.x adapter's compaction agent) and not
+ * synthetic text alone (a user-run shell command's notice, an activated
+ * skill, a background job's report, the engine's own continue nudge). A
+ * message without parts (an outline from before parts were kept) is one.
+ */
+export function isPromptMessage(message: Record<string, unknown>): boolean {
+  const info = messageInfo(message);
+  if ((info.role ?? info.type) !== "user") return false;
+  if (info.agent === "compaction") return false;
+  const parts = (Array.isArray(message.parts) ? message.parts : []).filter(isRecord);
+  if (parts.some((part) => part.type === "compaction")) return false;
+  const content = parts.filter((part) => part.type === "text" || part.type === "file" || part.type === "agent" || part.type === "subtask");
+  return !(content.length > 0 && content.every((part) => part.type === "text" && part.synthetic === true));
+}
+
+/**
+ * Completed turns in an engine message list: the prompts that ended,
+ * answered by an assistant message that ended (several assistant steps of
+ * one turn count once) or followed by the next prompt (stopped before any
+ * answer). A compaction's request and summary, and synthetic notices with
+ * the replies they woke, are no turn: the count is the number of prompts the
+ * session finished, as the trace's prompt milestones number them. Each
  * completed turn adds one, so the number strictly increases from one turn to
  * the next and survives app restarts. Null when the list could not be read.
  */
@@ -100,7 +121,9 @@ export function completedTurnCount(messages: unknown): number | null {
     if (!isRecord(message)) continue;
     const info = messageInfo(message);
     const role = info.role ?? info.type;
-    if (role === "user") {
+    if (isPromptMessage(message)) {
+      // The prompt before ended without an answer (stopped right away): it was a turn too.
+      if (awaitingReply) turns += 1;
       awaitingReply = true;
     } else if (role === "assistant" && awaitingReply && isFinishedAssistantMessage(message)) {
       turns += 1;

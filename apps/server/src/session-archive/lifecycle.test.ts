@@ -163,6 +163,43 @@ describe("completedTurnCount", () => {
     expect(completedTurnCount(null)).toBeNull();
     expect(completedTurnCount({ status: 500, unavailable: true })).toBeNull();
   });
+
+  test("a compaction and synthetic notices are no turn: the count follows the prompts", () => {
+    const prompt = (id: string) => ({ info: { id, role: "user" }, parts: [{ type: "text" }] });
+    const answer = (id: string) => ({ info: { id, role: "assistant", time: { completed: 1 } } });
+    expect(completedTurnCount([
+      prompt("u1"), answer("a1"),
+      prompt("u2"), answer("a2"),
+      // An automatic compaction inside turn 2 (1.x: a "compaction" part; the 2.x adapter: its compaction agent)...
+      { info: { id: "c1", role: "user", agent: "build" }, parts: [{ type: "compaction" }] },
+      { info: { id: "s1", role: "assistant", summary: true, mode: "compaction", finish: "stop" } },
+      { info: { id: "c2", role: "user", agent: "compaction" }, parts: [] },
+      { info: { id: "s2", role: "assistant", summary: true, agent: "compaction", finish: "stop" } },
+      // ...the engine's continue nudge and its reply...
+      { info: { id: "n1", role: "user" }, parts: [{ type: "text", synthetic: true }] },
+      answer("a3"),
+      // ...a user-run shell command, an activated skill (synthetic text alone).
+      { info: { id: "sh", role: "user" }, parts: [{ type: "text", synthetic: true }] },
+      { info: { id: "sh-a", role: "assistant", time: { completed: 2 } }, parts: [{ type: "tool" }] },
+      prompt("u3"), answer("a4"),
+    ])).toBe(3);
+    // A prompt with a synthetic note beside what was typed (an attachment path) is one.
+    expect(completedTurnCount([
+      { info: { role: "user" }, parts: [{ type: "text", synthetic: true }, { type: "text" }] },
+      answer("a1"),
+      { info: { role: "user" }, parts: [{ type: "text", synthetic: true }, { type: "file" }] },
+      answer("a2"),
+    ])).toBe(2);
+  });
+
+  test("a prompt stopped before any answer is a turn once the next prompt follows it", () => {
+    const prompt = { info: { role: "user" }, parts: [{ type: "text" }] };
+    const answer = { info: { role: "assistant", time: { completed: 1 } } };
+    // Stopped with Esc before the engine answered: still the running turn...
+    expect(completedTurnCount([prompt, answer, prompt])).toBe(1);
+    // ...and a turn once the next prompt was sent, so turn numbers keep matching the prompts.
+    expect(completedTurnCount([prompt, answer, prompt, prompt, answer])).toBe(3);
+  });
 });
 
 describe("projectArchiveEnabled", () => {
