@@ -14,7 +14,7 @@
  */
 import { randomBytes, randomUUID } from "node:crypto";
 import { mkdir, readdir, readFile, rename, rm, stat, statfs } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import { z } from "zod";
 
 import { externalFetch } from "../server-fetch.js";
@@ -51,7 +51,8 @@ import {
 import { writeSealedArchive } from "./pack.js";
 import { POLICY_OFF, type ArchivePolicy } from "./policy.js";
 import { SEAL_CONTENT } from "./seal.js";
-import { findLockfiles, scanTouchedFiles, touchedChange, TouchedPathStore } from "./touched.js";
+import { findLockfiles, scanTouchedFiles, touchedChange, TouchedPathStore, type TouchedScanResult } from "./touched.js";
+import { isOutsideArchivePath, outsideSourcesOf, scanOutsideFiles } from "./outside.js";
 import { inRegenerableDir } from "../session-uploader.js";
 import {
   ARCHIVE_MARKER_NOT_ALLOWED,
@@ -95,6 +96,17 @@ const ARCHIVE_PACK_RESERVE_BYTES = 1024 * 1024;
  * this time.
  */
 export const POLICY_TTL_MS = 5 * 60_000;
+
+/** The hash cache of a root's outside files is kept under the root's key with this suffix. */
+const OUTSIDE_CACHE_SUFFIX = "outside";
+
+/** Adds an outside scan (outside.ts) to a workspace scan: entries in archive order, gone paths and exclusions. */
+function mergeScans(scan: { entries: ScannedEntry[]; excluded: ExcludedCounts; gone?: Set<string> }, outside: TouchedScanResult | null): void {
+  if (!outside) return;
+  if (outside.entries.length > 0) scan.entries = [...scan.entries, ...outside.entries].sort((left, right) => compareArchivePaths(left.path, right.path));
+  for (const path of outside.gone) scan.gone?.add(path);
+  for (const key of Object.keys(outside.excluded) as Array<keyof ExcludedCounts>) scan.excluded[key] += outside.excluded[key];
+}
 
 export type SessionArchiverOptions = {
   /** As the session uploader: the archive routes are derived from it like the session upload URL. */
@@ -534,13 +546,15 @@ export class SessionArchiver {
   /**
    * A path the session touched, workspace-relative (portable `/`), as the
    * session uploader reports it: a tool's path in the trace, or a change the
-   * watcher saw. Kept (on disk, a moment later) for a touched-files session;
+   * watcher saw; or an absolute path outside the workspace (turn-files.ts),
+   * archived under `__outside__/` (outside.ts). Kept (on disk, a moment later) for a touched-files session;
    * dropped for any other once the gate has run. Cheap: called for every
    * file event.
    */
   recordTouched(sessionId: string, path: string): void {
     if (this.disabled || !SESSION_ID_PATTERN.test(sessionId) || this.stoppedSessions.has(sessionId)) return;
-    this.touched.note(sessionId, path);
+    // An absolute path is a file outside the workspace (outside.ts), kept in its normal form.
+    this.touched.note(sessionId, typeof path === "string" && isAbsolute(path) ? resolve(path) : path);
   }
 
   /** The session is not archived (a child session): its reported paths go. */
@@ -964,8 +978,10 @@ export class SessionArchiver {
       // regenerable folders, and every file the chain holds (to see it go).
       // Gitignored files the agent touched are archived too.
       const paths = new Set([...(await this.touched.snapshot(sessionId)), ...(await findLockfiles(state.root, signal))].filter((path) => !inRegenerableDir(path)));
-      for (const entry of baseline) paths.add(entry.path);
+      for (const entry of baseline) if (!isOutsideArchivePath(entry.path)) paths.add(entry.path);
       const scan = await scanTouchedFiles(state.root, paths, { excludedDirs: this.appDirs, includeCredentialFiles: this.includeCredentials, includeIgnored: true, hashCache: cache, ...(signal ? { signal } : {}) });
+      // The files outside the workspace the session touched (outside.ts).
+      mergeScans(scan, await this.scanOutside(state, baseline, signal));
       const change = touchedChange(baseline, scan);
       if (change.files.length === 0 && change.deleted.length === 0) {
         if (cache.changed) await this.saveHashCache(rootKey, cache);
@@ -992,16 +1008,18 @@ export class SessionArchiver {
         const kept = await scanTouchedFiles(state.root, keepers, { excludedDirs: this.appDirs, includeCredentialFiles: this.includeCredentials, includeIgnored: true, hashCache: cache, ...(signal ? { signal } : {}) });
         if (kept.entries.length > 0) scan.entries = [...scan.entries, ...kept.entries].sort((left, right) => compareArchivePaths(left.path, right.path));
       }
+      const baseline = kind === "delta" ? await this.readBaseline(state) : [];
+      if (!baseline) {
+        await this.markStopped(sessionId, "baseline_missing");
+        return { status: "skipped", reason: "stopped" };
+      }
+      // The files outside the workspace the session touched (outside.ts).
+      mergeScans(scan, await this.scanOutside(state, baseline, signal));
       files = scan.entries;
       excluded = scan.excluded;
       ignored = scan.ignored;
       next = scan.entries;
       if (kind === "delta") {
-        const baseline = await this.readBaseline(state);
-        if (!baseline) {
-          await this.markStopped(sessionId, "baseline_missing");
-          return { status: "skipped", reason: "stopped" };
-        }
         const delta = computeArchiveDelta(baseline, scan.entries);
         if (isArchiveDeltaEmpty(delta)) {
           if (cache.changed) await this.saveHashCache(rootKey, cache);
@@ -1175,6 +1193,22 @@ export class SessionArchiver {
     } finally {
       reservation.release();
     }
+  }
+
+  /**
+   * The files outside the workspace the session touched, and those an
+   * earlier archive of the chain holds (to see them change or go), scanned
+   * with the archive's exclusions (outside.ts). Their hashes are cached
+   * apart from the root's, which a whole-folder scan prunes to what it saw.
+   */
+  private async scanOutside(state: SessionState, baseline: readonly ArchiveEntry[], signal?: AbortSignal): Promise<TouchedScanResult | null> {
+    const paths = new Set([...(await this.touched.outside(state.session_id)), ...outsideSourcesOf(baseline.map((entry) => entry.path))]);
+    if (paths.size === 0) return null;
+    const cacheKey = stateKey(`${state.root}\0${OUTSIDE_CACHE_SUFFIX}`);
+    const cache = await this.loadHashCache(cacheKey);
+    const scan = await scanOutsideFiles(paths, { root: state.root, excludedDirs: this.appDirs, includeCredentialFiles: this.includeCredentials, hashCache: cache, ...(signal ? { signal } : {}) });
+    if (cache.changed) await this.saveHashCache(cacheKey, cache).catch(() => undefined);
+    return scan;
   }
 
   /** The entry list after the chain's last archive; null when it cannot be read (the chain cannot go on). */

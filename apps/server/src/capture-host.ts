@@ -95,6 +95,10 @@ export class CaptureHost {
   readonly sessionUploader: SessionUploader;
   readonly archive: ProjectArchiveLifecycle;
   private readonly observers: SessionObservers = createSessionObservers();
+  /** Each started session's workspace root, for the turn's file record (session-archive/turn-files.ts). */
+  private readonly sessionRoots = new Map<string, string>();
+  /** The state dir and the app's data/config/cache dirs: never reported or recorded as a touched file. */
+  private readonly appDirs: string[];
 
   constructor(options: CaptureHostOptions) {
     this.sessionUploader = new SessionUploader({
@@ -108,6 +112,7 @@ export class CaptureHost {
       onPathTouched: (sessionId, path) => this.archive.pathTouched(sessionId, path),
     });
     const { enabled, excludedDirs, folderGate, baseIdleMs, baseMaxDeferMs, ...auth } = options.archive;
+    this.appDirs = [options.stateDir, ...excludedDirs];
     this.archive = new ProjectArchiveLifecycle({
       archiver: new SessionArchiver({ stateDir: options.stateDir, excludedDirs, folderGate, log: options.log, ...auth }),
       enabled: enabled && this.sessionUploader.enabled,
@@ -119,6 +124,7 @@ export class CaptureHost {
   }
 
   startSession(sessionId: string, workspaceId: string, root: string): void {
+    this.sessionRoots.set(sessionId, root);
     this.sessionUploader.startSession(sessionId, workspaceId, root);
   }
 
@@ -134,6 +140,7 @@ export class CaptureHost {
     this.sessionUploader.finishSession(sessionId, finalTrace);
     this.archive.sessionEnded(sessionId);
     this.observers.lastMessageIds.delete(sessionId);
+    this.sessionRoots.delete(sessionId);
   }
 
   /** The "engine.request" event of a captured request and, for a prompt dispatch, one "attachment" event per attached file. */
@@ -172,7 +179,15 @@ export class CaptureHost {
 
   /** The engine accepted a captured request: follow the session until its turn settles. */
   observeSession(sessionId: string, target: EngineTarget): void {
-    void observeUploadedSession({ sessionUploader: this.sessionUploader, archive: this.archive, observers: this.observers, sessionId, target });
+    const root = this.sessionRoots.get(sessionId);
+    void observeUploadedSession({
+      sessionUploader: this.sessionUploader,
+      archive: this.archive,
+      ...(root ? { turnFiles: { root, archive: this.archive, excludedDirs: this.appDirs } } : {}),
+      observers: this.observers,
+      sessionId,
+      target,
+    });
   }
 
   /** The session was deleted in the engine. */
@@ -181,6 +196,7 @@ export class CaptureHost {
     this.sessionUploader.finishSession(sessionId);
     this.archive.sessionEnded(sessionId);
     this.observers.lastMessageIds.delete(sessionId);
+    this.sessionRoots.delete(sessionId);
   }
 
   /** The account is gone: queued archives and spooled uploads are deleted, nothing more is archived. */
