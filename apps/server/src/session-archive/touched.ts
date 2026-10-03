@@ -20,6 +20,7 @@ import {
   HASH_CONCURRENCY,
   HASH_READ_BYTES,
   OPEN_ENTRY_FLAGS,
+  OUTSIDE_ROOT_NAME,
   RESERVED_ROOT_NAME,
   STAT_CONCURRENCY,
   compareArchivePaths,
@@ -41,6 +42,7 @@ import { stateKey } from "./files.js";
 import { touchedIgnoredPaths } from "./ignore.js";
 import { REGENERABLE_DIR_NAMES } from "../session-uploader.js";
 import type { ArchiveLog } from "./upload.js";
+import { outsideArchivePath } from "./outside.js";
 
 /** A session keeps at most this many touched paths; later ones are not archived (one log line). */
 export const MAX_TOUCHED_PATHS = 100_000;
@@ -91,6 +93,15 @@ export function touchedPathParts(path: string): string[] | null {
   // Windows: no drive, no stream (`file:stream`), no separator inside a name.
   if (sep === "\\" && parts.some((part) => part.includes("\\") || part.includes(":"))) return null;
   return parts;
+}
+
+/**
+ * Whether a reported path is an absolute path outside the workspace that the
+ * store keeps apart from the workspace-relative ones (outside.ts archives
+ * those under `__outside__/`).
+ */
+export function isOutsideTouchedPath(path: string): boolean {
+  return typeof path === "string" && isAbsolute(path) && resolve(path) === path && outsideArchivePath(path) !== null;
 }
 
 type DirState = "dir" | "gone" | "unreadable";
@@ -217,7 +228,7 @@ export async function scanTouchedFiles(root: string, paths: Iterable<string>, op
       excluded.non_utf8 += 1;
       return;
     }
-    if (parts[0] === RESERVED_ROOT_NAME) {
+    if (parts[0] === RESERVED_ROOT_NAME || parts[0] === OUTSIDE_ROOT_NAME) {
       excluded.reserved += 1;
       return;
     }
@@ -425,7 +436,11 @@ export class TouchedPathStore {
     },
   ) {}
 
-  /** A path the session uploader reported for the session (workspace-relative, portable). Cheap: a repeat is a lookup. */
+  /**
+   * A path the session uploader reported for the session: workspace-relative
+   * (portable), or an absolute path outside the workspace (kept apart: see
+   * outside()). Cheap: a repeat is a lookup.
+   */
   note(sessionId: string, path: string): void {
     let session = this.sessions.get(sessionId);
     if (!session) {
@@ -439,7 +454,8 @@ export class TouchedPathStore {
         else this.drop(created);
       }, () => undefined);
     }
-    if (session.mode === "ignored" || session.known?.has(path) || session.pending.has(path) || touchedPathParts(path) === null) return;
+    if (session.mode === "ignored" || session.known?.has(path) || session.pending.has(path)) return;
+    if (touchedPathParts(path) === null && !isOutsideTouchedPath(path)) return;
     if ((session.known?.size ?? 0) + session.pending.size + session.writing.length >= MAX_TOUCHED_PATHS) {
       if (!session.capped) this.options.log("warn", "OmniRush touched-files archive keeps a limited number of paths per session; later ones are not archived", { sessionId, limit: MAX_TOUCHED_PATHS });
       session.capped = true;
@@ -468,13 +484,22 @@ export class TouchedPathStore {
     });
   }
 
-  /** Every path the session touched: its file and what is not written yet. The session counts as tracked from now on. */
+  /** Every workspace-relative path the session touched: its file and what is not written yet. The session counts as tracked from now on. */
   snapshot(sessionId: string): Promise<Set<string>> {
+    return this.snapshotWhere(sessionId, false);
+  }
+
+  /** Every absolute path outside the workspace the session touched, like snapshot(). */
+  outside(sessionId: string): Promise<Set<string>> {
+    return this.snapshotWhere(sessionId, true);
+  }
+
+  private snapshotWhere(sessionId: string, outside: boolean): Promise<Set<string>> {
     this.track(sessionId);
     return this.serial(sessionId, async () => {
       await this.write(sessionId);
       const session = this.sessions.get(sessionId);
-      return new Set([...(session?.known ?? []), ...(session?.pending ?? [])]);
+      return new Set([...(session?.known ?? []), ...(session?.pending ?? [])].filter((path) => isOutsideTouchedPath(path) === outside));
     });
   }
 
@@ -555,6 +580,8 @@ export class TouchedPathStore {
       try {
         const path: unknown = JSON.parse(line);
         if (typeof path === "string" && touchedPathParts(path) !== null) paths.add(path);
+        // An outside path is an object line (releases without outside capture skip it).
+        else if (typeof path === "object" && path !== null && "outside" in path && typeof path.outside === "string" && isOutsideTouchedPath(path.outside)) paths.add(path.outside);
       } catch {
         // A line torn by a crash.
       }
@@ -591,7 +618,7 @@ export class TouchedPathStore {
     session.pending = new Set();
     session.writing = batch;
     try {
-      const lines = `${batch.map((path) => JSON.stringify(path)).join("\n")}\n`;
+      const lines = `${batch.map((path) => JSON.stringify(isOutsideTouchedPath(path) ? { outside: path } : path)).join("\n")}\n`;
       if (header) await writeFile(this.file(sessionId), `${header}${lines}`, { mode: 0o600 });
       else await appendFile(this.file(sessionId), `${session.torn ? "\n" : ""}${lines}`, { mode: 0o600 });
       session.torn = false;

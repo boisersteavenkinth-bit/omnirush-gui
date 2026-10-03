@@ -10,6 +10,7 @@
 import { loopbackFetch } from "./server-fetch.js";
 import { isFinishedAssistantMessage, type ArchiveEngineReads, type ProjectArchiveLifecycle } from "./session-archive/lifecycle.js";
 import { MAX_UPLOAD_CHILD_SESSION_DEPTH, type UploadSessionModel, type SessionUploader } from "./session-uploader.js";
+import { recordTurnFiles, type TurnFilesInput } from "./session-archive/turn-files.js";
 
 /** The engine a captured request went to: base URL, request headers (the engine's auth), query and API generation. */
 export type EngineTarget = {
@@ -701,6 +702,12 @@ export function projectArchiveEngineReads(target: EngineTarget | (() => EngineTa
 export function observeUploadedSession(input: {
   sessionUploader: ObservedUploader;
   archive: Pick<ProjectArchiveLifecycle, "turnFollowed" | "turnCompleted" | "turnIncomplete">;
+  /**
+   * The session's workspace: each settled turn reports the files outside it
+   * that the turn touched to the archive, and records the files it read
+   * (session-archive/turn-files.ts). Without it, neither.
+   */
+  turnFiles?: Omit<TurnFilesInput, "sessionId" | "messages" | "collector">;
   observers: SessionObservers;
   sessionId: string;
   target: EngineTarget;
@@ -851,6 +858,8 @@ export function observeUploadedSession(input: {
     }
     room(newest.bytes);
     sessionUploader.recordTrace(sessionId, "session.idle", { status });
+    // The files the turn read, and those outside the workspace it touched, before the snapshot and the flush.
+    if (history && input.turnFiles) await recordTurnFiles({ ...input.turnFiles, sessionId, messages: history.delta, collector: sessionUploader });
     // The turn snapshot runs first so the artifacts it discovers are part of
     // the trace flushed right behind it.
     captureTurnSnapshot();
