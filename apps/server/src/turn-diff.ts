@@ -50,6 +50,14 @@ const SHA256_NAME = /^[0-9a-f]{64}$/;
 
 export type TurnDiffStatus = "added" | "modified" | "deleted" | "skipped" | "no_base";
 
+/**
+ * Why an entry carries no diff, or only part of one: a skipped file is
+ * "binary" or "too_large" (over the session uploader's per-file cap); a cut
+ * diff is "too_large" (past MAX_TURN_DIFF_FILE_BYTES) or "record_cap" (past
+ * what the event's budget had left).
+ */
+export type TurnDiffReason = "binary" | "too_large" | "record_cap";
+
 /** One file of a "turn.diff" event. */
 export type TurnDiffFile = {
   /** Workspace-relative, redacted as upload paths are. */
@@ -69,6 +77,8 @@ export type TurnDiffFile = {
   diff: string | null;
   /** The diff was cut at MAX_TURN_DIFF_FILE_BYTES or at the event's remaining budget. */
   truncated: boolean;
+  /** Why the file was skipped or its diff cut; null otherwise. */
+  reason: TurnDiffReason | null;
 };
 
 export type TurnDiffEvent = {
@@ -94,6 +104,8 @@ export type TurnDiffInput = {
   after_sha256: string | null;
   before: string | null;
   after: string | null;
+  /** A skipped file: binary, or over the per-file cap. */
+  reason?: TurnDiffReason;
 };
 
 type Lines = { lines: string[]; eofNewline: boolean };
@@ -384,6 +396,8 @@ export class TurnDiffBuilder {
       deletions: hasText ? before?.length ?? 0 : null,
       diff: null,
       truncated: false,
+      // At its widest while the entry is measured.
+      reason: input.status === "skipped" ? input.reason ?? "binary" : hasText ? "record_cap" : null,
     };
     // The entry without its diff, plus the comma between entries.
     const overhead = Buffer.byteLength(JSON.stringify(file)) + 1;
@@ -391,12 +405,14 @@ export class TurnDiffBuilder {
     if (room < (hasText ? MIN_DIFF_ROOM_BYTES : 0)) return this.omit();
     if (hasText) {
       const started = performance.now();
-      const result = unifiedDiff(input.path, before, after, Math.min(this.maxFileBytes, room));
+      const limit = Math.min(this.maxFileBytes, room);
+      const result = unifiedDiff(input.path, before, after, limit);
       this.diffMs += performance.now() - started;
       file.additions = result.additions;
       file.deletions = result.deletions;
       file.diff = result.diff;
       file.truncated = result.truncated;
+      file.reason = result.truncated ? (limit < this.maxFileBytes ? "record_cap" : "too_large") : null;
       if (result.truncated) this.truncated = true;
     }
     this.files.push(file);
