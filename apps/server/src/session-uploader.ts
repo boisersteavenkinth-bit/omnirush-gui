@@ -6,6 +6,7 @@ import { release as osRelease, tmpdir } from "node:os";
 import nodePath, { basename, dirname, extname, join, relative, resolve, sep, type PlatformPath } from "node:path";
 import { promisify } from "node:util";
 import { createZstdCompress } from "node:zlib";
+import { isUtf8 } from "node:buffer";
 import { minimatch } from "minimatch";
 
 import { SESSION_UPLOAD_BUDGET, SESSION_UPLOAD_ENDPOINT_PATH, sessionUploadTimeoutMs, type SessionUploadBudget } from "./session-upload-budget.js";
@@ -1488,7 +1489,14 @@ export function stripRemoteUserinfo(url: string): string {
   return trimmed;
 }
 
-function isBinary(buffer: Buffer): boolean {
+/**
+ * Whether `buffer` holds binary content: a NUL or many control bytes in its
+ * first 8 KiB, or bytes that are not valid UTF-8 anywhere (a PDF, an image).
+ * Text is uploaded as UTF-8, so a file that does not decode strictly would be
+ * stored altered (each invalid byte becoming U+FFFD). `partial` is set for a
+ * head cut from a longer file, which may end inside a character.
+ */
+function isBinary(buffer: Buffer, partial = false): boolean {
   const length = Math.min(buffer.length, 8_192);
   let suspicious = 0;
   // An indexed loop: iterating a Buffer is several times slower, once per file.
@@ -1497,7 +1505,21 @@ function isBinary(buffer: Buffer): boolean {
     if (byte === 0) return true;
     if (byte < 7 || (byte > 13 && byte < 32)) suspicious += 1;
   }
-  return length > 0 && suspicious / length > 0.1;
+  if (length > 0 && suspicious / length > 0.1) return true;
+  return !isValidUtf8(buffer, partial);
+}
+
+/** Strict UTF-8 validation (native); with `partial`, an incomplete last character is allowed. */
+function isValidUtf8(buffer: Buffer, partial: boolean): boolean {
+  if (isUtf8(buffer)) return true;
+  if (!partial) return false;
+  for (let back = 1; back <= 3 && back <= buffer.length; back += 1) {
+    const byte = buffer[buffer.length - back]!;
+    if ((byte & 0xc0) === 0x80) continue;
+    const length = byte >= 0xf0 ? 4 : byte >= 0xe0 ? 3 : byte >= 0xc0 ? 2 : 1;
+    return length > back && isUtf8(buffer.subarray(0, buffer.length - back));
+  }
+  return false;
 }
 
 const PATH_FIELD_NAMES = new Set([
@@ -3006,7 +3028,8 @@ function writtenThisTurn(turnStartedAt: number | null, cached: HashCacheEntry | 
 async function startsBinary(absolute: string): Promise<boolean> {
   const head = Buffer.alloc(8_192);
   try {
-    return isBinary(head.subarray(0, await readInto(absolute, head)));
+    const read = await readInto(absolute, head);
+    return isBinary(head.subarray(0, read), read === head.length);
   } catch {
     return false;
   }
@@ -4537,8 +4560,9 @@ export class SessionUploader {
       return base === null ? { ...input, status: "no_base" } : { ...input, status: "deleted", before: base };
     }
     if (!file.isFile() || file.isSymbolicLink()) return null;
-    if (file.size <= MAX_UPLOAD_FILE_BYTES && !state.cache.get(path)?.binary && !(await startsBinary(absolute))) return null;
-    return { ...input, after_sha256: null, status: "skipped" };
+    if (file.size > MAX_UPLOAD_FILE_BYTES) return { ...input, after_sha256: null, status: "skipped", reason: "too_large" };
+    if (!state.cache.get(path)?.binary && !(await startsBinary(absolute))) return null;
+    return { ...input, after_sha256: null, status: "skipped", reason: "binary" };
   }
 
   /** The text a manifest entry describes when the base store no longer holds it: read again, if the file still hashes to it. */
@@ -4818,7 +4842,17 @@ export class SessionUploader {
       const written = writtenThisTurn(state.turnStartedAt, state.cache.get(path), file);
       if (written && state.turnStartedAt !== null) state.turnWrittenPaths.set(path, Date.now());
       if (file.isFile() && !file.isSymbolicLink() && file.size > MAX_CHANGE_JOURNAL_BYTES && written) state.turnSkipped.set(path, file.mtimeMs);
-      if (!file.isFile() || file.isSymbolicLink() || file.size > MAX_UPLOAD_FILE_BYTES) {
+      if (!file.isFile() || file.isSymbolicLink()) {
+        // A directory or a symlink is not a workspace file (the snapshot lists
+        // neither): nothing to journal, and a file it replaced leaves the manifest.
+        const previous = state.changeJournal.get(path);
+        if (previous) {
+          state.changeJournalBytes -= Buffer.byteLength(JSON.stringify(previous));
+          state.changeJournal.delete(path);
+        }
+        return;
+      }
+      if (file.size > MAX_UPLOAD_FILE_BYTES) {
         entry = { path, at: new Date().toISOString(), status: "skipped" };
       } else if (file.size > MAX_CHANGE_JOURNAL_BYTES) {
         // Larger than the whole journal: it could only evict every other entry

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdtemp, readdir, rm, stat, unlink, utimes, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm, stat, symlink, unlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { zstdDecompressSync } from "node:zlib";
@@ -250,6 +250,7 @@ describe("turn.diff events", () => {
         deletions: 1,
         diff: "--- a/app.ts\n+++ b/app.ts\n@@ -1,2 +1,2 @@\n-export const answer = 41;\n+export const answer = 42;\n export const name = \"omnirush\";\n",
         truncated: false,
+        reason: null,
       },
       {
         path: "new.md",
@@ -260,6 +261,7 @@ describe("turn.diff events", () => {
         deletions: 0,
         diff: "--- /dev/null\n+++ b/new.md\n@@ -0,0 +1,2 @@\n+fresh\n+notes\n",
         truncated: false,
+        reason: null,
       },
       {
         path: "old.md",
@@ -270,6 +272,7 @@ describe("turn.diff events", () => {
         deletions: 1,
         diff: "--- a/old.md\n+++ /dev/null\n@@ -1 +0,0 @@\n-retired\n",
         truncated: false,
+        reason: null,
       },
     ]);
   });
@@ -294,8 +297,43 @@ describe("turn.diff events", () => {
       await writeFile(join(root, "chart.png"), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 0, 0, 13, 0xff]));
     });
     expect(event.files).toEqual([
-      { path: "chart.png", status: "skipped", before_sha256: null, after_sha256: null, additions: null, deletions: null, diff: null, truncated: false },
+      { path: "chart.png", status: "skipped", before_sha256: null, after_sha256: null, additions: null, deletions: null, diff: null, truncated: false, reason: "binary" },
     ]);
+  });
+
+  test("marks a PDF (invalid UTF-8, few control bytes) and an oversized file the turn wrote as skipped, with their reason", async () => {
+    const root = await tempDir("omnirush-turn-diff-kinds-");
+    await writeFile(join(root, "readme.txt"), "hello\n");
+    const pdf = Buffer.concat([Buffer.from("%PDF-1.4\n%"), Buffer.from([0xe2, 0xe3, 0xcf, 0xd3]), Buffer.from("\n1 0 obj\n<< /Type /Catalog >>\nendobj\n%%EOF\n")]);
+    const { sessionUploader, uploads } = recordingUploader();
+    const sessionId = "session-turn-diff-kinds";
+    sessionUploader.startSession(sessionId, "workspace-turn-diff", root);
+    sessionUploader.captureSnapshot(sessionId, "prompt");
+    await sessionUploader.idle(sessionId);
+    await writeFile(join(root, "sample.pdf"), pdf);
+    await writeFile(join(root, "dump.log"), "x".repeat(5 * 1024 * 1024));
+    // Neither a directory nor a symlink is a workspace file: no entry anywhere.
+    await mkdir(join(root, "made"));
+    await symlink(join(root, "readme.txt"), join(root, "link.txt"));
+    await delay(300);
+    sessionUploader.captureSnapshot(sessionId, "turn_completed");
+    sessionUploader.flushTrace(sessionId, { messages: [] });
+    await sessionUploader.idle(sessionId);
+    await sessionUploader.stop();
+    const [event] = turnDiffEvents(uploads);
+    expect(event!.files.map((file) => [file.path, file.status, file.reason, file.diff])).toEqual([
+      ["dump.log", "skipped", "too_large", null],
+      ["sample.pdf", "skipped", "binary", null],
+    ]);
+    const envelopes = uploads as unknown as Array<{ snapshot_type: string; files: Array<{ path: string; content: string }> }>;
+    // The PDF's bytes never travel as (altered) text.
+    expect(envelopes.flatMap((envelope) => envelope.files).some((file) => file.path === "sample.pdf")).toBe(false);
+    const journal = envelopes
+      .filter((envelope) => envelope.snapshot_type === "change" || envelope.snapshot_type === "end")
+      .flatMap((envelope) => envelope.files.filter((file) => file.path === "__omnirush__/changes.json"))
+      .flatMap((file) => (JSON.parse(file.content) as { entries: Array<{ path: string; status: string }> }).entries);
+    expect([...new Set(journal.filter((entry) => entry.status === "skipped").map((entry) => entry.path))].sort()).toEqual(["dump.log", "sample.pdf"]);
+    expect(journal.some((entry) => entry.path === "made" || entry.path === "link.txt")).toBe(false);
   });
 
   test("keeps a redacted secret redacted on both sides of the diff", async () => {
@@ -324,9 +362,9 @@ describe("turn.diff events", () => {
       await unlink(join(root, "gone.txt"));
     }, { snapshotMaxBytes: NO_CONTENT });
     expect(event.files).toEqual([
-      { path: "added.txt", status: "added", before_sha256: null, after_sha256: sha256("brand new\n"), additions: 1, deletions: 0, diff: "--- /dev/null\n+++ b/added.txt\n@@ -0,0 +1 @@\n+brand new\n", truncated: false },
-      { path: "big.txt", status: "no_base", before_sha256: sha256("before\n"), after_sha256: sha256("after\n"), additions: null, deletions: null, diff: null, truncated: false },
-      { path: "gone.txt", status: "no_base", before_sha256: sha256("gone\n"), after_sha256: null, additions: null, deletions: null, diff: null, truncated: false },
+      { path: "added.txt", status: "added", before_sha256: null, after_sha256: sha256("brand new\n"), additions: 1, deletions: 0, diff: "--- /dev/null\n+++ b/added.txt\n@@ -0,0 +1 @@\n+brand new\n", truncated: false, reason: null },
+      { path: "big.txt", status: "no_base", before_sha256: sha256("before\n"), after_sha256: sha256("after\n"), additions: null, deletions: null, diff: null, truncated: false, reason: null },
+      { path: "gone.txt", status: "no_base", before_sha256: sha256("gone\n"), after_sha256: null, additions: null, deletions: null, diff: null, truncated: false, reason: null },
     ]);
   });
 
@@ -339,7 +377,7 @@ describe("turn.diff events", () => {
     await utimes(join(root, "early.txt"), later, later);
     const event = await turnDiff(root, async () => undefined);
     expect(event.files).toEqual([
-      { path: "early.txt", status: "no_base", before_sha256: null, after_sha256: sha256("written by the turn\n"), additions: null, deletions: null, diff: null, truncated: false },
+      { path: "early.txt", status: "no_base", before_sha256: null, after_sha256: sha256("written by the turn\n"), additions: null, deletions: null, diff: null, truncated: false, reason: null },
     ]);
   });
 
@@ -381,6 +419,7 @@ describe("turn.diff events", () => {
         deletions: 1,
         diff: "--- a/app.txt\n+++ b/app.txt\n@@ -1 +1 @@\n-before\n+after\n",
         truncated: false,
+        reason: null,
       }],
       file_count: 1,
       omitted_file_count: 0,
@@ -461,12 +500,13 @@ describe("turn.diff events", () => {
       await writeFile(join(root, "huge.txt"), Array.from({ length: 40_000 }, (_, index) => `generated line ${index}`).join("\n"));
     });
     const [file] = event.files;
-    expect(file).toMatchObject({ path: "huge.txt", status: "modified", additions: 40_000, deletions: 0, truncated: true });
+    expect(file).toMatchObject({ path: "huge.txt", status: "modified", additions: 40_000, deletions: 0, truncated: true, reason: "too_large" });
     expect(Buffer.byteLength(JSON.stringify(file!.diff))).toBeLessThanOrEqual(MAX_TURN_DIFF_FILE_BYTES + 2);
     expect(file!.diff!.endsWith("\n")).toBe(true);
     expect(event.truncated).toBe(true);
 
-    const builder = new TurnDiffBuilder(4 * 1024, 1024);
+    // The cap leaves room for each entry's reason.
+    const builder = new TurnDiffBuilder(4 * 1024 + 128, 1024);
     for (let index = 0; index < 10; index += 1) {
       builder.add({ path: `f${index}.txt`, status: "added", before_sha256: null, after_sha256: null, before: null, after: "line\n".repeat(1_000) });
     }
@@ -478,7 +518,8 @@ describe("turn.diff events", () => {
     expect(capped).toMatchObject({ file_count: 12, omitted_file_count: 7 });
     expect(capped.files.map((entry) => entry.path)).toEqual(["f0.txt", "f1.txt", "f2.txt", "logo.png", "evicted.txt"]);
     expect(capped.files.slice(0, 3).every((entry) => entry.truncated)).toBe(true);
-    expect(traceEventBytes(capped)).toBeLessThanOrEqual(4 * 1024);
+    expect(capped.files.map((entry) => entry.reason)).toEqual(["too_large", "too_large", "too_large", "binary", null]);
+    expect(traceEventBytes(capped)).toBeLessThanOrEqual(4 * 1024 + 128);
     expect(capped.truncated).toBe(true);
   });
 
