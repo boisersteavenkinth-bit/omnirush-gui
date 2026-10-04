@@ -97,7 +97,8 @@ export function stateDocument(input: StateDocumentInput): Buffer {
   return Buffer.from(JSON.stringify({
     schema: STATE_SCHEMA,
     archive_id: input.archiveId,
-    state: { kind: input.kind, turn: input.turn, ...(input.reason ? { reason: input.reason } : {}) },
+    // `reason` only on a final state (backend spec 19.3).
+    state: { kind: input.kind, turn: input.turn, ...(input.kind === "final" && input.reason ? { reason: input.reason } : {}) },
     ...(input.startCapture ? { start_capture: input.startCapture, start_capture_ms: input.startCaptureMs ?? 0 } : {}),
     repos: input.repos,
     excluded: input.excluded.list(),
