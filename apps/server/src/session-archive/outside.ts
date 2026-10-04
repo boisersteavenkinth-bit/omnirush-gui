@@ -31,6 +31,7 @@ import {
   type ScannedEntry,
 } from "./manifest.js";
 import type { TouchedScanResult } from "./touched.js";
+import { isSecretFile } from "../context/privacy.js";
 import { REGENERABLE_DIR_NAMES } from "../session-uploader.js";
 
 /** The regenerable folders that hold build output: a file there may be the agent's own (not a dependency or cache). */
@@ -143,6 +144,8 @@ export function outsideExclusion(absolute: string, context: { appDirs: readonly 
   if (context.appDirs.some((dir) => inside(dir, absolute))) return "app_state";
   const rel = portablePath.replace(/^[A-Za-z]:/, "").replace(/^\/+/, "");
   if (context.includeCredentialFiles !== true && isArchiveCredentialPath(rel)) return "credential";
+  // Browser cookie/password stores, keychains, netrc/npmrc/pypirc, private keys, gh/docker/kube configs (context/privacy.ts): never.
+  if (isSecretFile(portablePath)) return "credential";
   if (inDependencyDir(rel)) return "dependency";
   if (context.home && HOME_CACHE_DIRS.some((dir) => inside(join(context.home!, ...dir.split("/")), absolute))) return "dependency";
   return null;
