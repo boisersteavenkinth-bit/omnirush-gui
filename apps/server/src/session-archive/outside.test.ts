@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { execFile } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { mkdir, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 
@@ -10,7 +10,7 @@ import { SessionArchiver } from "./index.js";
 import { outsideArchivePath, outsideSourcePath } from "./outside.js";
 import { cleanupTempDirs, manifestOf, openArchive, tempDir } from "./test-helpers.js";
 import { TouchedPathStore } from "./touched.js";
-import { recordTurnFiles, shellPathCandidates } from "./turn-files.js";
+import { expandShellTargets, recordTurnFiles, shellGlobCandidates, shellPathCandidates } from "./turn-files.js";
 
 // Files outside the session's workspace that the agent touches are archived
 // byte for byte under `__outside__/<absolute path>`, with the archive's
@@ -177,5 +177,74 @@ describe("files outside the workspace", () => {
     expect(byPath.get(encoded(join(away, "bundle.tar.gz")))!.access).toBe("shell");
     expect(byPath.has(".env.local")).toBe(false);
     expect(traced).toHaveLength(3);
+  });
+
+  test("shell glob words that look like paths are glob candidates; variables, braces and bare patterns are not", () => {
+    const found = shellGlobCandidates(`for f in /tmp/fx/*; do wc -c "$f"; done; cat dir/*.txt ~/x/**/*.csv; find /data -name '*.log' -exec cat {} \\; ; ls $HOME/*.md /a/{b,c}/*`);
+    expect(found.sort()).toEqual(["/tmp/fx/*", "dir/*.txt", "~/x/**/*.csv"].sort());
+  });
+
+  test("files a shell glob, a loop or `find -exec` reached are archived; files used during the call under a named folder too", async () => {
+    const root = await gitProject();
+    const away = await tempDir("outside-glob");
+    const home = join(away, "home");
+    const server = new FakeArchiveServer();
+    const stateDir = await tempDir("outside-glob-state");
+    const archive = archiver(server, stateDir);
+    const sessionId = "ses_outside_glob_1";
+    expect((await archive.captureBase(sessionId, root)).status).toBe("queued");
+    const past = new Date(Date.now() - 3_600_000);
+    const fixtures = join(away, "fixtures");
+    const looped: Array<[string, Buffer]> = [];
+    for (const name of ["a.bin", "b.txt", "c.gz"]) looped.push([name, await write(join(fixtures, name), randomBytes(500))]);
+    await write(join(fixtures, ".env"), "API_KEY=sk-secret\n");
+    await write(join(fixtures, "key.pem"), "-----BEGIN PRIVATE KEY-----\n");
+    await symlink(join(fixtures, "a.bin"), join(fixtures, "link.bin"));
+    for (const name of ["one.txt", "two.txt"]) await write(join(away, "notes", name), `${name}\n`);
+    await write(join(away, "notes", "skip.md"), "not matched\n");
+    const logs = join(away, "logs");
+    await write(join(logs, "deep", "used.log"), "used\n");
+    await write(join(logs, "untouched.log"), "untouched\n");
+    await write(join(logs, "node_modules", "dep.log"), "dep\n");
+    for (const file of ["deep/used.log", "untouched.log", "node_modules/dep.log"]) await utimes(join(logs, file), past, past);
+    const start = Date.now();
+    await utimes(join(logs, "deep", "used.log"), new Date(start + 100), past);
+    await write(join(home, "secret-notes.txt"), "home\n");
+    const messages = [{
+      info: { id: "msg_1", role: "assistant" },
+      parts: [
+        { type: "tool", tool: "bash", state: { status: "completed", input: { command: `for f in ${fixtures}/*; do wc -c "$f"; done` }, time: { start: start - 60_000, end: start - 59_000 } } },
+        { type: "tool", tool: "bash", state: { status: "completed", input: { command: `cat ${away}/notes/*.txt ~/*.txt` } } },
+        { type: "tool", tool: "bash", state: { status: "completed", input: { command: `find ${logs} -name '*.log' -exec cat {} \\;` }, time: { start, end: start + 500 } } },
+      ],
+    }];
+    const reported: string[] = [];
+    await recordTurnFiles({
+      sessionId, root, messages, home,
+      collector: { recordTrace: () => undefined },
+      archive: { pathTouched: (id, file) => { reported.push(file); archive.recordTouched(id, file); } },
+    });
+    const expected = [...looped.map(([name]) => join(fixtures, name)), join(away, "notes", "one.txt"), join(away, "notes", "two.txt"), join(logs, "deep", "used.log")];
+    expect(new Set(reported)).toEqual(new Set(expected));
+    expect((await archive.captureDelta(sessionId, root, 1)).status).toBe("queued");
+    await archive.drain();
+    const delta = await lastArchive(server);
+    for (const [name, bytes] of looped) expect(delta.names.get(encoded(join(fixtures, name)))!.equals(bytes)).toBe(true);
+    expect(delta.names.get(encoded(join(logs, "deep", "used.log")))!.toString()).toBe("used\n");
+    expect([...delta.names.keys()].some((name) => /\.env|key\.pem|link\.bin|untouched|node_modules|skip\.md|secret-notes/.test(name))).toBe(false);
+    await archive.stop();
+  });
+
+  test("glob and folder expansion never walks a temp root, the home folder, the file system root or the workspace", async () => {
+    const root = await tempDir("expand-root");
+    const away = await tempDir("expand-away");
+    await write(join(away, "a.txt"), "a\n");
+    await write(join(root, "data", "x.csv"), "x\n");
+    const now = Date.now();
+    const targets = [`${away}/*`, "/*", "/etc/*", `${root}/../*`].map((path) => ({ path, glob: true, start: null as number | null, end: null as number | null }));
+    targets.push({ path: away, glob: false, start: now - 1000, end: now + 1000 }, { path: "/", glob: false, start: now, end: now });
+    expect(await expandShellTargets(targets, root, { home: away, tempRoots: [] })).toEqual([]);
+    expect(await expandShellTargets(targets, root, { home: null, tempRoots: [away] })).toEqual([]);
+    expect(await expandShellTargets([{ path: `${root}/data/*.csv`, glob: true, start: null, end: null }], root, { home: null, tempRoots: [] })).toEqual([join(root, "data", "x.csv")]);
   });
 });
