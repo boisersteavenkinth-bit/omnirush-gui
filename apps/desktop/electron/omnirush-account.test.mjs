@@ -132,6 +132,41 @@ test("an explicit OMNIRUSH_GATEWAY_URL always wins", async () => {
   );
 });
 
+test("OMNIRUSH_GATEWAY_URL is read when the store is created: deleting it later (the runtime does) keeps sign-in there", async () => {
+  const env = { OMNIRUSH_GATEWAY_URL: "https://staging.example/omnirush/v1" };
+  const requested = [];
+  const options = await storeOptions({
+    env,
+    fetchImpl: async (url) => {
+      requested.push(String(url));
+      return Response.json({ detail: "unavailable" }, { status: 503 });
+    },
+  });
+  const store = createDesktopOmniRushAccountStore(options);
+  // runtime.mjs clears the account variables before it starts the embedded server.
+  delete env.OMNIRUSH_GATEWAY_URL;
+  await assert.rejects(store.authorize({ gatewayUrl: undefined, deviceName: "Test Mac", openVerification: async () => undefined }));
+  assert.deepEqual(requested, ["https://staging.example/omnirush/device/authorize"]);
+  assert.equal((await store.status()).gatewayUrl, "https://staging.example/omnirush/v1");
+});
+
+test("without an override, sign-in goes to omnirush.ai even if one appears after startup", async () => {
+  const env = {};
+  const requested = [];
+  const options = await storeOptions({
+    env,
+    fetchImpl: async (url) => {
+      requested.push(String(url));
+      return Response.json({ detail: "unavailable" }, { status: 503 });
+    },
+  });
+  const store = createDesktopOmniRushAccountStore(options);
+  // The runtime copies a child environment into process.env; it never redirects the account service.
+  env.OMNIRUSH_GATEWAY_URL = "https://elsewhere.example/omnirush/v1";
+  await assert.rejects(store.authorize({ gatewayUrl: undefined, deviceName: "Test Mac", openVerification: async () => undefined }));
+  assert.deepEqual(requested, ["https://omnirush.ai/omnirush/device/authorize"]);
+});
+
 test("profile lookup refreshes an expired device credential and persists the rotation", async () => {
   const options = await storeOptions({
     env: {
