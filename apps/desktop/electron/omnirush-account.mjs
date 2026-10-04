@@ -317,6 +317,10 @@ export function createDesktopOmniRushAccountStore({
   // `X-OmniRush-Client: gui/<version>`; unset sends no header.
   clientVersion = null,
 }) {
+  // An explicit OMNIRUSH_GATEWAY_URL, read once here: the runtime deletes it
+  // from process.env when it starts the embedded server (runtime.mjs), and a
+  // later sign-in must still go to the server it named, not to omnirush.ai.
+  const explicitGatewayUrl = normalizeGatewayUrl(env.OMNIRUSH_GATEWAY_URL);
   const clientHeader = guiClientHeaderValue(clientVersion);
   /** fetchImpl with `X-OmniRush-Client` added to every account request. */
   const send = clientHeader
@@ -704,7 +708,7 @@ export function createDesktopOmniRushAccountStore({
     // OMNIRUSH_GATEWAY_URL, or OMNIRUSH_DEV_MODE=1 together with
     // OMNIRUSH_LOCAL_API=1, points the account service at a local API.
     const localApiSelected = env.OMNIRUSH_DEV_MODE === "1" && env.OMNIRUSH_LOCAL_API === "1";
-    return normalizeGatewayUrl(env.OMNIRUSH_GATEWAY_URL)
+    return explicitGatewayUrl
       ?? normalizeGatewayUrl(await readMacKeychain(KEYCHAIN_SERVICES.gatewayUrl, platform, runSecurity))
       ?? (localApiSelected ? DEV_GATEWAY_URL : DEFAULT_GATEWAY_URL);
   }
