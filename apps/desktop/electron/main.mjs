@@ -1357,6 +1357,7 @@ const omnirushAccountStore = createDesktopOmniRushAccountStore({
   fallbackFilePath: path.join(app.getPath("userData"), "private-credentials", "omnirush-account.json"),
   onKeyringSealed: recordKeyringSealed("omnirush-account.bin"),
   onClientUpdate: (clientUpdate) => updateGate.signal({ kind: "profile", clientUpdate }),
+  clientVersion: app.getVersion(),
   legacyKeychain: legacyKeychainAllowed({
     appIdentifier: APP_IDENTIFIER,
     productionAppIdentifier: TAURI_APP_IDENTIFIER,

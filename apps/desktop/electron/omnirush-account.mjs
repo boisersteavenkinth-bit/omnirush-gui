@@ -12,7 +12,7 @@ import {
   usableSafeStorage,
   writePlaintextCredentialFile,
 } from "./plaintext-credential-file.mjs";
-import { parseClientUpdate } from "./update-gate.mjs";
+import { CLIENT_HEADER, guiClientHeaderValue, parseClientUpdate } from "./update-gate.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -313,7 +313,19 @@ export function createDesktopOmniRushAccountStore({
   // Hears `client_update` from /device/me, sign-in and refresh answers
   // (update-gate.mjs); null when an answer carried none.
   onClientUpdate = null,
+  // The desktop app's version, named on every account request as
+  // `X-OmniRush-Client: gui/<version>`; unset sends no header.
+  clientVersion = null,
 }) {
+  const clientHeader = guiClientHeaderValue(clientVersion);
+  /** fetchImpl with `X-OmniRush-Client` added to every account request. */
+  const send = clientHeader
+    ? (url, init = {}) => {
+      const headers = new Headers(init.headers);
+      headers.set(CLIENT_HEADER, clientHeader);
+      return fetchImpl(url, { ...init, headers });
+    }
+    : fetchImpl;
   /** A `client_update` this account server sent; never lets the gate break sign-in. */
   function reportClientUpdate(payload) {
     if (typeof onClientUpdate !== "function" || !payload || typeof payload !== "object") return;
@@ -810,7 +822,7 @@ export function createDesktopOmniRushAccountStore({
     refreshUrl.pathname += "/device/refresh";
     let response;
     try {
-      response = await fetchImpl(refreshUrl, {
+      response = await send(refreshUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ refresh_token: credentials.refreshToken }),
@@ -895,7 +907,7 @@ export function createDesktopOmniRushAccountStore({
     logoutUrl.pathname += "/device/logout";
     let response;
     try {
-      response = await fetchImpl(logoutUrl, {
+      response = await send(logoutUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ refresh_token: credentials.refreshToken }),
@@ -917,7 +929,7 @@ export function createDesktopOmniRushAccountStore({
   async function fetchProfile(credentials, refreshesLeft = 2) {
     const profileUrl = controlPlaneBase(credentials.gatewayUrl);
     profileUrl.pathname += "/device/me";
-    const response = await fetchImpl(profileUrl, {
+    const response = await send(profileUrl, {
       headers: { Authorization: `Bearer ${credentials.accessToken}` },
       signal: AbortSignal.timeout(20_000),
     });
@@ -943,7 +955,7 @@ export function createDesktopOmniRushAccountStore({
     const base = controlPlaneBase(configured);
     const authorizeUrl = new URL(base);
     authorizeUrl.pathname += "/device/authorize";
-    const issuedResponse = await fetchImpl(authorizeUrl, {
+    const issuedResponse = await send(authorizeUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ device_name: deviceName, platform }),
@@ -960,7 +972,7 @@ export function createDesktopOmniRushAccountStore({
     const deadline = Date.now() + Math.max(60, Number(issued.expires_in) || 600) * 1_000;
     while (Date.now() < deadline) {
       await sleep(interval);
-      const tokenResponse = await fetchImpl(tokenUrl, {
+      const tokenResponse = await send(tokenUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ device_code: issued.device_code }),

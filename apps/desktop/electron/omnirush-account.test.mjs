@@ -1335,3 +1335,46 @@ test("client_update on /device/me reaches the update gate and the account status
   const throwing = createDesktopOmniRushAccountStore({ ...options, onClientUpdate: () => { throw new Error("listener"); } });
   assert.equal((await throwing.status()).connected, true);
 });
+
+test("every account request names the app: X-OmniRush-Client gui/<version>", async () => {
+  const seen = [];
+  const options = await storeOptions({
+    clientVersion: "3.0.3",
+    fetchImpl: async (url, init = {}) => {
+      const pathname = new URL(url).pathname;
+      seen.push({ pathname, client: new Headers(init.headers).get("x-omnirush-client") });
+      if (pathname.endsWith("/device/authorize")) {
+        return Response.json({ device_code: "d", user_code: "U", verification_uri_complete: "http://localhost:5175/c", interval: 0, expires_in: 60 });
+      }
+      if (pathname.endsWith("/device/token") || pathname.endsWith("/device/refresh")) {
+        return Response.json({ access_token: `a${seen.length}`, refresh_token: `r${seen.length}`, gateway_url: "http://localhost:8090/omnirush/v1" });
+      }
+      if (pathname.endsWith("/device/logout")) return new Response(null, { status: 204 });
+      return Response.json({ email: "person@example.com", status: "active" });
+    },
+  });
+  const store = createDesktopOmniRushAccountStore(options);
+  await store.authorize({ gatewayUrl: "http://localhost:8090/omnirush/v1", deviceName: "Test", openVerification: async () => undefined });
+  assert.equal((await store.status()).connected, true);
+  const current = await store.load();
+  await store.refresh(current.accessToken);
+  await store.clear();
+  const paths = seen.map((entry) => entry.pathname);
+  for (const path of ["/omnirush/device/authorize", "/omnirush/device/token", "/omnirush/device/me", "/omnirush/device/refresh", "/omnirush/device/logout"]) {
+    assert.ok(paths.includes(path), `${path} was requested`);
+  }
+  assert.ok(seen.every((entry) => entry.client === "gui/3.0.3"), JSON.stringify(seen));
+});
+
+test("no client version, no client header", async () => {
+  let client = "unset";
+  const options = await storeOptions({
+    env: LEGACY_ENV,
+    fetchImpl: async (_url, init = {}) => {
+      client = new Headers(init.headers).get("x-omnirush-client");
+      return Response.json({ email: "person@example.com", status: "active" });
+    },
+  });
+  await createDesktopOmniRushAccountStore(options).status();
+  assert.equal(client, null);
+});

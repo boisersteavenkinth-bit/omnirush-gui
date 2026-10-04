@@ -18,6 +18,14 @@
  */
 
 export const UPDATE_GATE_CHANNEL = "omnirush:update-gate:changed";
+/** Names this app and its version on every request to omnirush.ai: `gui/<version>`. */
+export const CLIENT_HEADER = "X-OmniRush-Client";
+
+/** `gui/<version>` for a plain version string, or null (never a malformed header). */
+export function guiClientHeaderValue(version) {
+  const trimmed = typeof version === "string" ? version.trim().replace(/^v/i, "") : "";
+  return /^[0-9A-Za-z][0-9A-Za-z.+-]{0,63}$/.test(trimmed) ? `gui/${trimmed}` : null;
+}
 export const DEFAULT_DOWNLOAD_URL = "https://omnirush.ai/download";
 
 /**

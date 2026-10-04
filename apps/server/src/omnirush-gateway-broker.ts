@@ -55,7 +55,28 @@ type BrokerOptions = {
   subagentModelRefused?: (model: string) => boolean;
   /** Hears the gateway's mandatory-update signals (see GatewayUpdateSignal). */
   onUpdateSignal?: (signal: GatewayUpdateSignal) => void;
+  /**
+   * The desktop app's version: every request to omnirush.ai then names it in
+   * `X-OmniRush-Client: gui/<version>`, so the backend knows an updated app
+   * from its first call. Unset (a standalone server) sends no header.
+   */
+  clientVersion?: string;
 };
+
+export const CLIENT_HEADER = "X-OmniRush-Client";
+
+/** `gui/<version>` for a plain version string, or null. */
+export function guiClientHeaderValue(version: string | null | undefined): string | null {
+  const trimmed = version?.trim().replace(/^v/i, "") ?? "";
+  return /^[0-9A-Za-z][0-9A-Za-z.+-]{0,63}$/.test(trimmed) ? `gui/${trimmed}` : null;
+}
+
+/** `init` with the client header added; every other header and option is kept. */
+function withClientHeader(init: RequestInit | undefined, value: string): RequestInit {
+  const headers = new Headers(init?.headers);
+  headers.set(CLIENT_HEADER, value);
+  return { ...init, headers };
+}
 
 /**
  * omnirush.ai asking this app to update: before the deadline every gateway
@@ -880,6 +901,7 @@ export class OmniRushGatewayBroker {
   private readonly subagentRetryDelayMs: number;
   private readonly subagentModelRefused?: (model: string) => boolean;
   private readonly onUpdateSignal?: (signal: GatewayUpdateSignal) => void;
+  private readonly clientHeader: string | null;
   private refreshInFlight: Promise<boolean> | null = null;
   /** Whether the last failed refresh left the session as it was (unreachable, 5xx, contended). */
   private lastRefreshTransient = false;
@@ -898,7 +920,12 @@ export class OmniRushGatewayBroker {
     this.engineToken = options.engineToken?.trim() ?? "";
     this.invalidate = options.credentials?.invalidate;
     this.refreshOwner = options.credentials?.refresh;
-    this.fetcher = options.fetch ?? externalFetch;
+    const fetcher = options.fetch ?? externalFetch;
+    this.clientHeader = guiClientHeaderValue(options.clientVersion);
+    const clientHeader = this.clientHeader;
+    // Every call the broker makes goes to omnirush.ai (model, upload, archive
+    // API, catalog, voice, refresh); presigned S3 part uploads never pass here.
+    this.fetcher = clientHeader ? (input, init) => fetcher(input, withClientHeader(init, clientHeader)) : fetcher;
     this.fileUploader = options.uploadFile;
     this.log = options.log;
     this.sessionUploadBudget = options.sessionUploadBudget ?? SESSION_UPLOAD_BUDGET;
@@ -1055,11 +1082,13 @@ export class OmniRushGatewayBroker {
     return this.withDeviceBearer(async (state) => {
       const requestSignal = signal ? AbortSignal.any([AbortSignal.timeout(timeoutMs), signal]) : AbortSignal.timeout(timeoutMs);
       const url = apiUrl(state.gatewayUrl, SESSION_UPLOAD_ENDPOINT_PATH);
-      const headers = {
+      const headers: Record<string, string> = {
         Authorization: `Bearer ${state.accessToken}`,
         "Content-Type": "application/zstd",
         "X-OmniRush-Session-ID": sessionId,
       };
+      // The Electron file transport bypasses this.fetcher.
+      if (this.clientHeader) headers[CLIENT_HEADER] = this.clientHeader;
       if (this.fileUploader) {
         return untilAborted(this.fileUploader(url, { method: "POST", headers, path, size, signal: requestSignal }), requestSignal);
       }

@@ -150,3 +150,61 @@ describe("mandatory update signals in the gateway broker", () => {
     expect((await subject.uploadSession("ses_gate", new Uint8Array([1]))).status).toBe(200);
   });
 });
+
+describe("X-OmniRush-Client on every broker request", () => {
+  test("model calls, uploads, file uploads, archive API, catalog, voice and refresh name gui/<version>", async () => {
+    const seen: Array<{ path: string; client: string | null }> = [];
+    let expired = true;
+    const fetcher: Fetcher = async (input, init) => {
+      const url = new URL(String(input));
+      const headers = new Headers(init?.headers);
+      seen.push({ path: url.pathname, client: headers.get("x-omnirush-client") });
+      if (url.pathname.endsWith("/device/refresh")) {
+        expired = false;
+        return Response.json({ access_token: "a2", refresh_token: "r2", gateway_url: "https://gateway.example/omnirush/v1" });
+      }
+      if (url.pathname.endsWith("/responses") && expired) return Response.json({ detail: "expired" }, { status: 401 });
+      return Response.json({ ok: true });
+    };
+    const fileHeaders: Array<Record<string, string>> = [];
+    const subject = new OmniRushGatewayBroker({
+      credentials: { gatewayUrl: "https://gateway.example/omnirush/v1", accessToken: "a1", refreshToken: "r1" },
+      engineToken: "local-engine-token",
+      fetch: fetcher,
+      clientVersion: "3.0.3",
+      uploadFile: async (_url, init) => {
+        fileHeaders.push(init.headers);
+        return Response.json({ ok: true });
+      },
+    });
+    expect((await subject.handle(modelRequest(), "responses")).status).toBe(200);
+    await subject.uploadSession("ses_gate", new Uint8Array([1]));
+    await subject.uploadSessionFile("ses_gate", "/dev/null", 0);
+    await subject.archiveRequest("archives/key", { method: "GET" });
+    await subject.modelCatalog();
+    await subject.voiceStatus();
+    const paths = seen.map((entry) => entry.path);
+    for (const path of ["/omnirush/v1/responses", "/omnirush/device/refresh", "/omnirush/collect", "/omnirush/archives/key", "/omnirush/v1/models", "/omnirush/v1/audio/transcriptions"]) {
+      expect(paths).toContain(path);
+    }
+    expect(seen.every((entry) => entry.client === "gui/3.0.3")).toBe(true);
+    expect(fileHeaders).toHaveLength(1);
+    expect(fileHeaders[0]?.["X-OmniRush-Client"]).toBe("gui/3.0.3");
+    // The session id and bearer still go with it.
+    expect(fileHeaders[0]?.["X-OmniRush-Session-ID"]).toBe("ses_gate");
+  });
+
+  test("a standalone server without an app version sends no client header", async () => {
+    let client: string | null = "unset";
+    const subject = new OmniRushGatewayBroker({
+      credentials: { gatewayUrl: "https://gateway.example/omnirush/v1", accessToken: "a", refreshToken: "r" },
+      engineToken: "local-engine-token",
+      fetch: async (_input, init) => {
+        client = new Headers(init?.headers).get("x-omnirush-client");
+        return Response.json({ ok: true });
+      },
+    });
+    await subject.handle(modelRequest(), "responses");
+    expect(client).toBeNull();
+  });
+});

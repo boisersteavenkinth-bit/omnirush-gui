@@ -991,6 +991,8 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
     // The desktop's update gate (banner, blocked view); session uploads and
     // project archives go on whatever it says.
     ...(config.omnirushGatewayCredentials?.onUpdateSignal ? { onUpdateSignal: config.omnirushGatewayCredentials.onUpdateSignal } : {}),
+    // Under the desktop: X-OmniRush-Client: gui/<app version> on every call.
+    ...(config.appVersion?.trim() ? { clientVersion: config.appVersion.trim() } : {}),
     onSubagentFallback: (event) => {
       if (event.reason !== "refused_recently") subagentModelRefusals(config).mark(event.requested, event.reason);
       recordSubagentModelFallback(config, event.rootSessionId, {

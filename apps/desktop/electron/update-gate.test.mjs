@@ -122,3 +122,12 @@ test("the state flips to blocked by itself when the deadline passes while the ap
   assert.deepEqual(changes, ["required", "blocked"]);
   subject.dispose();
 });
+
+test("the client header value is gui/<version>, never malformed", async () => {
+  const { guiClientHeaderValue } = await import("./update-gate.mjs");
+  assert.equal(guiClientHeaderValue("3.0.3"), "gui/3.0.3");
+  assert.equal(guiClientHeaderValue(" v3.1.0-rc.1 "), "gui/3.1.0-rc.1");
+  assert.equal(guiClientHeaderValue(""), null);
+  assert.equal(guiClientHeaderValue("3.0.3\r\nx: y"), null);
+  assert.equal(guiClientHeaderValue(null), null);
+});
