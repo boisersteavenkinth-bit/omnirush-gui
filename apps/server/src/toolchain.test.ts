@@ -215,6 +215,18 @@ test("pip freeze runs only with a Python manifest, against the project venv, pre
   });
   assert.equal(nodeOnly.pip_freeze, undefined);
   assert.equal(nodeOnly.python_executable_kind, "system");
+  assert.equal(nodeOnly.skipped?.npm_ls, "not_installed", "a package.json without node_modules says why there is no npm ls");
+});
+
+test("a script-only Python project (main.py, no manifest) still records pip freeze of its interpreter", async () => {
+  const root = tempProject({ "main.py": "print('hi')\n", "feature.py": "x = 1\n" });
+  const result = await toolchain.collectToolchain(root, {
+    resolve: (command) => (command === "python3" ? "/usr/bin/python3" : null),
+    run: fakeRun({ python3: (args) => (args[0] === "-m" ? ok("requests==2.32.3\n") : ok("Python 3.12.1\n")) }),
+  });
+  assert.equal(result.pip_freeze_tool, "pip");
+  assert.deepEqual(result.pip_freeze, ["requests==2.32.3"]);
+  assert.deepEqual(result.manifests, []);
 });
 
 test("the cache collects once per project and again only when its manifest/lockfile set changes", async () => {

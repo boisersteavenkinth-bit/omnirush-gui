@@ -132,6 +132,7 @@ export type ProjectFiles = {
   lockfiles: string[];
   /** Changes when a manifest, lockfile or root .env file appears, goes, or is rewritten. */
   signature: string;
+  /** A Python project: a Python manifest or lockfile, a virtual environment, or a .py file at the root. */
   python: boolean;
   /** package.json at the root. */
   node: boolean;
@@ -165,13 +166,15 @@ export async function projectFiles(root: string): Promise<ProjectFiles> {
     }
   }));
   const venv = VENV_DIRS.filter((dir) => existsSync(nodePath.join(root, dir, "pyvenv.cfg")));
-  const python = venv.length > 0 || [...manifests, ...lockfiles].some((name) => PYTHON_MANIFESTS.has(name) || REQUIREMENTS.test(name));
+  // A script-only Python project (`main.py`, no manifest) still runs on the interpreter's installed packages.
+  const pyScripts = names.some((name) => /\.py$/i.test(name));
+  const python = venv.length > 0 || pyScripts || [...manifests, ...lockfiles].some((name) => PYTHON_MANIFESTS.has(name) || REQUIREMENTS.test(name));
   const node = names.includes("package.json");
   const nodeModules = node && existsSync(nodePath.join(root, "node_modules"));
   return {
     manifests,
     lockfiles,
-    signature: [...stamps, ...venv.map((dir) => `venv:${dir}`), nodeModules ? "node_modules" : ""].join("|"),
+    signature: [...stamps, ...venv.map((dir) => `venv:${dir}`), nodeModules ? "node_modules" : "", pyScripts ? "py" : ""].join("|"),
     python,
     node,
     nodeModules,
@@ -504,6 +507,8 @@ export async function collectToolchain(root: string, options: CollectOptions = {
   if (python && (venvPython || versions.python3 || versions.python)) {
     toolchain.python_executable_kind = pythonExecutableKind(python, { venv: Boolean(venvPython) });
   }
+  // A package.json without node_modules: nothing is installed for npm ls to list; say so rather than leave it out silently.
+  if (files.node && !files.nodeModules && !skipped.npm_ls) skipped.npm_ls = "not_installed";
   if (Object.keys(skipped).length > 0) toolchain.skipped = skipped;
   if (snapshot) {
     toolchain.pip_freeze = snapshot.lines;
