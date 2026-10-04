@@ -332,3 +332,16 @@ test.skipIf(!hasZstd)("an upload never waits for a slow collection: the start en
   assert.deepEqual(end.environment.toolchain.versions, { node: "v22.19.0" });
   assert.ok(Date.now() - started < 5_000);
 });
+
+test.skipIf(!hasZstd)("a short session still records it: the last snapshot waits briefly for a collection in flight", async () => {
+  const envelopes = await envelopesFrom({
+    toolchain: {
+      resolve: (command) => (command === "node" ? "/usr/bin/node" : null),
+      run: () => new Promise((resolve) => setTimeout(() => resolve(ok("v22.19.0\n")), 800)),
+    },
+  });
+  const start = envelopes.find((envelope) => envelope.snapshot_type === "start");
+  const end = envelopes.find((envelope) => envelope.snapshot_type === "end");
+  assert.equal("toolchain" in start.environment, false);
+  assert.deepEqual(end.environment.toolchain.versions, { node: "v22.19.0" });
+});

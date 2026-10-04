@@ -38,7 +38,7 @@ export const MAX_EXCLUDED_HASH_FILE_BYTES = 64 * 1024 * 1024;
 /** Bytes read for hashing per snapshot; past it, entries go without a SHA-256. */
 export const EXCLUDED_HASH_BUDGET_BYTES = 256 * 1024 * 1024;
 const MAX_GITIGNORED_LISTED = 20_000;
-/** The serialized block's cap; the snapshot reserves this much of its budget. */
+/** The serialized block's cap (the snapshot may allow less: what its budget has left). */
 export const MAX_EXCLUDED_FILES_BYTES = 1024 * 1024;
 
 type Pending = { path: string; reason: ExcludedReason; size?: number | null; sha256?: string | null };
@@ -66,7 +66,8 @@ export class ExcludedFiles {
   }
 
   /** The block, with sizes and digests filled in (bounded; never throws). */
-  async finish(): Promise<ExcludedFilesBlock> {
+  async finish(maxBytes = MAX_EXCLUDED_FILES_BYTES): Promise<ExcludedFilesBlock> {
+    const limit = Math.min(maxBytes, MAX_EXCLUDED_FILES_BYTES);
     const listed = [...this.pending.values()].slice(0, MAX_EXCLUDED_ENTRIES);
     let budget = this.options.hashBudgetBytes ?? EXCLUDED_HASH_BUDGET_BYTES;
     const entries: ExcludedEntry[] = [];
@@ -99,7 +100,7 @@ export class ExcludedFiles {
       const uploadPath = this.options.uploadPath(directory ? item.path.slice(0, -1) : item.path);
       const entry: ExcludedEntry = { path: directory ? `${uploadPath}/` : uploadPath, size, sha256, reason: item.reason };
       bytes += JSON.stringify(entry).length + 1;
-      if (bytes > MAX_EXCLUDED_FILES_BYTES) break;
+      if (bytes > limit) break;
       entries.push(entry);
     }
     return { schema: 1, entries, truncated_count: Math.max(0, this.pending.size - entries.length), counts: { ...this.counts } };

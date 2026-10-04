@@ -23,7 +23,7 @@ import { TurnBaseStore, TurnDiffBuilder, type TurnDiffInput } from "./turn-diff.
 import { SUBAGENT_MODEL_FALLBACK_TRACE } from "./omnirush-swarm.js";
 import { writeFileAtomic } from "./atomic-write.js";
 import { XCODE_CLT_MISSING, gitSkipReason } from "./command-guard.js";
-import { ExcludedFiles, MAX_EXCLUDED_FILES_BYTES, listGitIgnored, type HashCache } from "./excluded-files.js";
+import { ExcludedFiles, listGitIgnored, type HashCache } from "./excluded-files.js";
 import { ToolchainCache, type CollectOptions as ToolchainOptions, type UploadToolchain } from "./toolchain.js";
 
 const execFileAsync = promisify(execFile);
@@ -3703,6 +3703,12 @@ type EnvelopeBody = {
   schemaVersion?: 2 | 3;
 };
 
+/** The part of SNAPSHOT_WRAPPER_MARGIN_BYTES excluded_files may use beyond the content budget's leftover. */
+const EXCLUDED_FILES_MARGIN_BYTES = 256 * 1024;
+
+/** How long a session's last snapshot waits for a toolchain collection still running. */
+const FINAL_TOOLCHAIN_WAIT_MS = 3_000;
+
 /** `{ git_skipped: "xcode_clt_missing" }` when capture may not run git here (command-guard.ts), else nothing. */
 async function gitSkippedField(): Promise<{ git_skipped?: string }> {
   const reason = await gitSkipReason();
@@ -4057,7 +4063,7 @@ export class SessionUploader {
    * denied, binary, oversized, gitignored and capped files; a targeted one
    * only what it inspected.
    */
-  private async excludedFiles(root: string, scan: ScanResult, omitted: readonly SnapshotCandidate[], full: boolean): Promise<unknown> {
+  private async excludedFiles(root: string, scan: ScanResult, omitted: readonly SnapshotCandidate[], full: boolean, maxBytes: number): Promise<unknown> {
     const excluded = new ExcludedFiles(root, { uploadPath: portablePathForUpload, hashes: this.excludedHashes });
     for (const path of scan.deniedPaths ?? []) excluded.add(path, "privacy");
     for (const [path, size] of scan.tooLargePaths ?? []) excluded.add(path, "too_large", { size });
@@ -4067,13 +4073,13 @@ export class SessionUploader {
     }
     for (const path of scan.cappedPaths ?? []) excluded.add(path, "snapshot_cap");
     for (const candidate of omitted) excluded.add(candidate.path, "snapshot_cap", { size: candidate.bytes, sha256: scan.manifest.get(candidate.path)?.sha256 ?? null });
-    return excluded.finish();
+    return excluded.finish(maxBytes);
   }
 
   /** The environment block plus the toolchain of the session's project root, when one was captured. */
-  private async sessionEnvironment(root: string): Promise<UploadEnvironment> {
+  private async sessionEnvironment(root: string, waitMs?: number): Promise<UploadEnvironment> {
     const environment = await this.environment();
-    const toolchain = this.toolchains ? await this.toolchains.get(root).catch(() => null) : null;
+    const toolchain = this.toolchains ? await this.toolchains.get(root, waitMs).catch(() => null) : null;
     return toolchain ? { ...environment, toolchain } : environment;
   }
 
@@ -5345,7 +5351,8 @@ export class SessionUploader {
         ...snapshotPriorityPaths([], git),
       ]);
       const candidates = candidatesFor(scan, state.relevance, gitPaths);
-      const environment = await this.sessionEnvironment(state.root);
+      // The last snapshot waits briefly for a collection still running (toolchain.ts).
+      const environment = await this.sessionEnvironment(state.root, type === "end" ? FINAL_TOOLCHAIN_WAIT_MS : undefined);
       const rootName = workspaceRootName(state.root);
       const touchedPaths = this.touchedPathsForUpload(state);
       const metadata = JSON.stringify({
@@ -5383,9 +5390,12 @@ export class SessionUploader {
       let fixedBytes = serializedBytes(extras) + SNAPSHOT_WRAPPER_MARGIN_BYTES;
       for (const file of leading) fixedBytes += serializedBytes(file) + 1;
       for (const entry of scan.manifest.values()) fixedBytes += Buffer.byteLength(manifestEntryJson(entry)) + 1;
-      const budget = Math.max(0, this.snapshotMaxBytes - fixedBytes - MAX_EXCLUDED_FILES_BYTES);
+      const budget = Math.max(0, this.snapshotMaxBytes - fixedBytes);
       const selection = selectSnapshotContent(candidates, budget);
       const capOmitted: SnapshotCandidate[] = [];
+      // excluded_files gets what the content budget left plus a slice of the
+      // wrapper margin (EXCLUDED_FILES_MARGIN_BYTES), so a full snapshot still lists some.
+      let contentUsed = 0;
       let omittedCount = selection.omittedCount;
       let omittedBytes = selection.omittedBytes;
       const manifest = scan.manifest;
@@ -5420,6 +5430,7 @@ export class SessionUploader {
             if (read.entry.sha256 !== manifest.get(candidate.path)?.sha256) manifest.set(candidate.path, read.entry);
             await emit({ path: candidate.uploadPath, content: read.content, sha256: read.entry.sha256 });
             used += cost;
+            contentUsed = used;
             this.bases.put(read.entry.sha256, read.content, read.entry.bytes);
             await this.bases.writable();
           }
@@ -5440,7 +5451,7 @@ export class SessionUploader {
           excluded_files: await this.excludedFiles(state.root, scan, [
             ...candidates.filter((candidate) => !selection.selected.has(candidate.path)),
             ...capOmitted,
-          ], !(targeted && previous !== null)),
+          ], !(targeted && previous !== null), budget - contentUsed + EXCLUDED_FILES_MARGIN_BYTES),
         }),
       });
       if (omittedCount > 0) {

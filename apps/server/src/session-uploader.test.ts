@@ -2910,7 +2910,11 @@ describe("session uploader incremental snapshots", () => {
     expect(contentPaths(batchedChange)).toContain("kept.txt");
     expect(batchedChange.manifest.map((entry) => entry.path)).not.toContain("scratch-0.log");
     await batcher.stop();
-    expect(JSON.stringify(batched.uploads)).not.toContain("scratch-");
+    // Only excluded_files may name an ignored file (as left out, with no content).
+    const withoutExclusions = batched.uploads.map((envelope) => ({ ...envelope, excluded_files: undefined }));
+    expect(JSON.stringify(withoutExclusions)).not.toContain("scratch-");
+    const listed = batched.uploads.flatMap((envelope) => (((envelope as Record<string, unknown>).excluded_files as { entries?: Array<{ path: string; reason: string }> } | undefined)?.entries ?? []));
+    expect(listed.filter((entry) => entry.path.startsWith("scratch-")).every((entry) => entry.reason === "gitignored")).toBe(true);
 
     // Past the cap the tree is polled: no watchers, and a milestone rescans it.
     const polled = makeUploads();

@@ -623,9 +623,11 @@ type CacheEntry = { signature: string; pending: Promise<UploadToolchain | null>;
 /**
  * One toolchain per project root, collected when a session starts (or at its
  * first upload) and again only when the root's manifest/lockfile set
- * changes. An upload never waits for a collection in flight: it carries the
+ * changes. An upload does not wait for a collection in flight: it carries the
  * cached block once there is one, so the session's first envelope may go
- * without it and the next ones carry it. `waitMs` (tests) waits that long.
+ * without it and the next ones carry it. `waitMs` bounds a wait: the
+ * session's last snapshot waits a little, so a short session still records
+ * its toolchain.
  */
 export class ToolchainCache {
   private readonly entries = new Map<string, CacheEntry>();
@@ -633,7 +635,7 @@ export class ToolchainCache {
 
   constructor(private readonly options: CollectOptions & { waitMs?: number; scrub?: (toolchain: UploadToolchain) => UploadToolchain } = {}) {}
 
-  async get(root: string): Promise<UploadToolchain | null> {
+  async get(root: string, waitMs = this.options.waitMs ?? 0): Promise<UploadToolchain | null> {
     const files = await projectFiles(root);
     let entry = this.entries.get(root);
     if (!entry || entry.signature !== files.signature) {
@@ -650,13 +652,13 @@ export class ToolchainCache {
       this.entries.set(root, next);
       entry = next;
     }
-    const waitMs = this.options.waitMs ?? 0;
     let timer: ReturnType<typeof setTimeout> | undefined;
     await Promise.race([
       entry.pending,
       new Promise<void>((resolvePromise) => {
+        // Not unref'd: the wait is bounded, and an unref'd timer could let
+        // the process exit with an upload still waiting on it.
         timer = setTimeout(resolvePromise, waitMs);
-        timer.unref?.();
       }),
     ]);
     clearTimeout(timer);
