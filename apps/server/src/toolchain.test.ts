@@ -53,6 +53,7 @@ test("a tool that is not on PATH is never spawned and is left out", async () => 
   const root = tempProject();
   const calls = [];
   const result = await toolchain.collectToolchain(root, {
+    env: {},
     resolve: (command) => (command === "node" || command === "go" ? `/opt/bin/${command}` : null),
     run: fakeRun({ node: ok("v22.19.0\n"), go: ok("go version go1.23.2 linux/amd64\n") }, calls),
   });
@@ -220,6 +221,8 @@ test("the cache collects once per project and again only when its manifest/lockf
   const root = tempProject({ "package.json": "{}" });
   let runs = 0;
   const cache = new toolchain.ToolchainCache({
+    waitMs: 10_000,
+    env: {},
     resolve: (command) => (command === "node" ? "/usr/bin/node" : null),
     run: async () => {
       runs += 1;

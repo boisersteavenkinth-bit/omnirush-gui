@@ -18,6 +18,16 @@ import { constants as osConstants, setPriority } from "node:os";
 import nodePath from "node:path";
 
 import { cltSkipReason, resolveCommand } from "./command-guard.js";
+import {
+  collectEnvFiles,
+  collectEnvNamesRead,
+  shellInfo,
+  systemInfo,
+  type EnvFile,
+  type SecretChecks,
+  type ShellInfo,
+  type SystemInfo,
+} from "./project-env.js";
 
 export const TOOLCHAIN_SCHEMA_VERSION = 1;
 /** Per version probe. */
@@ -48,7 +58,21 @@ export type UploadToolchain = {
   pip_freeze?: string[];
   pip_freeze_tool?: "pip" | "uv";
   pip_freeze_truncated?: boolean;
+  /** `npm ls --json --depth=0`, reduced to direct dependency versions; only with package.json and node_modules. */
+  npm_ls?: NpmLs;
+  /** OS release, WSL, CPU. */
+  system?: SystemInfo;
+  /** Shell name and version, version managers in use, PATH (home as `~`, never the user name). */
+  shell?: ShellInfo;
+  /** .env files (templates excluded): key names, values only when clearly not secret. */
+  env_files?: EnvFile[];
+  /** Environment variable names the project's code reads. */
+  env_names_read?: string[];
+  env_names_read_truncated?: boolean;
 };
+
+export type NpmLs = { name?: string; version?: string; dependencies: Record<string, string>; truncated?: boolean };
+export const MAX_NPM_LS_BYTES = 64 * 1024;
 
 type Probe = {
   /** Key in `versions`. */
@@ -57,6 +81,8 @@ type Probe = {
   args: string[];
   /** Read the version from stderr (java prints `-version` there). */
   stderr?: boolean;
+  /** The line holding the version, when it is not the first (gradle). */
+  pick?: RegExp;
 };
 
 export const TOOLCHAIN_PROBES: readonly Probe[] = [
@@ -78,6 +104,9 @@ export const TOOLCHAIN_PROBES: readonly Probe[] = [
   { key: "gcc", command: "gcc", args: ["--version"] },
   { key: "clang", command: "clang", args: ["--version"] },
   { key: "uv", command: "uv", args: ["--version"] },
+  { key: "mvn", command: "mvn", args: ["-v"] },
+  { key: "gradle", command: "gradle", args: ["-v"], pick: /^Gradle\s+\S+/ },
+  { key: "cmake", command: "cmake", args: ["--version"] },
   { key: "poetry", command: "poetry", args: ["--version"] },
 ];
 
@@ -101,9 +130,13 @@ const VENV_DIRS = [".venv", "venv", "env"];
 export type ProjectFiles = {
   manifests: string[];
   lockfiles: string[];
-  /** Changes when a manifest or lockfile appears, goes, or is rewritten. */
+  /** Changes when a manifest, lockfile or root .env file appears, goes, or is rewritten. */
   signature: string;
   python: boolean;
+  /** package.json at the root. */
+  node: boolean;
+  /** node_modules/ at the root (installed dependencies, for npm ls). */
+  nodeModules: boolean;
 };
 
 /** The manifest and lockfile names at `root` and a signature of their set and stamps. */
@@ -122,7 +155,8 @@ export async function projectFiles(root: string): Promise<ProjectFiles> {
   }
   manifests.sort();
   lockfiles.sort();
-  const stamps = await Promise.all([...manifests, ...lockfiles].map(async (name) => {
+  const envFiles = names.filter((name) => /^\.env(?:\..+)?$/.test(name)).sort();
+  const stamps = await Promise.all([...manifests, ...lockfiles, ...envFiles].map(async (name) => {
     try {
       const info = await stat(nodePath.join(root, name));
       return `${name}:${info.size}:${Math.trunc(info.mtimeMs)}`;
@@ -132,7 +166,16 @@ export async function projectFiles(root: string): Promise<ProjectFiles> {
   }));
   const venv = VENV_DIRS.filter((dir) => existsSync(nodePath.join(root, dir, "pyvenv.cfg")));
   const python = venv.length > 0 || [...manifests, ...lockfiles].some((name) => PYTHON_MANIFESTS.has(name) || REQUIREMENTS.test(name));
-  return { manifests, lockfiles, signature: [...stamps, ...venv.map((dir) => `venv:${dir}`)].join("|"), python };
+  const node = names.includes("package.json");
+  const nodeModules = node && existsSync(nodePath.join(root, "node_modules"));
+  return {
+    manifests,
+    lockfiles,
+    signature: [...stamps, ...venv.map((dir) => `venv:${dir}`), nodeModules ? "node_modules" : ""].join("|"),
+    python,
+    node,
+    nodeModules,
+  };
 }
 
 // --- command resolution ------------------------------------------------------
@@ -200,7 +243,7 @@ export const runCommand: RunCommand = (file, args, { cwd, timeoutMs, maxBytes })
   // Probes run in the background: never at the expense of the agent's own work.
   if (child.pid) {
     try {
-      setPriority(child.pid, osConstants.priority.PRIORITY_LOW);
+      setPriority(child.pid, osConstants.priority.PRIORITY_BELOW_NORMAL);
     } catch {
       // Not permitted here; it runs at normal priority.
     }
@@ -256,8 +299,8 @@ export function stripPaths(text: string): string {
 }
 
 /** The version line a probe printed: its first non-empty line, paths stripped, capped. */
-export function parseProbeOutput(stdout: string, stderr: string, preferStderr = false): string | null {
-  const pick = (text: string) => text.replace(ANSI, "").split(/\r?\n/).map((line) => line.trim()).find((line) => line.length > 0) ?? "";
+export function parseProbeOutput(stdout: string, stderr: string, preferStderr = false, line?: RegExp): string | null {
+  const pick = (text: string) => text.replace(ANSI, "").split(/\r?\n/).map((part) => part.trim()).find((part) => (line ? line.test(part) : part.length > 0)) ?? "";
   const first = preferStderr ? (pick(stderr) || pick(stdout)) : (pick(stdout) || pick(stderr));
   if (!first) return null;
   const clean = stripPaths(first).replace(/[\u0000-\u001f\u007f]/g, " ").trim();
@@ -377,6 +420,10 @@ export type CollectOptions = {
   platform?: NodeJS.Platform;
   now?: () => number;
   files?: ProjectFiles;
+  /** The capture's secret rules, for .env values and the source scan. */
+  checks?: SecretChecks;
+  /** Environment for the shell and version-manager detection (process.env). */
+  env?: NodeJS.ProcessEnv;
 };
 
 /**
@@ -410,7 +457,7 @@ export async function collectToolchain(root: string, options: CollectOptions = {
     if (platform === "darwin" && javaWouldPrompt(probe.command, file)) return null;
     const result = await run(file, probe.args, { cwd: root, timeoutMs: probeTimeoutMs, maxBytes: 16 * 1024 }).catch(() => null);
     if (!result || result.code !== 0) return null;
-    const version = parseProbeOutput(result.stdout, result.stderr, probe.stderr);
+    const version = parseProbeOutput(result.stdout, result.stderr, probe.stderr, probe.pick);
     return version ? [probe.key, version] : null;
   };
 
@@ -423,6 +470,20 @@ export async function collectToolchain(root: string, options: CollectOptions = {
         return version ? ["venv_python", version] : null;
       })
     : Promise.resolve(null);
+  const checks = options.checks ?? {};
+  // One-shot text runs (sw_vers, the shell's --version), under the same guard.
+  const runText = async (file: string, args: string[]): Promise<string | null> => {
+    if (await cltSkipReason(nodePath.basename(file), file)) return null;
+    const result = await run(file, args, { cwd: root, timeoutMs: probeTimeoutMs, maxBytes: 16 * 1024 }).catch(() => null);
+    return result && result.code === 0 ? result.stdout || result.stderr : null;
+  };
+  const extras = Promise.all([
+    files.node && files.nodeModules ? npmLs(root, where, run, options.freezeTimeoutMs ?? FREEZE_TIMEOUT_MS, skipped) : Promise.resolve(null),
+    systemInfo(runText, platform).catch(() => null),
+    shellInfo(runText, { env: options.env, platform }).catch(() => null),
+    collectEnvFiles(root, checks).catch(() => []),
+    collectEnvNamesRead(root, checks).catch(() => ({ names: [], truncated: false })),
+  ]);
   const pairs = await Promise.all([...(options.probes ?? TOOLCHAIN_PROBES).map(versionOf), venvVersion]);
   const versions: Record<string, string> = {};
   for (const pair of pairs) {
@@ -449,8 +510,71 @@ export async function collectToolchain(root: string, options: CollectOptions = {
     toolchain.pip_freeze_tool = snapshot.tool;
     if (snapshot.truncated) toolchain.pip_freeze_truncated = true;
   }
+  const [npm, system, shell, envFiles, namesRead] = await extras;
+  if (npm) toolchain.npm_ls = npm;
+  if (system) toolchain.system = system;
+  if (shell) toolchain.shell = shell;
+  if (envFiles.length > 0) toolchain.env_files = envFiles;
+  if (namesRead.names.length > 0) toolchain.env_names_read = namesRead.names;
+  if (namesRead.truncated) toolchain.env_names_read_truncated = true;
   toolchain.duration_ms = Math.max(0, Math.round(now() - started));
   return toolchain;
+}
+
+const NPM_NAME = /^(?:@[a-z0-9._~-]+\/)?[a-z0-9._~-]+$/i;
+const NPM_VERSION = /^[0-9A-Za-z.+-]{1,64}$/;
+
+/**
+ * `npm ls --json --depth=0` reduced to `{name, version, dependencies: {dep:
+ * version}}`: a dependency with no plain version (a link, a git or file
+ * reference) is `local`, a missing one `missing`; nothing else (resolved
+ * URLs, paths) is kept. Capped at MAX_NPM_LS_BYTES.
+ */
+export function summarizeNpmLs(stdout: string): NpmLs | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object") return null;
+  const tree = parsed as { name?: unknown; version?: unknown; dependencies?: Record<string, { version?: unknown; missing?: unknown }> };
+  const summary: NpmLs = { dependencies: {} };
+  if (typeof tree.name === "string" && NPM_NAME.test(tree.name)) summary.name = tree.name;
+  if (typeof tree.version === "string" && NPM_VERSION.test(tree.version)) summary.version = tree.version;
+  let bytes = JSON.stringify(summary).length;
+  for (const [name, dep] of Object.entries(tree.dependencies ?? {})) {
+    if (!NPM_NAME.test(name)) continue;
+    const version = typeof dep?.version === "string" && NPM_VERSION.test(dep.version) ? dep.version : dep?.missing ? "missing" : "local";
+    const size = JSON.stringify(name).length + JSON.stringify(version).length + 2;
+    if (bytes + size > MAX_NPM_LS_BYTES) {
+      summary.truncated = true;
+      break;
+    }
+    summary.dependencies[name] = version;
+    bytes += size;
+  }
+  return summary;
+}
+
+async function npmLs(
+  root: string,
+  where: (command: string) => string | null,
+  run: RunCommand,
+  timeoutMs: number,
+  skipped: Record<string, string>,
+): Promise<NpmLs | null> {
+  const npm = where("npm");
+  if (!npm) return null;
+  const reason = await cltSkipReason("npm", npm);
+  if (reason) {
+    skipped.npm_ls = reason;
+    return null;
+  }
+  const result = await run(npm, ["ls", "--json", "--depth=0"], { cwd: root, timeoutMs, maxBytes: MAX_PROBE_OUTPUT_BYTES * 4 }).catch(() => null);
+  // npm ls exits 1 for missing or extraneous packages and still prints the tree.
+  if (!result || (result.code !== 0 && result.code !== 1)) return null;
+  return summarizeNpmLs(result.stdout);
 }
 
 async function freezeSnapshot(
