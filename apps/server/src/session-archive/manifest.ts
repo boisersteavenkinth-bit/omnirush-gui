@@ -26,7 +26,7 @@ export const RESERVED_ROOT_NAME = "__omnirush__";
 export const OUTSIDE_ROOT_NAME = "__outside__";
 /** Capture v2: prompt attachments (attachments.ts); a workspace entry of that name is reserved too. */
 export { ATTACHMENTS_ROOT_NAME };
-/** A git config file larger than this is archived as it is (no real config is): it is never read whole to scrub it. */
+/** A git config file larger than this is left out (`too_large`): it is never read whole to scrub it, and never archived raw. */
 const MAX_SCRUBBED_CONFIG_BYTES = 1024 * 1024;
 export const STAT_CONCURRENCY = 64;
 export const HASH_CONCURRENCY = 6;
@@ -513,11 +513,10 @@ export async function scrubConfigEntry(absolute: string, entry: ScannedEntry, me
     metrics.bytesHashed += raw.length;
     const scrub = scrubGitConfig(raw.toString("utf8"));
     const bytes = scrub.changed ? Buffer.from(scrub.text, "utf8") : raw;
-    if (scrub.changed) {
-      entry.content = bytes;
-      entry.size = bytes.length;
-      entry.scrubbed = true;
-    }
+    // Pass 2 writes exactly these checked bytes: a config rewritten after this read never reaches the archive.
+    entry.content = bytes;
+    entry.size = bytes.length;
+    if (scrub.changed) entry.scrubbed = true;
     entry.sha256 = createHash("sha256").update(bytes).digest("hex");
     return true;
   } catch {
@@ -623,7 +622,13 @@ export async function scanArchiveTree(root: string, options: ScanOptions = {}): 
       return;
     }
     const entry: ScannedEntry = { path: rel, type: "file", size: Number(stats.size), sha256: null, ...statFields(stats) };
-    if (isGitConfigPath(rel) && entry.size <= MAX_SCRUBBED_CONFIG_BYTES) {
+    if (isGitConfigPath(rel) && entry.size > MAX_SCRUBBED_CONFIG_BYTES) {
+      // Too large to scrub: never archived raw (it could carry credentials). Listed with its size.
+      excluded.special += 1;
+      note(rel, "too_large", "file", entry.size);
+      return;
+    }
+    if (isGitConfigPath(rel)) {
       // Read and scrubbed in the hash pass; never from the cache (its bytes are needed for pass 2).
       toHash.push(entry);
       entries.push(entry);
@@ -691,7 +696,7 @@ export async function scanArchiveTree(root: string, options: ScanOptions = {}): 
   const buffers: Buffer[] = [];
   await forEachBounded(toHash, options.hashConcurrency ?? HASH_CONCURRENCY, async (entry) => {
     signal?.throwIfAborted();
-    if (isGitConfigPath(entry.path) && entry.size <= MAX_SCRUBBED_CONFIG_BYTES) {
+    if (isGitConfigPath(entry.path)) {
       if (!(await scrubConfigEntry(join(root, ...entry.path.split("/")), entry, metrics))) unreadable.add(entry);
       return;
     }

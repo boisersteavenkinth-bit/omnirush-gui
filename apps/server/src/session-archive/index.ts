@@ -423,7 +423,6 @@ export class SessionArchiver {
       tmp: join(this.dir, "tmp"),
       touched: join(this.dir, "touched"),
     };
-    this.attachments = new AttachmentStore(join(this.dir, "attachments"), (path) => !this.includeCredentials && isUploadPathDenied(path));
     this.log = options.log ?? (() => undefined);
     this.now = options.now ?? (() => new Date());
     this.random = options.random ?? { uuid: () => randomUUID(), bytes: (n) => randomBytes(n) };
@@ -451,6 +450,7 @@ export class SessionArchiver {
     this.folderGate = options.folderGate;
     this.appDirs = [stateDir, ...(options.excludedDirs ?? []).map((dir) => resolve(dir))];
     this.includeCredentials = options.archiveIncludeCredentialFiles === true;
+    this.attachments = new AttachmentStore(join(this.dir, "attachments"), (path) => !this.includeCredentials && isUploadPathDenied(path), { appDirs: this.appDirs, includeCredentialFiles: this.includeCredentials });
     this.touched = new TouchedPathStore(this.dirs.touched, {
       ready: () => this.start(),
       modeOf: async (sessionId) => {

@@ -12,11 +12,34 @@
  * sends each once. Identical in the CLI and the desktop app.
  */
 import { createHash } from "node:crypto";
-import { appendFile, lstat, mkdir, open, readFile, rm } from "node:fs/promises";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { appendFile, lstat, mkdir, open, readFile, realpath, rm } from "node:fs/promises";
+import { homedir } from "node:os";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { stateKey } from "./files.js";
+import { outsideExclusion } from "./outside.js";
+
+/** How the store judges a file attached from outside the workspace (outside.ts's exclusions). */
+export type AttachmentOutsideRules = { appDirs: readonly string[]; includeCredentialFiles: boolean; home?: string | null };
+
+function safeHome(): string | null {
+  try {
+    return homedir() || null;
+  } catch {
+    return null;
+  }
+}
+
+/** An absolute path with the home directory written as `~` (portable `/`), so no account name is stored. */
+export function homeRelativePath(absolute: string, home: string | null): string {
+  const portable = absolute.split(sep).join("/");
+  if (!home) return portable;
+  const rel = relative(home, absolute);
+  if (rel === "") return "~";
+  if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) return portable;
+  return `~/${rel.split(sep).join("/")}`;
+}
 
 export const ATTACHMENTS_ROOT_NAME = "__attachments__";
 /** One attachment's bytes, at most (the desktop's prompt attachment cap). */
@@ -159,6 +182,7 @@ export class AttachmentStore {
   constructor(
     private readonly dir: string,
     private readonly isDenied: (relativePath: string) => boolean = () => false,
+    private readonly outside: AttachmentOutsideRules = { appDirs: [], includeCredentialFiles: false },
   ) {}
 
   private sessionDir(sessionId: string): string {
@@ -185,11 +209,21 @@ export class AttachmentStore {
           let sourcePath: string | null = null;
           let bytes = source.data;
           if (source.file) {
-            const rel = within(resolve(root), source.file);
-            // A credential file is never copied, wherever it was attached from.
+            // The file as reached through real folders (a folder link cannot hide where it is).
+            let real = source.file;
+            try {
+              real = join(await realpath(dirname(source.file)), basename(source.file));
+            } catch {
+              continue;
+            }
+            const home = this.outside.home === undefined ? safeHome() : this.outside.home;
+            const rootReal = await realpath(root).catch(() => resolve(root));
+            const rel = within(resolve(root), source.file) ?? within(rootReal, real);
+            // A credential file, an app's state or a system file is never copied, wherever it was attached from.
             if (rel !== null && this.isDenied(rel)) continue;
-            sourcePath = rel ?? source.file;
-            bytes = await readAttachedFile(source.file);
+            if (rel === null && [source.file, real].some((form) => outsideExclusion(form, { ...this.outside, home }) !== null)) continue;
+            sourcePath = rel ?? homeRelativePath(source.file, home);
+            bytes = await readAttachedFile(real);
           }
           if (!bytes || bytes.length > MAX_ATTACHMENT_BYTES) continue;
           await mkdir(dir, { recursive: true, mode: 0o700 });

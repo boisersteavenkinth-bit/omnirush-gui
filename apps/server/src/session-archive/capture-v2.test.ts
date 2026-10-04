@@ -1,15 +1,15 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { zstdDecompressSync } from "node:zlib";
 
 import { filterUploadDiff, collectGitBlock, SessionUploader, utf8DiffText } from "../session-uploader.js";
-import { attachmentArchivePath, attachmentsFromMessages } from "./attachments.js";
+import { AttachmentStore, attachmentArchivePath, attachmentsFromMessages, homeRelativePath } from "./attachments.js";
 import { binaryReason } from "./binary.js";
 import { isGitConfigPath, scrubGitConfig } from "./git-scrub.js";
 import { SessionArchiver } from "./index.js";
@@ -206,6 +206,50 @@ describe("capture v2", () => {
     expect(readFileSync(join(root, ".git", "config")).equals(userConfig)).toBe(true);
     const rootRepo = base.state!.repos.find((repo) => repo.position === "root")!;
     expect([rootRepo.remote, rootRepo.stash_count, rootRepo.archived]).toEqual(["https://github.com/o/r.git", 1, "byte_exact"]);
+  });
+
+  test("#23: a git config over the scrub cap is left out as too_large, never archived raw; a submodule config too", async () => {
+    const { archiver, open } = rig();
+    const root = temp("omnirush-v2-bigconfig-");
+    write(join(root, "a.txt"), "a\n");
+    git(root, "init", "-q");
+    const padding = `# ${"x".repeat(120)}\n`.repeat(9_000);
+    appendFileSync(join(root, ".git", "config"), `[remote "origin"]\n\turl = https://u:tok_BIGSECRET@example.com/r.git\n${padding}`);
+    write(join(root, ".git", "modules", "sub", "config"), `[http]\n\textraheader = Authorization: Bearer tok_SUBSECRET\n${padding}`);
+    const base = await open(await archiver.captureBase("ses_v2_big_config", root, 0));
+    for (const config of [".git/config", ".git/modules/sub/config"]) {
+      expect(base.entry(config)).toBeUndefined();
+      expect(base.members.has(config)).toBe(false);
+      const item = base.state!.excluded.find((entry) => entry.path === config) as { reason: string; size?: number } | undefined;
+      expect(item?.reason).toBe("too_large");
+      expect(item?.size).toBe(statSync(join(root, ...config.split("/"))).size);
+    }
+    for (const member of base.members.values()) {
+      expect(member.content.includes("tok_BIGSECRET") || member.content.includes("tok_SUBSECRET")).toBe(false);
+    }
+  });
+
+  test("#11: attachments from outside the project never copy credentials (~/.ssh, ~/.aws, .env); source paths name home as ~", async () => {
+    const stateDir = temp("omnirush-v2-attach-state-");
+    const home = temp("omnirush-v2-home-");
+    const root = join(home, "work", "proj");
+    write(join(root, "a.txt"), "a\n");
+    write(join(home, ".ssh", "id_ed25519"), "-----BEGIN OPENSSH PRIVATE KEY-----\n");
+    write(join(home, ".aws", "credentials"), "[default]\naws_secret_access_key = x\n");
+    write(join(home, "Downloads", ".env"), "TOKEN=x\n");
+    const photo = write(join(home, "Pictures", "photo.png"), randomBytes(400));
+    const store = new AttachmentStore(join(stateDir, "att"), () => false, { appDirs: [stateDir], includeCredentialFiles: false, home });
+    const file = (path: string, index: number) => ({ messageId: "msg_priv", index, name: basename(path), mime: "application/octet-stream", data: null, file: path });
+    const added = await store.add("ses_v2_attach_priv", root, [
+      file(join(home, ".ssh", "id_ed25519"), 0),
+      file(join(home, ".aws", "credentials"), 1),
+      file(join(home, "Downloads", ".env"), 2),
+      file(join(home, "Pictures", "photo.png"), 3),
+    ]);
+    expect(added.map((record) => [record.name, record.source_path])).toEqual([["photo.png", "~/Pictures/photo.png"]]);
+    expect(readFileSync(added[0]!.blob).equals(photo)).toBe(true);
+    expect(JSON.stringify(added.map(({ blob: _blob, ...rest }) => rest))).not.toContain(home);
+    expect(homeRelativePath("/opt/data/x.bin", home)).toBe("/opt/data/x.bin");
   });
 
   test("#15: the repository above the folder, one in a subfolder, and one without commits", async () => {
