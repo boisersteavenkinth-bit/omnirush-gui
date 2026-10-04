@@ -14,6 +14,7 @@
 import { spawn } from "node:child_process";
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { readdir, stat } from "node:fs/promises";
+import { constants as osConstants, setPriority } from "node:os";
 import nodePath from "node:path";
 
 import { cltSkipReason, resolveCommand } from "./command-guard.js";
@@ -195,6 +196,14 @@ export const runCommand: RunCommand = (file, args, { cwd, timeoutMs, maxBytes })
   } catch {
     resolvePromise(null);
     return;
+  }
+  // Probes run in the background: never at the expense of the agent's own work.
+  if (child.pid) {
+    try {
+      setPriority(child.pid, osConstants.priority.PRIORITY_LOW);
+    } catch {
+      // Not permitted here; it runs at normal priority.
+    }
   }
   const out: Buffer[] = [];
   const err: Buffer[] = [];
