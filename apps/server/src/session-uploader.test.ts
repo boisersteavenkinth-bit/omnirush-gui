@@ -387,7 +387,7 @@ describe("session uploader privacy", () => {
 
 type Envelope = Record<string, unknown> & {
   files: Array<{ path: string; content: string; sha256: string }>;
-  manifest: Array<{ path: string; sha256: string; size: number }>;
+  manifest: Array<{ path: string; sha256: string; size: number; mode?: number; type?: "symlink"; target?: string; broken?: boolean; binary?: boolean; archived?: string }>;
   workspace: { root_name: string; git: Record<string, unknown> | null };
   environment: Record<string, unknown>;
   privacy: Record<string, unknown>;
@@ -571,7 +571,10 @@ describe("session uploader envelope v2", () => {
     expect(gitBlock.diff).not.toContain("blob.bin");
     expect(gitBlock.diff).not.toContain("Binary files");
     expect(gitBlock.diff_truncated).toBe(false);
-    expect(start.manifest.map((entry) => entry.path).sort()).toEqual(["app.txt", "staged.txt"]);
+    // Capture v2: the binary is listed with its raw digest (its bytes go to the byte-exact archive), never as text.
+    expect(start.manifest.filter((entry) => entry.binary !== true).map((entry) => entry.path).sort()).toEqual(["app.txt", "staged.txt"]);
+    expect(start.manifest.find((entry) => entry.path === "blob.bin")).toMatchObject({ binary: true, archived: "byte_exact", size: 6 });
+    expect(start.files.some((file) => file.path === "blob.bin")).toBe(false);
     const serialized = JSON.stringify(uploads);
     for (const forbidden of ["ghp_secrettoken123456", "oauth2:", "hunter2", "abcdef123456", "jane@example.com", ".git/"]) {
       expect(serialized).not.toContain(forbidden);
@@ -3320,7 +3323,9 @@ describe("session uploader incremental snapshots", () => {
     await sessionUploader.idle(sessionId);
     const change = changes(uploads)[0]!;
     expect(contentPaths(change)).toEqual(["src/app.ts"]);
-    expect(change.manifest.map((entry) => entry.path)).toEqual(["src/app.ts"]);
+    // Capture v2: the symlink itself is listed with its target (never followed, nothing behind it read).
+    expect(change.manifest.filter((entry) => entry.type !== "symlink").map((entry) => entry.path)).toEqual(["src/app.ts"]);
+    expect(change.manifest.find((entry) => entry.path === "linked")).toMatchObject({ type: "symlink", target: "../shared-lib", broken: false });
     expect(change.files.find((file) => file.path === "__omnirush__/changes.json")?.content).toContain('"path":"src/app.ts"');
     await sessionUploader.stop();
     const all = JSON.stringify(uploads);
