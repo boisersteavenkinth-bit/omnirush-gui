@@ -66,6 +66,22 @@ const PART_MIN_BYTES_PER_MS = 32;
 /** A part is read from the sealed file in slices this big, checking for an abort between them. */
 const PART_READ_SLICE_BYTES = 1024 * 1024;
 const RETRYABLE_STATUSES = new Set([408, 425, 429, 500, 502, 503, 504]);
+
+/**
+ * An API answer worth trying again later (the job stays queued, also for the
+ * next start): the statuses above, any other 5xx but 501/505 (507: the
+ * server's disk is full), and a 413 that carries a Retry-After (load
+ * shedding, not a too-large archive). `soon` is false when another attempt
+ * within this drain is pointless (507, or the server said when to return).
+ */
+function retryableApiStatus(response: Response): { retry: boolean; soon: boolean } {
+  const retryAfter = response.headers?.get?.("retry-after")?.trim() || null;
+  if (RETRYABLE_STATUSES.has(response.status)) return { retry: true, soon: retryAfter === null };
+  if (response.status >= 500 && response.status <= 599 && response.status !== 501 && response.status !== 505) {
+    return { retry: true, soon: retryAfter === null && response.status !== 507 };
+  }
+  return { retry: response.status === 413 && retryAfter !== null, soon: false };
+}
 const PART_RETRYABLE_STATUSES = new Set([400, 408, 429, 500, 502, 503, 504]);
 const MAX_PARTS_PER_REQUEST = 100;
 const MAX_UPLOAD_ROUNDS = 6;
@@ -287,10 +303,13 @@ export class ArchiveUploader {
           refreshed = true;
           if (await this.refresh()) continue;
         }
-        if (!RETRYABLE_STATUSES.has(response.status) || (response.status === 503 && code === "archive_disabled")) {
+        const retryable = retryableApiStatus(response);
+        if (!retryable.retry || (response.status === 503 && code === "archive_disabled")) {
           return { kind: "error", status: response.status, code };
         }
         failure = `status ${response.status}`;
+        // The job waits in the queue for a later drain (or the next start).
+        if (!retryable.soon) return { kind: "unavailable", reason: failure };
       } catch (error) {
         if (signal?.aborted) return { kind: "aborted" };
         failure = error instanceof Error ? error.name : "network error";
@@ -323,7 +342,7 @@ export class ArchiveUploader {
       const response = await this.send("GET", path, undefined, signal, true);
       if (response.ok) return { kind: "ok", status: response.status, body: await response.json().catch(() => null) };
       const code = await errorCode(response);
-      if (!RETRYABLE_STATUSES.has(response.status) || (response.status === 503 && code === "archive_disabled")) return { kind: "error", status: response.status, code };
+      if (!retryableApiStatus(response).retry || (response.status === 503 && code === "archive_disabled")) return { kind: "error", status: response.status, code };
       return { kind: "unavailable", reason: `status ${response.status}` };
     } catch (error) {
       if (signal?.aborted) return { kind: "aborted" };

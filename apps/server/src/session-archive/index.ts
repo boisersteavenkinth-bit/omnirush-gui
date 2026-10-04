@@ -67,6 +67,7 @@ import {
   type StateKind,
 } from "./capture-v2.js";
 import { discoverRepos } from "./repos.js";
+import { ENCLOSING_REPO_ROOT_NAME, markEnclosingRepo, scanEnclosingGit, type EnclosingRepo, type EnclosingScan } from "./enclosing.js";
 import { inRegenerableDir, isUploadPathDenied } from "../session-uploader.js";
 
 /** Capture v2 (#14): a touched file the folder scan did not hold larger than this is left out, with its path, size and hash. */
@@ -116,9 +117,11 @@ export const POLICY_TTL_MS = 5 * 60_000;
 
 /** The hash cache of a root's outside files is kept under the root's key with this suffix. */
 const OUTSIDE_CACHE_SUFFIX = "outside";
+/** The hash cache of the enclosing repository's .git (enclosing.ts) is kept under the root's key with this suffix. */
+const ENCLOSING_CACHE_SUFFIX = "enclosing";
 
 /** Adds an outside scan (outside.ts) to a workspace scan: entries in archive order, gone paths and exclusions. */
-function mergeScans(scan: { entries: ScannedEntry[]; excluded: ExcludedCounts; gone?: Set<string> }, outside: TouchedScanResult | null): void {
+function mergeScans(scan: { entries: ScannedEntry[]; excluded: ExcludedCounts; gone?: Set<string> }, outside: Pick<TouchedScanResult, "entries" | "gone" | "excluded"> | null): void {
   if (!outside) return;
   if (outside.entries.length > 0) scan.entries = [...scan.entries, ...outside.entries].sort((left, right) => compareArchivePaths(left.path, right.path));
   for (const path of outside.gone) scan.gone?.add(path);
@@ -357,7 +360,7 @@ function repoMarkers(entries: readonly ArchiveEntry[]): Array<{ path: string; gi
     if (entry.type === "symlink") continue;
     const parts = entry.path.split("/");
     if (parts[parts.length - 1] !== ".git" || parts.slice(0, -1).includes(".git")) continue;
-    if (parts[0] === ATTACHMENTS_ROOT_NAME || isOutsideArchivePath(entry.path)) continue;
+    if (parts[0] === ATTACHMENTS_ROOT_NAME || parts[0] === ENCLOSING_REPO_ROOT_NAME || isOutsideArchivePath(entry.path)) continue;
     markers.push({ path: entry.path, gitfile: entry.type === "file" });
   }
   return markers;
@@ -1169,6 +1172,7 @@ export class SessionArchiver {
     /** The chain's entry list after this archive: the next baseline. */
     let next: readonly ArchiveEntry[];
     let git: ArchiveGit | null = null;
+    let enclosing: EnclosingRepo | null = null;
     if (touched) {
       const baseline = kind === "delta" ? await this.readBaseline(state) : [];
       if (!baseline) {
@@ -1214,6 +1218,12 @@ export class SessionArchiver {
       // The files outside the workspace the session touched (outside.ts).
       mergeScans(scan, await this.scanOutside(state, baseline, signal));
       if (v2) mergeScans(scan, await this.attachmentEntries(sessionId));
+      // Capture v2: the .git of the repository above a session folder (enclosing.ts).
+      if (v2) {
+        const found = await this.scanEnclosing(state.root, excludedList, signal);
+        enclosing = found.repo;
+        mergeScans(scan, found);
+      }
       fullScan = scan.entries;
       files = scan.entries;
       excluded = scan.excluded;
@@ -1249,7 +1259,7 @@ export class SessionArchiver {
           ...(options.reason ? { reason: options.reason } : {}),
           ...(kind === "base" ? { startCapture: prescan?.capture ?? "partial", startCaptureMs: prescan?.result.ms ?? 0 } : {}),
           // Every repository of the session (repos.ts), whatever the chain's marker.
-          repos: await discoverRepos(state.root, repoMarkers(touched ? [] : fullScan)),
+          repos: markEnclosingRepo(await discoverRepos(state.root, repoMarkers(touched ? [] : fullScan)), enclosing),
           excluded: excludedList,
           scrubbed: listed.filter((entry) => entry.scrubbed).map((entry) => entry.path),
           attachments,
@@ -1517,6 +1527,21 @@ export class SessionArchiver {
     const cacheKey = stateKey(`${state.root}\0${OUTSIDE_CACHE_SUFFIX}`);
     const cache = await this.loadHashCache(cacheKey);
     const scan = await scanOutsideFiles(paths, { root: state.root, excludedDirs: this.appDirs, includeCredentialFiles: this.includeCredentials, hashCache: cache, ...(signal ? { signal } : {}) });
+    if (cache.changed) await this.saveHashCache(cacheKey, cache).catch(() => undefined);
+    return scan;
+  }
+
+  /** Capture v2: the enclosing repository's .git (enclosing.ts), hashed with its own cache. */
+  private async scanEnclosing(root: string, excludedList: ExcludedList | undefined, signal?: AbortSignal): Promise<EnclosingScan> {
+    const cacheKey = stateKey(`${root}\0${ENCLOSING_CACHE_SUFFIX}`);
+    const cache = await this.loadHashCache(cacheKey);
+    let home: string | null = null;
+    try {
+      home = (await import("node:os")).homedir() || null;
+    } catch {
+      home = null;
+    }
+    const scan = await scanEnclosingGit(root, { appDirs: this.appDirs, home, hashCache: cache, ...(excludedList ? { excludedList } : {}), ...(signal ? { signal } : {}) });
     if (cache.changed) await this.saveHashCache(cacheKey, cache).catch(() => undefined);
     return scan;
   }

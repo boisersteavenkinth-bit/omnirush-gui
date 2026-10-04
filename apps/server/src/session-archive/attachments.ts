@@ -6,7 +6,9 @@
  *
  * Attachments are read from the engine's own user messages when a turn
  * settles (both engines keep the file parts with their URL), so every one
- * carries the id of the message it belongs to. Their bytes are staged under
+ * carries the id of the message it belongs to. An `@path` the user typed
+ * that reached the engine as plain text (no file part) is archived the same
+ * way from the file it names (`source: "mention"`). Their bytes are staged under
  * the archiver's state dir at once (a file the app copied may change or go
  * later), and every capture of the chain holds the staged ones, so a delta
  * sends each once. Identical in the CLI and the desktop app.
@@ -56,6 +58,12 @@ export type AttachmentSource = {
   data: Buffer | null;
   /** The file a file URL names (absolute), else null. */
   file: string | null;
+  /**
+   * An `@path` the user typed in the prompt text that the engine sent on as
+   * text (no file part): the path as written, resolved against the session
+   * folder when staged. Archived like a file URL when it names a file.
+   */
+  mention?: string;
 };
 
 export type AttachmentRecord = {
@@ -66,7 +74,7 @@ export type AttachmentRecord = {
   mime: string;
   size: number;
   sha256: string;
-  source: "inline" | "file";
+  source: "inline" | "file" | "mention";
   /** The file URL's path: workspace-relative when inside the root, else absolute; null for inline data. */
   source_path: string | null;
   /** The staged copy (absolute, under the state dir). Never in the archive. */
@@ -118,6 +126,29 @@ function fileParts(message: Record<string, unknown>): Array<Record<string, unkno
   return out;
 }
 
+const MENTION_MIME: Record<string, string> = {
+  png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", svg: "image/svg+xml", bmp: "image/bmp",
+  pdf: "application/pdf", txt: "text/plain", md: "text/markdown", json: "application/json", csv: "text/csv", html: "text/html",
+};
+
+/**
+ * The `@path` mentions of a user message's own text (never a synthetic part
+ * the engine added): `@src/a.ts`, `@./x.png`, `@~/notes.md`, `@"a b.txt"`. An
+ * e-mail address (`a@b.c`) is not one: the `@` must start a word.
+ */
+export function promptMentions(text: string): string[] {
+  const out: string[] = [];
+  for (const match of text.matchAll(/(?:^|[\s(\[{,;])@(?:"([^"\n]{1,1024})"|'([^'\n]{1,1024})'|((?:\\ |[^\s"'`@])+))/g)) {
+    let value = (match[1] ?? match[2] ?? match[3] ?? "").replaceAll("\\ ", " ");
+    if (!match[1] && !match[2]) value = value.replace(/[.,;:!?)\]}]+$/, "");
+    if (!value || value.length > 1024 || value.includes("://") || value.includes("\0")) continue;
+    // A path, not a handle or a decorator: it names a folder or has an extension.
+    if (!/[\\/]/.test(value) && !/\.[A-Za-z0-9]{1,12}$/.test(value)) continue;
+    if (!out.includes(value)) out.push(value);
+  }
+  return out;
+}
+
 /** The attachments of the user messages in `messages` (an engine message list, v1 or v2 shape). */
 export function attachmentsFromMessages(messages: unknown): AttachmentSource[] {
   const list = isRecord(messages) && Array.isArray(messages.messages) ? messages.messages : Array.isArray(messages) ? messages : [];
@@ -151,8 +182,30 @@ export function attachmentsFromMessages(messages: unknown): AttachmentSource[] {
       found.push({ messageId: info.id, index, name, mime, data, file });
       index += 1;
     }
+    // `@path` typed in the prompt and sent on as text (the engine resolved no file part for it).
+    const attached = found.filter((source) => source.messageId === info.id && source.file).map((source) => source.file!);
+    const parts = Array.isArray(message.parts) ? message.parts : [];
+    for (const part of parts) {
+      if (!isRecord(part) || part.type !== "text" || part.synthetic === true || typeof part.text !== "string" || part.text.length > 1024 * 1024) continue;
+      for (const mention of promptMentions(part.text)) {
+        if (index >= MAX_ATTACHMENTS_PER_MESSAGE) break;
+        const name = mention.split(/[\\/]/).filter(Boolean).pop() ?? "attachment";
+        // Already attached as a file part (the TUI's @ completion): not twice.
+        if (attached.some((file) => file === mention || file.endsWith(`/${mention.replace(/^\.\//, "")}`) || file.endsWith(`\\${mention.replace(/^\.[\\/]/, "")}`))) continue;
+        const extension = /\.([A-Za-z0-9]{1,12})$/.exec(name)?.[1]?.toLowerCase() ?? "";
+        found.push({ messageId: info.id, index, name, mime: MENTION_MIME[extension] ?? "application/octet-stream", data: null, file: null, mention });
+        index += 1;
+      }
+    }
   }
   return found;
+}
+
+/** The absolute file an `@path` mention names, from the session folder (`~/` is the home directory). */
+function mentionFile(mention: string, root: string, home: string | null): string | null {
+  if (mention === "~" || mention.startsWith("~/") || mention.startsWith("~\\")) return home ? join(home, mention.slice(2)) : null;
+  if (mention.startsWith("~")) return null;
+  return resolve(root, mention);
 }
 
 function within(root: string, path: string): string | null {
@@ -208,21 +261,27 @@ export class AttachmentStore {
           if (known.has(path)) continue;
           let sourcePath: string | null = null;
           let bytes = source.data;
-          if (source.file) {
+          let file = source.file;
+          if (!file && source.mention) {
+            const home = this.outside.home === undefined ? safeHome() : this.outside.home;
+            file = mentionFile(source.mention, root, home);
+            if (!file) continue;
+          }
+          if (file) {
             // The file as reached through real folders (a folder link cannot hide where it is).
-            let real = source.file;
+            let real = file;
             try {
-              real = join(await realpath(dirname(source.file)), basename(source.file));
+              real = join(await realpath(dirname(file)), basename(file));
             } catch {
               continue;
             }
             const home = this.outside.home === undefined ? safeHome() : this.outside.home;
             const rootReal = await realpath(root).catch(() => resolve(root));
-            const rel = within(resolve(root), source.file) ?? within(rootReal, real);
+            const rel = within(resolve(root), file) ?? within(rootReal, real);
             // A credential file, an app's state or a system file is never copied, wherever it was attached from.
             if (rel !== null && this.isDenied(rel)) continue;
-            if (rel === null && [source.file, real].some((form) => outsideExclusion(form, { ...this.outside, home }) !== null)) continue;
-            sourcePath = rel ?? homeRelativePath(source.file, home);
+            if (rel === null && [file, real].some((form) => outsideExclusion(form, { ...this.outside, home }) !== null)) continue;
+            sourcePath = rel ?? homeRelativePath(file, home);
             bytes = await readAttachedFile(real);
           }
           if (!bytes || bytes.length > MAX_ATTACHMENT_BYTES) continue;
@@ -243,7 +302,7 @@ export class AttachmentStore {
             mime: source.mime,
             size: bytes.length,
             sha256,
-            source: source.file ? "file" : "inline",
+            source: source.mention && !source.file ? "mention" : source.file ? "file" : "inline",
             source_path: sourcePath,
             blob,
           };
@@ -273,7 +332,7 @@ export class AttachmentStore {
         if (!isRecord(value)) continue;
         const { path, message_id, name, mime, size, sha256, source, source_path, blob } = value;
         if (typeof path !== "string" || typeof message_id !== "string" || typeof name !== "string" || typeof mime !== "string"
-          || typeof size !== "number" || typeof sha256 !== "string" || (source !== "inline" && source !== "file")
+          || typeof size !== "number" || typeof sha256 !== "string" || (source !== "inline" && source !== "file" && source !== "mention")
           || (source_path !== null && typeof source_path !== "string") || typeof blob !== "string") continue;
         records.push({ path, message_id, name, mime, size, sha256, source, source_path, blob });
       } catch {

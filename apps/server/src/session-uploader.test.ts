@@ -17,7 +17,9 @@ import {
   MAX_UPLOAD_TRACE_EVENTS,
   MAX_UPLOAD_WEB_VISIT_TEXT_BYTES,
   SessionUploader,
+  isRetryableUploadStatus,
   mapBounded,
+  retryAfterMs,
   clampUploadBytes,
   clampUploadText,
   collectGitBlock,
@@ -687,6 +689,37 @@ describe("session uploader envelope v2", () => {
     expect(block.remotes[0]!.url.startsWith("https://example.com/")).toBe(true);
   });
 
+  test("a turn the user stopped carries outcome aborted on its collector.trigger and turn.completed events", async () => {
+    const root = await mkdtemp(join(tmpdir(), "omnirush-upload-aborted-"));
+    roots.push(root);
+    await writeFile(join(root, "a.txt"), "alpha\n");
+    const { uploads, upload } = makeUploads();
+    const sessionUploader = new SessionUploader({ upload, changeDebounceMs: 60_000, fallbackScanMs: 60_000 });
+    const sessionId = "session-v2-aborted-1";
+    sessionUploader.startSession(sessionId, "workspace-aborted", root);
+    sessionUploader.captureSnapshot(sessionId, "prompt");
+    await sessionUploader.idle(sessionId);
+    await writeFile(join(root, "a.txt"), "alpha, half written\n");
+    sessionUploader.captureSnapshot(sessionId, "turn_completed", "aborted");
+    sessionUploader.flushTrace(sessionId, { messages: [], outcome: "aborted" });
+    await sessionUploader.idle(sessionId);
+    sessionUploader.captureSnapshot(sessionId, "prompt");
+    sessionUploader.captureSnapshot(sessionId, "turn_completed");
+    await sessionUploader.idle(sessionId);
+    sessionUploader.flushTrace(sessionId);
+    await sessionUploader.stop();
+    const events = uploads.filter((item) => item.snapshot_type === "trace").flatMap((item) => item.trace ?? []);
+    expect(events.filter((event) => event.type === "collector.trigger").map((event) => event.data)).toEqual([
+      { trigger: "prompt", captured: false },
+      { trigger: "turn_completed", captured: true, outcome: "aborted" },
+      { trigger: "prompt", captured: false },
+      { trigger: "turn_completed", captured: false },
+    ]);
+    expect(events.filter((event) => event.type === "turn.completed").map((event) => event.data)).toEqual([{ messages: [], outcome: "aborted" }]);
+    // The snapshot itself keeps the trigger every backend takes.
+    expect(uploads.filter((item) => item.snapshot_type === "change").map((item) => item.trigger)).toEqual(["turn_completed"]);
+  });
+
   test("captures prompt and turn_completed snapshots only when the workspace changed", async () => {
     const root = await mkdtemp(join(tmpdir(), "omnirush-upload-triggers-"));
     roots.push(root);
@@ -809,6 +842,78 @@ describe("session uploader durable retry", () => {
     expect(uploads.map((item) => [item.snapshot_type, item.trigger, item.sequence])).toEqual([["start", "session_start", 1], ["end", "session_end", 2]]);
     expect(await second.spoolStatus()).toEqual({ entries: 0, bytes: 0 });
     await second.stop();
+  });
+
+  test("a 507 on the end upload is spooled after one attempt, and the next start sends it", async () => {
+    const root = await mkdtemp(join(tmpdir(), "omnirush-upload-507-"));
+    const stateDir = await mkdtemp(join(tmpdir(), "omnirush-upload-507-state-"));
+    roots.push(root, stateDir);
+    await writeFile(join(root, "app.txt"), "hello\n");
+    const sessionId = "session-507-1234";
+    const sent: string[] = [];
+    const first = new SessionUploader({
+      stateDir,
+      upload: async (_sessionId, compressed) => {
+        const envelope = JSON.parse(zstdDecompressSync(compressed).toString("utf8")) as Envelope;
+        sent.push(String(envelope.snapshot_type));
+        // The server's disk filled up before the session ended.
+        return envelope.snapshot_type === "end" ? Response.json({ detail: "insufficient storage" }, { status: 507 }) : Response.json({ ok: true }, { status: 201 });
+      },
+      fallbackScanMs: 60_000,
+      uploadRetryDelayMs: 1,
+      retryBaseMs: 60_000,
+    });
+    first.startSession(sessionId, "workspace-507", root);
+    await first.idle(sessionId);
+    await first.stop();
+    expect(sent.filter((type) => type === "end")).toHaveLength(1);
+    const spoolDir = join(stateDir, "omnirush-upload-spool");
+    const metas = await Promise.all((await readdir(spoolDir)).filter((name) => name.endsWith(".json"))
+      .map(async (name) => JSON.parse(await readFile(join(spoolDir, name), "utf8")) as { snapshot_type: string }));
+    expect(metas.map((meta) => meta.snapshot_type)).toEqual(["end"]);
+
+    const { uploads, upload } = makeUploads();
+    const second = new SessionUploader({ stateDir, upload, fallbackScanMs: 60_000, retryBaseMs: 10, retryMaxMs: 20 });
+    for (let attempt = 0; attempt < 200 && uploads.length < 1; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(uploads.map((item) => [item.snapshot_type, item.trigger])).toEqual([["end", "session_end"]]);
+    expect(await second.spoolStatus()).toEqual({ entries: 0, bytes: 0 });
+    await second.stop();
+  });
+
+  test("a 413 or 429 with Retry-After is spooled and not sent before it; a plain 413 or a 501 is final", async () => {
+    expect(retryAfterMs("30", 0)).toBe(30_000);
+    expect(retryAfterMs("Thu, 01 Jan 1970 00:01:00 GMT", 0)).toBe(60_000);
+    expect(retryAfterMs("later", 0)).toBeNull();
+    expect([507, 599, 501, 505].map((status) => isRetryableUploadStatus(status))).toEqual([true, true, false, false]);
+    expect([isRetryableUploadStatus(413), isRetryableUploadStatus(413, 1_000)]).toEqual([false, true]);
+    for (const [status, headers, spooled] of [[413, { "Retry-After": "3600" }, true], [429, { "Retry-After": "3600" }, true], [413, {}, false], [501, {}, false]] as const) {
+      const root = await mkdtemp(join(tmpdir(), "omnirush-upload-ra-"));
+      const stateDir = await mkdtemp(join(tmpdir(), "omnirush-upload-ra-state-"));
+      roots.push(root, stateDir);
+      await writeFile(join(root, "app.txt"), "hello\n");
+      let calls = 0;
+      let healthy = false;
+      const uploader = new SessionUploader({
+        stateDir,
+        upload: async () => {
+          calls += 1;
+          return healthy ? Response.json({ ok: true }, { status: 201 }) : Response.json({ detail: "busy" }, { status, headers });
+        },
+        fallbackScanMs: 60_000,
+        uploadRetryDelayMs: 1,
+        retryBaseMs: 60_000,
+      });
+      uploader.startSession("session-ra-1234", "workspace-ra", root);
+      await uploader.idle("session-ra-1234");
+      expect({ status, calls }).toEqual({ status, calls: 1 });
+      expect({ status, entries: (await uploader.spoolStatus()).entries }).toEqual({ status, entries: spooled ? 1 : 0 });
+      healthy = true;
+      // Not before the Retry-After: the drain leaves it.
+      if (spooled) expect(await uploader.drainSpool()).toEqual({ delivered: 0, pending: 1 });
+      expect(calls).toBe(1);
+      await uploader.clearSpool();
+      await uploader.stop();
+    }
   });
 
   test("bounds the spool, drops permanently rejected uploads and clears on request", async () => {

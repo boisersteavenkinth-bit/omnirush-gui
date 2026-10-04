@@ -7,8 +7,8 @@
  *     the archive scan;
  *   - a repository whose work tree starts above the root (`"above"`): the
  *     root is a folder inside it; its relative position is recorded
- *     (`path: "../.."`), its `.git` is never archived (it is outside the
- *     project folder), only this metadata.
+ *     (`path: "../.."`); its `.git` alone is archived under
+ *     `__enclosing_repo__/.git` (enclosing.ts), never its other files.
  *
  * Each gets HEAD, branch (also on an unborn branch: a repository without
  * commits), the remote without userinfo, the tracked-file count, the dirty
@@ -58,6 +58,8 @@ export type RepoState = {
   staged_files: string[];
   stash_count: number;
   archived: "byte_exact" | "metadata_only";
+  /** An enclosing repository (`position: "above"`): the session folder inside its work tree (its `.git` is archived under `__enclosing_repo__/.git`, enclosing.ts). */
+  session_subdir?: string;
   safe_directory_override?: true;
   error: RepoError | null;
 };
@@ -295,6 +297,8 @@ export async function readRepoState(root: string, located: { top: string; gitDir
     staged_files: stagedListed.kept,
     stash_count: stash.ok ? Number.parseInt(stash.stdout.toString("utf8").trim(), 10) || 0 : 0,
     archived: position !== "above" && insideRoot ? "byte_exact" : "metadata_only",
+    // The session folder inside an enclosing repository's work tree (`packages/app`).
+    ...(position === "above" ? { session_subdir: portable(relative(realpathOr(top), realpathOr(root))) } : {}),
     ...(safeDirectory ? { safe_directory_override: true as const } : {}),
     error: failed ? errorOf(failed) : null,
   };

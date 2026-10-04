@@ -143,7 +143,36 @@ const MAX_RESPONSE_BODY_BYTES = 64 * 1024;
 // next one: enough to get past a stuck entry, few enough not to hammer a link
 // that is down for every entry in the spool.
 const MAX_DRAIN_FAILURES = 3;
-const RETRYABLE_STATUSES = new Set([408, 425, 429, 500, 502, 503, 504]);
+const RETRYABLE_STATUSES = new Set([408, 425, 429]);
+/** The longest Retry-After honoured: a server asking for more is tried again after this. */
+const MAX_RETRY_AFTER_MS = 60 * 60_000;
+
+/** A Retry-After header (delta-seconds or an HTTP date) in ms from now, capped; null when absent or unreadable. */
+export function retryAfterMs(value: string | null | undefined, now = Date.now()): number | null {
+  const text = value?.trim();
+  if (!text) return null;
+  let ms: number;
+  if (/^\d+(?:\.\d+)?$/.test(text)) ms = Number(text) * 1000;
+  else {
+    const at = Date.parse(text);
+    if (!Number.isFinite(at)) return null;
+    ms = at - now;
+  }
+  return Number.isFinite(ms) ? Math.min(MAX_RETRY_AFTER_MS, Math.max(0, Math.round(ms))) : null;
+}
+
+/**
+ * Whether an upload refused with `status` may go through later, so the
+ * envelope is kept (spooled) rather than dropped: a timeout or rate limit
+ * (408, 425, 429), any server-side failure (5xx: a 507 is the server's disk
+ * filling up) except 501 and 505, which no retry changes, and a 413 that
+ * says when to come back (Retry-After: the server is shedding load).
+ */
+export function isRetryableUploadStatus(status: number, retryAfter: number | null = null): boolean {
+  if (RETRYABLE_STATUSES.has(status)) return true;
+  if (status >= 500 && status <= 599) return status !== 501 && status !== 505;
+  return status === 413 && retryAfter !== null;
+}
 // A rejected bearer. The body tells a stale device token (refreshed once and
 // retried, spooled if still rejected) from the sign-in gate, which is final.
 const UNAUTHORIZED_STATUSES = new Set([401, 403]);
@@ -161,6 +190,8 @@ export type UploadTrigger =
   | "session_end"
   | "trace_flush";
 
+/** How a turn ended, when not as answered: "aborted" is a turn the user stopped (Esc, Stop). */
+export type TurnEndOutcome = "aborted";
 type ChangeTrigger = Extract<UploadTrigger, "prompt" | "turn_completed" | "fs_change" | "periodic">;
 
 type UploadFile = {
@@ -402,6 +433,8 @@ type SpoolMeta = {
   created_at: string;
   attempts: number;
   last_attempt_at?: string;
+  /** Not sent again before this (a Retry-After the server gave). */
+  not_before?: string;
 };
 
 type SessionState = {
@@ -561,7 +594,7 @@ export type TraceCapabilities = {
 
 type TransmitOutcome =
   | { ok: true }
-  | { ok: false; retryable: boolean; reason: string; unsupportedSchema?: boolean };
+  | { ok: false; retryable: boolean; reason: string; unsupportedSchema?: boolean; retryAfterMs?: number };
 
 type CompressedArtifact = { path: string; size: number };
 
@@ -2347,15 +2380,68 @@ function filterListing(candidates: string[], priorityPaths: ReadonlySet<string> 
   return { paths, denied, truncated: eligible.length > paths.length, deniedPaths, overflowPaths };
 }
 
+/** How deep repositories inside repositories are followed, and how many listed paths they may add. */
+const MAX_NESTED_REPO_DEPTH = 4;
+const MAX_NESTED_REPO_PATHS = MAX_RAW_LISTING_FILES;
+
+async function gitListing(dir: string): Promise<string[]> {
+  const { stdout } = await execFileAsync("git", ["-C", dir, "ls-files", "-co", "--exclude-standard", "-z"], {
+    encoding: "buffer",
+    maxBuffer: 16 * 1024 * 1024,
+    timeout: 15_000,
+  });
+  return Buffer.from(stdout).toString("utf8").split("\0").filter(Boolean);
+}
+
+/** The `path = ...` values of a `.gitmodules` (a submodule's folder), or none. */
+async function submodulePaths(dir: string): Promise<Set<string>> {
+  try {
+    const text = await readFile(join(dir, ".gitmodules"), "utf8");
+    return new Set([...text.matchAll(/^\s*path\s*=\s*(.+?)\s*$/gm)].map((match) => match[1]!.replace(/\/+$/, "")));
+  } catch {
+    return new Set();
+  }
+}
+
+/**
+ * Git lists a repository inside the work tree (a clone, a `git init` in a
+ * subfolder) as one `dir/` entry and a submodule as its bare path, so their
+ * files were in neither the snapshot nor excluded_files. Each is listed from
+ * its own index instead (its own ignore rules apply; never its `.git`),
+ * nested ones too, bounded in depth and count. A folder git cannot list is
+ * left as it was.
+ */
+export async function expandNestedRepos(root: string, listed: string[], depth = 0, budget = { left: MAX_NESTED_REPO_PATHS }): Promise<string[]> {
+  const submodules = await submodulePaths(root);
+  const out: string[] = [];
+  for (const path of listed) {
+    const bare = path.replace(/\/+$/, "");
+    const nested = path.endsWith("/") || submodules.has(bare);
+    if (!nested || depth >= MAX_NESTED_REPO_DEPTH || budget.left <= 0) {
+      out.push(path);
+      continue;
+    }
+    const dir = join(root, ...bare.split("/"));
+    let inner: string[];
+    try {
+      await lstat(join(dir, ".git"));
+      if ((await lstat(dir)).isSymbolicLink()) throw new Error("symlink");
+      inner = await gitListing(dir);
+    } catch {
+      out.push(path);
+      continue;
+    }
+    inner = inner.slice(0, Math.max(0, budget.left));
+    budget.left -= inner.length;
+    for (const child of await expandNestedRepos(dir, inner, depth + 1, budget)) out.push(`${bare}/${child}`);
+  }
+  return out;
+}
+
 async function listWorkspaceFiles(root: string, priorityPaths: ReadonlySet<string> = new Set(), limit = MAX_FILES): Promise<WorkspaceListing> {
   try {
     if (await gitSkipReason()) throw new Error(XCODE_CLT_MISSING);
-    const { stdout } = await execFileAsync("git", ["-C", root, "ls-files", "-co", "--exclude-standard", "-z"], {
-      encoding: "buffer",
-      maxBuffer: 16 * 1024 * 1024,
-      timeout: 15_000,
-    });
-    return filterListing(Buffer.from(stdout).toString("utf8").split("\0"), priorityPaths, limit);
+    return filterListing(await expandNestedRepos(root, await gitListing(root)), priorityPaths, limit);
   } catch {
     const raw = await walkFallback(root, root, [], { paths: [], denied: 0, truncated: false }, priorityPaths);
     const limited = filterListing(raw.paths, priorityPaths, limit);
@@ -3121,7 +3207,7 @@ async function hasRealAncestors(root: string, path: string, seen: AncestorCache 
 type ScanContext = {
   root: string;
   /** The resolved root with a trailing separator: every file inspected must start with it. */
-  rootPrefix: string;
+  sessionSubdir: string;
   cache: Map<string, HashCacheEntry>;
   texts: RedactedTextCache;
   metrics: UploadMetrics;
@@ -3154,7 +3240,7 @@ function scanContext(root: string, cache: Map<string, HashCacheEntry>, texts: Re
   const base = resolve(root);
   return {
     root,
-    rootPrefix: base.endsWith(sep) ? base : `${base}${sep}`,
+    sessionSubdir: base.endsWith(sep) ? base : `${base}${sep}`,
     cache,
     texts,
     metrics,
@@ -3176,7 +3262,7 @@ function scanContext(root: string, cache: Map<string, HashCacheEntry>, texts: Re
 async function inspectFile(context: ScanContext, path: string): Promise<HashCacheEntry | null> {
   const { cache, metrics, pool } = context;
   const absolute = resolve(context.root, path);
-  if (!absolute.startsWith(context.rootPrefix) || !(await hasRealAncestors(context.root, path, context.ancestors))) return null;
+  if (!absolute.startsWith(context.sessionSubdir) || !(await hasRealAncestors(context.root, path, context.ancestors))) return null;
   let file;
   try {
     file = await lstat(absolute);
@@ -3916,6 +4002,7 @@ function parseSpoolMeta(value: unknown): SpoolMeta | null {
     created_at: record.created_at,
     attempts: optionalCount(record.attempts) ?? 0,
     ...(optionalString(record.last_attempt_at) ? { last_attempt_at: record.last_attempt_at } : {}),
+    ...(optionalString(record.not_before) ? { not_before: record.not_before } : {}),
   };
 }
 
@@ -4253,14 +4340,13 @@ export class SessionUploader {
    * denied, binary, oversized, gitignored and capped files; a targeted one
    * only what it inspected.
    */
-  private async excludedFiles(root: string, scan: ScanResult, omitted: readonly SnapshotCandidate[], full: boolean, maxBytes: number): Promise<unknown> {
+  private async excludedFiles(root: string, scan: ScanResult, omitted: readonly SnapshotCandidate[], ignoredListing: readonly string[] | null, maxBytes: number): Promise<unknown> {
     const excluded = new ExcludedFiles(root, { uploadPath: portablePathForUpload, hashes: this.excludedHashes });
     for (const path of scan.deniedPaths ?? []) excluded.add(path, "privacy");
     for (const [path, size] of scan.tooLargePaths ?? []) excluded.add(path, "too_large", { size });
     for (const [path, size] of scan.binaryPaths ?? []) excluded.add(path, "binary", { size });
-    if (full) {
-      for (const path of await listGitIgnored(root)) excluded.add(path, isUploadPathDenied(path.replace(/\/$/, "")) ? "privacy" : "gitignored");
-    }
+    // A full scan (`ignoredListing` given): the gitignored files, a denied one as privacy.
+    for (const path of ignoredListing ?? []) excluded.add(path, isUploadPathDenied(path.replace(/\/$/, "")) ? "privacy" : "gitignored");
     for (const path of scan.cappedPaths ?? []) excluded.add(path, "snapshot_cap");
     for (const candidate of omitted) excluded.add(candidate.path, "snapshot_cap", { size: candidate.bytes, sha256: scan.manifest.get(candidate.path)?.sha256 ?? null });
     return excluded.finish(maxBytes);
@@ -4991,9 +5077,12 @@ export class SessionUploader {
    * Captures a change snapshot for an engine milestone: right as a prompt is
    * dispatched, or once a turn completes. When nothing changed since the last
    * snapshot only the trigger is recorded in the trace, so the backend still
-   * sees the milestone without a redundant upload.
+   * sees the milestone without a redundant upload. `outcome: "aborted"`: the
+   * turn was stopped by the user (Esc, Stop; the engine's
+   * MessageAbortedError), recorded on its collector.trigger event (the
+   * snapshot's own trigger stays turn_completed, which every backend takes).
    */
-  captureSnapshot(sessionId: string, trigger: "prompt" | "turn_completed"): void {
+  captureSnapshot(sessionId: string, trigger: "prompt" | "turn_completed", outcome?: TurnEndOutcome): void {
     const state = this.sessions.get(sessionId);
     if (!state || state.finished) return;
     if (trigger === "prompt") {
@@ -5023,7 +5112,7 @@ export class SessionUploader {
     }
     this.enqueue(state, async () => {
       const previous = state.manifest;
-      await this.captureChange(state, trigger);
+      await this.captureChange(state, trigger, false, trigger === "turn_completed" && outcome === "aborted" ? outcome : undefined);
       const current = state.manifest;
       if (trigger === "turn_completed") {
         // A prompt sent since the turn ended (this job waited behind an
@@ -5257,7 +5346,7 @@ export class SessionUploader {
    * interval since the last change snapshot is deferred and merged with
    * whatever else arrives before the interval elapses.
    */
-  private async captureChange(state: SessionState, trigger: ChangeTrigger, deferred = false): Promise<void> {
+  private async captureChange(state: SessionState, trigger: ChangeTrigger, deferred = false, outcome?: TurnEndOutcome): Promise<void> {
     await state.ready;
     const milestone = trigger === "prompt" || trigger === "turn_completed";
     if (milestone && state.watchMode === "watching") await new Promise((resolvePromise) => setTimeout(resolvePromise, MILESTONE_SETTLE_MS));
@@ -5281,7 +5370,7 @@ export class SessionUploader {
     }
     if (!(await this.hasPendingChanges(state))) {
       this.metrics.capturesSkipped += 1;
-      if (milestone) this.appendTrace(state, "collector.trigger", { trigger, captured: false });
+      if (milestone) this.appendTrace(state, "collector.trigger", { trigger, captured: false, ...(outcome ? { outcome } : {}) });
       return;
     }
     const wait = !milestone && !deferred && state.lastChangeAt > 0 ? this.minChangeIntervalMs - (Date.now() - state.lastChangeAt) : 0;
@@ -5290,7 +5379,7 @@ export class SessionUploader {
       return;
     }
     const captured = await this.uploadWorkspace(state, "change", trigger);
-    if (milestone) this.appendTrace(state, "collector.trigger", { trigger, captured });
+    if (milestone) this.appendTrace(state, "collector.trigger", { trigger, captured, ...(outcome ? { outcome } : {}) });
   }
 
   /** Whether another live session on `state`'s root has a turn in progress. */
@@ -5568,6 +5657,11 @@ export class SessionUploader {
         ...snapshotPriorityPaths([], git),
       ]);
       const candidates = candidatesFor(scan, state.relevance, gitPaths);
+      // A full listing names the gitignored files too: a denied one (a gitignored
+      // `.env`) is left out for privacy and counted with the denied files, so
+      // denied_file_count and excluded_files' privacy count agree.
+      const ignoredListing = !(targeted && previous !== null) ? await listGitIgnored(state.root) : null;
+      const deniedCount = scan.deniedCount + (ignoredListing ?? []).filter((path) => isUploadPathDenied(path.replace(/\/$/, ""))).length;
       // The last snapshot waits briefly for a collection still running (toolchain.ts).
       const environment = await this.sessionEnvironment(state.root, type === "end" ? FINAL_TOOLCHAIN_WAIT_MS : undefined);
       const rootName = workspaceRootName(state.root);
@@ -5581,7 +5675,7 @@ export class SessionUploader {
         trigger,
         touched_paths: touchedPaths,
         ...PRIVACY_POLICY,
-        denied_file_count: scan.deniedCount,
+        denied_file_count: deniedCount,
         root_name: rootName,
         git: { commit: git?.commit ?? null, branch: git?.branch ?? null, dirty: git ? String(git.dirty) : "false" },
       });
@@ -5659,7 +5753,7 @@ export class SessionUploader {
         },
         privacy: () => ({
           ...PRIVACY_POLICY,
-          denied_file_count: scan.deniedCount,
+          denied_file_count: deniedCount,
           manifest_truncated: scan.manifestTruncated,
           files_truncated: omittedCount > 0,
           diff_truncated: git?.diff_truncated ?? false,
@@ -5672,7 +5766,7 @@ export class SessionUploader {
           excluded_files: await this.excludedFiles(state.root, scan, [
             ...candidates.filter((candidate) => !selection.selected.has(candidate.path)),
             ...capOmitted,
-          ], !(targeted && previous !== null), budget - contentUsed + EXCLUDED_FILES_MARGIN_BYTES),
+          ], ignoredListing, budget - contentUsed + EXCLUDED_FILES_MARGIN_BYTES),
         }),
       });
       if (omittedCount > 0) {
@@ -5866,7 +5960,14 @@ export class SessionUploader {
           return { ok: false, retryable: false, reason: lastReason, unsupportedSchema: true };
         }
         await response.body?.cancel().catch(() => undefined);
-        if (!RETRYABLE_STATUSES.has(response.status)) return { ok: false, retryable: false, reason: lastReason };
+        const retryAfter = retryAfterMs(response.headers?.get?.("retry-after"));
+        if (!isRetryableUploadStatus(response.status, retryAfter)) return { ok: false, retryable: false, reason: lastReason };
+        // A full disk (507) or a server that said when to come back is not
+        // asked again within the second: the spool sends it after its backoff
+        // (and not before the Retry-After), now or at the next start.
+        if (retryAfter !== null || response.status === 507 || response.status === 413) {
+          return { ok: false, retryable: true, reason: lastReason, ...(retryAfter !== null ? { retryAfterMs: retryAfter } : {}) };
+        }
       } catch (error) {
         lastReason = error instanceof Error ? error.message : "session upload unavailable";
         if (cancel?.aborted) return { ok: false, retryable: true, reason: lastReason };
@@ -5993,8 +6094,11 @@ export class SessionUploader {
       const compressed: CompressedArtifact = { path, size: compressedBytes };
       const account = this.account.signal;
       const uploadSignal = AbortSignal.any([account, this.halted.signal]);
-      const spoolArtifact = async (reason: string): Promise<boolean> => {
-        const spooled = await this.spoolEnvelopeFile({ id: "", session_id: state.id, snapshot_type: snapshotType, trigger, sequence, bytes: compressedBytes, created_at: new Date().toISOString(), attempts: 1 }, path, account);
+      const spoolArtifact = async (reason: string, retryAfter?: number): Promise<boolean> => {
+        const spooled = await this.spoolEnvelopeFile({
+          id: "", session_id: state.id, snapshot_type: snapshotType, trigger, sequence, bytes: compressedBytes, created_at: new Date().toISOString(), attempts: 1,
+          ...(retryAfter !== undefined ? { not_before: new Date(Date.now() + retryAfter).toISOString() } : {}),
+        }, path, account);
         if (!spooled) {
           // Signed out during the upload: the envelope is deleted, never queued for the next account.
           this.log("info", "OmniRush session upload artifact discarded at sign-out", { sessionId: state.id, snapshotType, trigger, sequence });
@@ -6036,7 +6140,7 @@ export class SessionUploader {
           await this.recordLedgerOutcome(state.id, "failure").catch(() => undefined);
           throw new Error(outcome.reason);
         }
-        return await spoolArtifact(outcome.reason);
+        return await spoolArtifact(outcome.reason, outcome.retryAfterMs);
       }
       state.sentBytes += bytes;
       state.sequence = sequence;
@@ -6177,11 +6281,15 @@ export class SessionUploader {
    * spooled it).
    */
   private spoolEntryDueAt(entry: SpoolMeta): number {
+    const now = Date.now();
+    // Never before a Retry-After the server gave (unless the clock went back past it by more than the cap).
+    const notBefore = entry.not_before ? Date.parse(entry.not_before) : Number.NaN;
+    const floor = Number.isFinite(notBefore) && notBefore - now <= MAX_RETRY_AFTER_MS ? notBefore : 0;
     const last = entry.last_attempt_at ? Date.parse(entry.last_attempt_at) : Number.NaN;
-    if (!Number.isFinite(last)) return 0;
+    if (!Number.isFinite(last)) return floor;
     // A last attempt after now means the clock went back: due at once, and
     // the attempt then records a sane time.
-    return last > Date.now() ? 0 : last + this.backoffMs(entry.attempts - 1);
+    return Math.max(floor, last > now ? 0 : last + this.backoffMs(entry.attempts - 1));
   }
 
   /**
@@ -6273,7 +6381,13 @@ export class SessionUploader {
         continue;
       }
       failures += 1;
-      const attempted: SpoolMeta = { ...entry, attempts: entry.attempts + 1, last_attempt_at: new Date().toISOString() };
+      const { not_before: _previous, ...rest } = entry;
+      const attempted: SpoolMeta = {
+        ...rest,
+        attempts: entry.attempts + 1,
+        last_attempt_at: new Date().toISOString(),
+        ...(outcome.retryAfterMs !== undefined ? { not_before: new Date(Date.now() + outcome.retryAfterMs).toISOString() } : {}),
+      };
       await this.spoolLocked(async () => {
         // The spool bound may have dropped the entry during the upload.
         await lstat(join(spoolDir, `${entry.id}.zst`));

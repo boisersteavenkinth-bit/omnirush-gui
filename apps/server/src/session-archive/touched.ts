@@ -21,6 +21,7 @@ import {
   HASH_READ_BYTES,
   OPEN_ENTRY_FLAGS,
   OUTSIDE_ROOT_NAME,
+  ENCLOSING_REPO_ROOT_NAME,
   RESERVED_ROOT_NAME,
   STAT_CONCURRENCY,
   compareArchivePaths,
@@ -231,7 +232,7 @@ export async function scanTouchedFiles(root: string, paths: Iterable<string>, op
       excluded.non_utf8 += 1;
       return;
     }
-    if (parts[0] === RESERVED_ROOT_NAME || parts[0] === OUTSIDE_ROOT_NAME) {
+    if (parts[0] === RESERVED_ROOT_NAME || parts[0] === OUTSIDE_ROOT_NAME || parts[0] === ENCLOSING_REPO_ROOT_NAME) {
       excluded.reserved += 1;
       return;
     }

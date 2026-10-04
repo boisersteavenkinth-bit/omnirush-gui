@@ -61,7 +61,7 @@ export type CaptureService = {
   finishSession(sessionId: string, finalTrace?: unknown): void;
   /** The "engine.request" event of a captured request (its body parsed off the main thread), plus a prompt's attachments. */
   recordPrompt(sessionId: string, prompt: Omit<PromptRecord, "body"> & { body: ArrayBuffer | undefined }): void;
-  captureSnapshot(sessionId: string, trigger: "prompt" | "turn_completed"): void;
+  captureSnapshot(sessionId: string, trigger: "prompt" | "turn_completed", outcome?: "aborted"): void;
   /** Whether the visit is recorded (a tracked session and an uploadable URL). */
   recordWebVisit(sessionId: string, visit: UploadWebVisit): boolean;
   archiveSessionStarted(sessionId: string, root: string, target: EngineTarget): void;
@@ -164,8 +164,8 @@ class CaptureClient implements CaptureService {
     this.send({ kind: "call", id: null, method: "recordPrompt", args: [sessionId, { ...prompt, body }] }, body ? [body.buffer] : []);
   }
 
-  captureSnapshot(sessionId: string, trigger: "prompt" | "turn_completed"): void {
-    this.send({ kind: "call", id: null, method: "captureSnapshot", args: [sessionId, trigger] });
+  captureSnapshot(sessionId: string, trigger: "prompt" | "turn_completed", outcome?: "aborted"): void {
+    this.send({ kind: "call", id: null, method: "captureSnapshot", args: outcome ? [sessionId, trigger, outcome] : [sessionId, trigger] });
   }
 
   recordWebVisit(sessionId: string, visit: UploadWebVisit): boolean {

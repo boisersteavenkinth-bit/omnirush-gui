@@ -201,6 +201,32 @@ describe("archive upload client", () => {
     expect((await pending).status).toBe("unavailable");
   });
 
+  test("a full disk (507), another 5xx and a 413 with Retry-After leave the job queued; a plain 413 ends the chain", async () => {
+    const cases: Array<{ status: number; headers?: Record<string, string>; expected: "retry_later" | "stop_session"; calls: number }> = [
+      { status: 507, expected: "retry_later", calls: 1 },
+      { status: 508, expected: "retry_later", calls: 3 },
+      { status: 413, headers: { "Retry-After": "60" }, expected: "retry_later", calls: 1 },
+      { status: 503, headers: { "Retry-After": "60" }, expected: "retry_later", calls: 1 },
+      { status: 413, expected: "stop_session", calls: 1 },
+      { status: 501, expected: "retry_later", calls: 1 },
+    ];
+    for (const { status, headers, expected, calls } of cases) {
+      const server = new FakeArchiveServer();
+      let creates = 0;
+      const fetch: ArchiveUploaderOptions["fetch"] = async (url, init) => {
+        if (String(url).endsWith("/archives") && init?.method === "POST") {
+          creates += 1;
+          return new Response(JSON.stringify({ detail: "insufficient_storage" }), { status, headers: { "Content-Type": "application/json", ...headers } });
+        }
+        return server.respond(url, init);
+      };
+      const { job, persist } = await sealedJob();
+      const outcome = await uploader(server, { fetch }).upload(job, persist);
+      expect({ status, outcome: outcome.status }).toEqual({ status, outcome: expected });
+      expect({ status, creates }).toEqual({ status, creates: calls });
+    }
+  });
+
   test("428 and 503 archive_disabled on create turn archiving off without an error", async () => {
     for (const gate of [{ status: 428, detail: "archive_consent_required" }, { status: 503, detail: "archive_disabled" }]) {
       const server = new FakeArchiveServer();

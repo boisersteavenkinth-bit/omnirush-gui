@@ -167,8 +167,8 @@ export class CaptureHost {
     }).catch(() => undefined);
   }
 
-  captureSnapshot(sessionId: string, trigger: "prompt" | "turn_completed"): void {
-    this.sessionUploader.captureSnapshot(sessionId, trigger);
+  captureSnapshot(sessionId: string, trigger: "prompt" | "turn_completed", outcome?: "aborted"): void {
+    this.sessionUploader.captureSnapshot(sessionId, trigger, outcome);
   }
 
   recordWebVisit(sessionId: string, visit: UploadWebVisit): boolean {

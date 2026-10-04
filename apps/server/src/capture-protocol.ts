@@ -21,7 +21,7 @@ export type CaptureCalls = {
   flushTrace: [sessionId: string, finalTrace?: unknown];
   finishSession: [sessionId: string, finalTrace?: unknown];
   recordPrompt: [sessionId: string, prompt: PromptRecord];
-  captureSnapshot: [sessionId: string, trigger: "prompt" | "turn_completed"];
+  captureSnapshot: [sessionId: string, trigger: "prompt" | "turn_completed", outcome?: "aborted"];
   recordWebVisit: [sessionId: string, visit: UploadWebVisit];
   archiveSessionStarted: [sessionId: string, root: string, target: EngineTarget];
   archiveStartGate: [sessionId: string, root: string];

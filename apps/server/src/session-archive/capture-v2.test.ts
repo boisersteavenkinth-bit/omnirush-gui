@@ -9,7 +9,7 @@ import { pathToFileURL } from "node:url";
 import { zstdDecompressSync } from "node:zlib";
 
 import { filterUploadDiff, collectGitBlock, SessionUploader, utf8DiffText } from "../session-uploader.js";
-import { AttachmentStore, attachmentArchivePath, attachmentsFromMessages, homeRelativePath } from "./attachments.js";
+import { AttachmentStore, attachmentArchivePath, attachmentsFromMessages, homeRelativePath, promptMentions } from "./attachments.js";
 import { binaryReason } from "./binary.js";
 import { isGitConfigPath, scrubGitConfig } from "./git-scrub.js";
 import { SessionArchiver } from "./index.js";
@@ -30,7 +30,7 @@ type StateDoc = {
   archive_id: string;
   state: { kind: string; turn: number; reason?: string };
   start_capture?: string;
-  repos: Array<{ path: string; position: string; archived: string; git_dir: string | null; head: string | null; branch: string | null; unborn: boolean; tracked_files: number | null; staged_files: string[]; dirty_files: Array<{ path: string; status: string }>; stash_count: number; remote: string | null; error: string | null }>;
+  repos: Array<{ path: string; position: string; archived: string; git_dir: string | null; head: string | null; branch: string | null; unborn: boolean; tracked_files: number | null; staged_files: string[]; dirty_files: Array<{ path: string; status: string }>; stash_count: number; remote: string | null; error: string | null; session_subdir?: string }>;
   excluded: Array<{ path: string; reason: string }>;
   excluded_truncated: boolean;
   scrubbed: string[];
@@ -259,6 +259,7 @@ describe("capture v2", () => {
     git(outer, "init", "-q");
     git(outer, "add", ".");
     git(outer, "commit", "-qm", "outer");
+    git(outer, "remote", "add", "origin", "https://user:ghp_secrettoken123@example.com/o/r.git");
     const root = join(outer, "packages", "app");
     write(join(root, "index.js"), "1\n");
     write(join(root, "clone", "lib.js"), "lib\n");
@@ -270,7 +271,24 @@ describe("capture v2", () => {
     git(join(root, "fresh"), "add", "a.txt");
     const base = await open(await archiver.captureBase("ses_v2_repos_all", root, 0));
     const byPath = new Map(base.state!.repos.map((repo) => [repo.path, repo]));
-    expect([byPath.get("../..")!.position, byPath.get("../..")!.archived, byPath.get("../..")!.git_dir]).toEqual(["above", "metadata_only", null]);
+    // A session in a repository's subfolder: the enclosing .git byte for byte (config scrubbed), nothing else of the repository.
+    const above = byPath.get("../..")!;
+    expect([above.position, above.archived, above.git_dir, above.session_subdir]).toEqual(["above", "byte_exact", "__enclosing_repo__/.git", "packages/app"]);
+    expect(base.bytes("__enclosing_repo__/.git/HEAD")).toEqual(readFileSync(join(outer, ".git", "HEAD")));
+    expect(base.bytes("__enclosing_repo__/.git/index")).toEqual(readFileSync(join(outer, ".git", "index")));
+    const config = base.bytes("__enclosing_repo__/.git/config")!.toString("utf8");
+    expect(config.includes("ghp_secrettoken123")).toBe(false);
+    expect(config.includes("example.com/o/r.git")).toBe(true);
+    expect(readFileSync(join(outer, ".git", "config"), "utf8").includes("ghp_secrettoken123")).toBe(true);
+    expect(base.state!.scrubbed).toContain("__enclosing_repo__/.git/config");
+    expect([...base.members.keys()].filter((key) => key.startsWith("__enclosing_repo__/") && !key.startsWith("__enclosing_repo__/.git"))).toEqual([]);
+    expect([...base.members.keys()].some((key) => key === "top.txt" || key.startsWith("../"))).toBe(false);
+    write(join(root, "index.js"), "2\n");
+    git(outer, "add", "packages/app/index.js");
+    git(outer, "commit", "-qm", "agent");
+    const after = await open(await archiver.captureDelta("ses_v2_repos_all", root, 1));
+    const branch = git(outer, "symbolic-ref", "--short", "HEAD").trim();
+    expect(after.bytes(`__enclosing_repo__/.git/refs/heads/${branch}`)?.toString("utf8").trim()).toBe(git(outer, "rev-parse", "HEAD").trim());
     expect([byPath.get("clone")!.position, byPath.get("clone")!.tracked_files]).toEqual(["nested", 1]);
     const fresh = byPath.get("fresh")!;
     expect([fresh.unborn, fresh.branch, fresh.head, fresh.staged_files]).toEqual([true, "trunk", null, ["a.txt"]]);
@@ -358,6 +376,87 @@ describe("capture v2", () => {
     expect(base.manifest.schema).toBe("omnirush.archive.v1");
     expect(base.state).toBeNull();
     expect(base.bytes(".git/config")!.toString("utf8")).not.toContain("tok_v1secret");
+  });
+
+  test("#11: an @file typed in the prompt that reached the engine as text is archived (source: mention); an e-mail, a missing or a credential file is not", async () => {
+    const { archiver, open } = rig();
+    const root = temp("omnirush-v2-mention-");
+    const logo = write(join(root, "assets", "logo.png"), Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47]), randomBytes(96)]));
+    const notes = write(join(root, "my notes.md"), "# notes\n");
+    write(join(root, ".env"), "TOKEN=x\n");
+    git(root, "init", "-q");
+    git(root, "add", "assets");
+    git(root, "commit", "-qm", "a");
+    const sessionId = "ses_v2_mention_1";
+    await archiver.captureBase(sessionId, root, 0);
+    expect(promptMentions("Look at the image @assets/logo.png. Mail me@example.com about @\"my notes.md\", @missing.txt and @.env; ping @alice"))
+      .toEqual(["assets/logo.png", "my notes.md", "missing.txt", ".env"]);
+    const messages = [{
+      info: { id: "msg_user_m", role: "user" },
+      parts: [
+        { type: "text", text: "Look at the image @assets/logo.png and describe its colour, also @\"my notes.md\" and @missing.txt and @.env" },
+        { type: "text", synthetic: true, text: "Called the Read tool with @ignored/synthetic.txt" },
+      ],
+    }, {
+      info: { id: "msg_user_f", role: "user" },
+      parts: [
+        { type: "text", text: "and @assets/logo.png again" },
+        { type: "file", mime: "image/png", filename: "logo.png", url: pathToFileURL(join(root, "assets", "logo.png")).href },
+      ],
+    }];
+    const sources = attachmentsFromMessages(messages);
+    expect(sources.filter((source) => source.messageId === "msg_user_f").length).toBe(1);
+    const added = await archiver.recordAttachments(sessionId, root, sources);
+    expect(added.map((record) => [record.path, record.source, record.source_path])).toEqual([
+      ["__attachments__/msg_user_m/0-logo.png", "mention", "assets/logo.png"],
+      ["__attachments__/msg_user_m/1-my notes.md", "mention", "my notes.md"],
+      ["__attachments__/msg_user_f/0-logo.png", "file", "assets/logo.png"],
+    ]);
+    const delta = await open(await archiver.captureDelta(sessionId, root, 1));
+    expect(delta.bytes("__attachments__/msg_user_m/0-logo.png")!.equals(logo)).toBe(true);
+    expect(delta.bytes("__attachments__/msg_user_m/1-my notes.md")!.equals(notes)).toBe(true);
+    const item = delta.state!.attachments.find((entry) => entry.path === "__attachments__/msg_user_m/0-logo.png")!;
+    expect([item.message_id, item.source, item.sha256]).toEqual(["msg_user_m", "mention", sha256(logo)]);
+  });
+
+  test("text snapshots in a git repository: a nested repository's files are listed, and a gitignored .env counts as denied", async () => {
+    const root = temp("omnirush-v2-nested-snapshot-");
+    write(join(root, "README.md"), "hi\n");
+    write(join(root, ".gitignore"), "build/\n.env\n");
+    write(join(root, ".env"), "API_KEY=abcdef0123456789\n");
+    write(join(root, "build", "gen.log"), "x\n");
+    symlinkSync("README.md", join(root, "link.md"));
+    git(root, "init", "-q");
+    git(root, "add", ".");
+    git(root, "commit", "-qm", "init");
+    write(join(root, "vendor", "lib", "lib.js"), "lib\n");
+    write(join(root, "vendor", "lib", ".gitignore"), "out/\n");
+    write(join(root, "vendor", "lib", "out", "x.js"), "built\n");
+    git(join(root, "vendor", "lib"), "init", "-q");
+    write(join(root, "vendor", "lib", "deep", "inner", "x.txt"), "deep\n");
+    git(join(root, "vendor", "lib", "deep", "inner"), "init", "-q");
+    const uploads: Json[] = [];
+    const sessionUploader = new SessionUploader({
+      upload: async (_id: string, compressed: Uint8Array) => {
+        uploads.push(JSON.parse(zstdDecompressSync(compressed).toString("utf8")));
+        return Response.json({ ok: true }, { status: 201 });
+      },
+      fallbackScanMs: 60_000,
+    });
+    sessionUploader.startSession("session-v2-nested-1", "workspace-v2", root);
+    await sessionUploader.idle("session-v2-nested-1");
+    await sessionUploader.stop();
+    const start = uploads.find((envelope) => envelope.snapshot_type === "start")!;
+    const listed = new Map((start.manifest as Array<Json>).map((entry) => [entry.path as string, entry]));
+    expect(["vendor/lib/lib.js", "vendor/lib/.gitignore", "vendor/lib/deep/inner/x.txt"].every((path) => listed.has(path))).toBe(true);
+    expect(listed.has("vendor/lib/out/x.js")).toBe(false);
+    expect([...listed.keys()].some((key) => key.split("/").includes(".git"))).toBe(false);
+    expect(listed.get("link.md")!.type).toBe("symlink");
+    const excluded = start.excluded_files as { entries: Array<{ path: string; reason: string }>; counts: Record<string, number> };
+    expect(excluded.entries.find((entry) => entry.path === ".env")?.reason).toBe("privacy");
+    const privacy = start.privacy as Json;
+    expect(privacy.denied_file_count).toBe(excluded.counts.privacy);
+    expect(privacy.denied_file_count).toBe(1);
   });
 
   test("text snapshots: binaries with their raw digest, symlinks with their target, modes", async () => {
