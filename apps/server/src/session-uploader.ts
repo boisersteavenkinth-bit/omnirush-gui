@@ -662,9 +662,11 @@ const EXCLUDED_LAST_SEGMENTS = new Set([
  * extension names a programming language is scrubbed in SOURCE mode, where an
  * assignment's value must look like a generated literal; everything else
  * (.env*, ini, cfg, conf, yml, yaml, toml, json, properties, txt, md, no or
- * unknown extension), plus the envelope's git diff and the trace, is scrubbed
- * in CONFIG mode with the permissive rule. A `.patch` or `.diff` workspace
- * file carries code and is SOURCE.
+ * unknown extension), plus the trace, is scrubbed in CONFIG mode with the
+ * permissive rule. A `.patch` or `.diff` workspace file carries code and is
+ * SOURCE. The file text the trace and the envelope's git diff carry (file
+ * tool content, diffs, read output: see fileAwareRecord and filterUploadDiff)
+ * gets the mode of the file it belongs to.
  */
 export type RedactMode = "source" | "config";
 const SOURCE_EXTENSIONS = new Set([
@@ -1188,7 +1190,7 @@ function nextAssignmentKeyword(text: string, from: number): number {
 export type RedactUploadTextOptions = {
   /** Text that counts as context for context-dependent rules: the file path, or the JSON key a value sits under. */
   context?: string;
-  /** Value rule mode; CONFIG when omitted (git diffs, the trace, JSON). See redactModeForPath. */
+  /** Value rule mode; CONFIG when omitted (the trace, JSON). See redactModeForPath. */
   mode?: RedactMode;
   /** The enclosing JSON object or array names an AWS key: the AWS rule runs whatever the line count. */
   awsContext?: boolean;
@@ -1255,8 +1257,17 @@ function membersNameAws(members: ReadonlyArray<readonly [string, unknown]>): boo
   return members.some(([key, item]) => namesAws(key) || namesAws(item));
 }
 
-function redactJsonValue(value: unknown, key: string | undefined, tally: JsonTally, depth = 0, awsContext = false, maxDepth = Infinity): unknown {
+function redactJsonValue(
+  value: unknown,
+  key: string | undefined,
+  tally: JsonTally,
+  depth = 0,
+  awsContext = false,
+  maxDepth = Infinity,
+  fileAware = false,
+): unknown {
   if (depth > maxDepth) throw new JsonTooDeep();
+  if (value instanceof Prescrubbed) return value.text;
   if (typeof value === "string") {
     // A JSON string is always a quoted literal, scrubbed in CONFIG mode.
     // A path-like key (`{"src/admin_auth.py": "<sha256>"}`) names a file, never a secret.
@@ -1276,7 +1287,7 @@ function redactJsonValue(value: unknown, key: string | undefined, tally: JsonTal
   // environments) is redacted although `value` names nothing.
   if (Array.isArray(value)) {
     const context = awsContext || value.some(namesAws);
-    return value.map((item) => redactJsonValue(item, key, tally, depth + 1, context, maxDepth));
+    return value.map((item) => redactJsonValue(item, key, tally, depth + 1, context, maxDepth, fileAware));
   }
   if (value instanceof JsonPairs) {
     tally.members += value.pairs.length;
@@ -1284,12 +1295,13 @@ function redactJsonValue(value: unknown, key: string | undefined, tally: JsonTal
     return new JsonPairs(value.pairs.map(([childKey, childValue]) => {
       const scrubbedKey = redactUploadText(childKey, { awsContext: context });
       tally.count += scrubbedKey.count;
-      return [scrubbedKey.text, redactJsonValue(childValue, childKey, tally, depth + 1, context, maxDepth)];
+      return [scrubbedKey.text, redactJsonValue(childValue, childKey, tally, depth + 1, context, maxDepth, fileAware)];
     }));
   }
   const serializable = value as { toJSON?: unknown };
-  if (typeof serializable.toJSON === "function") return redactJsonValue((serializable.toJSON as () => unknown)(), key, tally, depth, awsContext, maxDepth);
-  const entries = Object.entries(value as Record<string, unknown>);
+  if (typeof serializable.toJSON === "function") return redactJsonValue((serializable.toJSON as () => unknown)(), key, tally, depth, awsContext, maxDepth, fileAware);
+  const record = fileAware ? fileAwareRecord(value as Record<string, unknown>, tally) : value as Record<string, unknown>;
+  const entries = Object.entries(record);
   tally.members += entries.length;
   const context = awsContext || membersNameAws(entries);
   // No prototype, so a `__proto__` key stays an ordinary member.
@@ -1297,7 +1309,7 @@ function redactJsonValue(value: unknown, key: string | undefined, tally: JsonTal
   for (const [childKey, childValue] of entries) {
     const scrubbedKey = redactUploadText(childKey, { awsContext: context });
     tally.count += scrubbedKey.count;
-    output[scrubbedKey.text] = redactJsonValue(childValue, childKey, tally, depth + 1, context, maxDepth);
+    output[scrubbedKey.text] = redactJsonValue(childValue, childKey, tally, depth + 1, context, maxDepth, fileAware);
   }
   return output;
 }
@@ -1310,9 +1322,9 @@ function redactJsonValue(value: unknown, key: string | undefined, tally: JsonTal
  * never produce a broken escape, which scrubbing serialised JSON as text could.
  * The backend's _redact_json_value.
  */
-export function redactUploadJson(value: unknown): { value: unknown; count: number } {
+export function redactUploadJson(value: unknown, options: { fileAware?: boolean } = {}): { value: unknown; count: number } {
   const tally: JsonTally = { count: 0, members: 0 };
-  return { value: redactJsonValue(value, undefined, tally), count: tally.count };
+  return { value: redactJsonValue(value, undefined, tally, 0, false, Infinity, options.fileAware === true), count: tally.count };
 }
 
 /**
@@ -1472,6 +1484,231 @@ function redactUploadContentCounted(path: string, text: string): { text: string;
     if (json !== null) return { text: json, count: json === text ? 0 : 1 };
   }
   return redactUploadText(text, { context: path, mode: redactModeForPath(path) });
+}
+
+// --- file-aware trace scrub --------------------------------------------------
+// The trace is scrubbed in CONFIG mode, except for the strings that carry a
+// workspace file's text: the content a file tool writes or replaces, the
+// diffs and patches it reports, a read tool's output and a "turn.diff"
+// event's hunks. Those are scrubbed with the mode the target file's path
+// selects (redactModeForPath), exactly as a snapshot of that file is, so
+// `f(token:string){...}` in a .ts file survives a write tool call the way it
+// survives the file upload. A diff or patch naming several files is scrubbed
+// file by file. Everything else (shell commands and output, chat text, other
+// tools' input and output, a file tool call with no path) stays CONFIG. The
+// backend's _file_aware_* helpers apply the identical rule; a change here
+// must land there too.
+
+/** A string the file-aware pass already scrubbed: the JSON walker keeps it as it is. */
+class Prescrubbed {
+  constructor(readonly text: string) {}
+}
+
+const FILE_WRITE_TOOLS = new Set(["write", "edit", "multiedit"]);
+const FILE_PATCH_TOOLS = new Set(["patch", "apply_patch"]);
+const FILE_READ_TOOLS = new Set(["read"]);
+/** A file tool's target path, in the order looked for (opencode, pi, other engines). */
+const FILE_TOOL_PATH_KEYS = ["filePath", "path", "file_path"];
+/** A file tool input's whole-file text: scrubbed as the file's snapshot is. */
+const FILE_TOOL_CONTENT_KEYS = ["content"];
+/** A file tool input's replaced and replacing text. */
+const FILE_TOOL_FRAGMENT_KEYS = ["oldString", "newString", "oldText", "newText", "old_string", "new_string"];
+/** A patch tool input's patch text. */
+const FILE_TOOL_PATCH_KEYS = ["patchText", "patch", "input"];
+/** A file entry's path in tool metadata (apply_patch `files`, edit `filediff`). */
+const FILE_ENTRY_PATH_KEYS = ["filePath", "file", "relativePath", "path"];
+// A diff or patch starts a new file at a git header, a jsdiff `Index:` line
+// (opencode's edit and apply_patch metadata) or an apply_patch file marker.
+const FILE_SEGMENT_START = /(?:^|(?<=\n))(?=diff --git |Index: |\*\*\* (?:Add|Update|Delete) File: )/;
+const PATCH_FILE_HEADER = /^\*\*\* (?:Add|Update|Delete) File: ([\s\S]*)$/;
+const MAX_TOOL_PATH_CHARS = 4096;
+
+function fileToolPath(value: unknown): string | null {
+  if (typeof value !== "string" || !value || value.length > MAX_TOOL_PATH_CHARS || value.includes("\n") || value.includes("\r")) return null;
+  return value;
+}
+
+function firstFilePath(records: readonly Record<string, unknown>[], keys: readonly string[]): string | null {
+  for (const record of records) {
+    for (const key of keys) {
+      const path = fileToolPath(record[key]);
+      if (path !== null) return path;
+    }
+  }
+  return null;
+}
+
+function trimBlanks(text: string): string {
+  return text.replace(/^[ \t]+|[ \t]+$/g, "");
+}
+
+/** The path a diff segment names in its first line, or `fallback` for a segment with no file header. */
+function diffSegmentPath(segment: string, fallback: string | null): string | null {
+  const newline = segment.indexOf("\n");
+  let first = newline === -1 ? segment : segment.slice(0, newline);
+  if (first.endsWith("\r")) first = first.slice(0, -1);
+  if (first.startsWith("diff --git ")) return diffHeaderPath(first);
+  if (first.startsWith("Index: ")) return fileToolPath(trimBlanks(first.slice("Index: ".length)));
+  const patch = PATCH_FILE_HEADER.exec(first);
+  if (patch) return fileToolPath(trimBlanks(patch[1] ?? ""));
+  return fallback;
+}
+
+/** Scrubs `text` as a file's text: the mode the path selects, CONFIG with no path. */
+function redactFileText(text: string, path: string | null, tally: { count: number }): string {
+  const result = path === null ? redactUploadText(text) : redactUploadText(text, { context: path, mode: redactModeForPath(path) });
+  tally.count += result.count;
+  return result.text;
+}
+
+/** Scrubs `text` as a whole file is uploaded: a `.json` file structurally, anything else as file text. */
+function redactFileContent(text: string, path: string | null, tally: { count: number }): string {
+  if (path !== null && extname(path).toLowerCase() === ".json") {
+    const json = redactUploadJsonText(text, path);
+    if (json !== null) {
+      if (json !== text) tally.count += 1;
+      return json;
+    }
+  }
+  return redactFileText(text, path, tally);
+}
+
+/**
+ * Scrubs a unified diff or patch file by file: each segment that starts with
+ * a file header (`diff --git`, `Index:`, `*** Update File:`) under the mode
+ * its own path selects, a segment with no header (a single-file diff, a
+ * patch's preamble) under the mode of `fallback`. The backend's
+ * redact_diff_by_file.
+ */
+export function redactDiffByFile(text: string, fallback: string | null, tally: { count: number } = { count: 0 }): string {
+  let output = "";
+  for (const segment of text.split(FILE_SEGMENT_START)) {
+    if (segment) output += redactFileText(segment, diffSegmentPath(segment, fallback), tally);
+  }
+  return output;
+}
+
+function prescrub(record: Record<string, unknown>, key: string, scrub: (text: string) => string): void {
+  const value = record[key];
+  if (typeof value === "string") record[key] = new Prescrubbed(scrub(value));
+}
+
+/** A tool input with its file text prescrubbed (a copy; the original is left alone). */
+function fileAwareToolInput(input: Record<string, unknown>, name: string, path: string | null, tally: { count: number }): Record<string, unknown> {
+  const copy: Record<string, unknown> = { ...input };
+  if (FILE_PATCH_TOOLS.has(name)) {
+    for (const key of FILE_TOOL_PATCH_KEYS) prescrub(copy, key, (text) => redactDiffByFile(text, null, tally));
+    return copy;
+  }
+  if (path === null) return copy;
+  for (const key of FILE_TOOL_CONTENT_KEYS) prescrub(copy, key, (text) => redactFileContent(text, path, tally));
+  for (const key of FILE_TOOL_FRAGMENT_KEYS) prescrub(copy, key, (text) => redactFileText(text, path, tally));
+  const edits = copy.edits;
+  // Some models send `edits` as a JSON string: it is scrubbed as it stands,
+  // escapes and all (SOURCE mode never reads past a `\n` escape).
+  if (typeof edits === "string") copy.edits = new Prescrubbed(redactFileText(edits, path, tally));
+  else if (Array.isArray(edits)) {
+    copy.edits = edits.map((edit) => {
+      if (!isRecord(edit)) return edit;
+      const editPath = firstFilePath([edit], FILE_TOOL_PATH_KEYS) ?? path;
+      const item: Record<string, unknown> = { ...edit };
+      for (const key of FILE_TOOL_FRAGMENT_KEYS) prescrub(item, key, (text) => redactFileText(text, editPath, tally));
+      return item;
+    });
+  }
+  return copy;
+}
+
+/** A file entry of tool metadata (`filediff`, an apply_patch `files` item) with its texts prescrubbed. */
+function fileAwareFileEntry(entry: Record<string, unknown>, path: string | null, tally: { count: number }): Record<string, unknown> {
+  const entryPath = firstFilePath([entry], FILE_ENTRY_PATH_KEYS) ?? path;
+  const copy: Record<string, unknown> = { ...entry };
+  for (const key of ["patch", "diff"]) prescrub(copy, key, (text) => redactDiffByFile(text, entryPath, tally));
+  if (entryPath !== null) {
+    for (const key of ["before", "after"]) prescrub(copy, key, (text) => redactFileContent(text, entryPath, tally));
+  }
+  return copy;
+}
+
+/** File tool metadata (opencode's, pi's details, the 2.x engine's under `v2`) with its diffs prescrubbed. */
+function fileAwareToolMetadata(metadata: Record<string, unknown>, path: string | null, tally: { count: number }, depth = 0): Record<string, unknown> {
+  const copy: Record<string, unknown> = { ...metadata };
+  for (const key of ["diff", "patch"]) prescrub(copy, key, (text) => redactDiffByFile(text, path, tally));
+  if (isRecord(copy.filediff)) copy.filediff = fileAwareFileEntry(copy.filediff, path, tally);
+  if (Array.isArray(copy.files)) copy.files = copy.files.map((entry) => (isRecord(entry) ? fileAwareFileEntry(entry, path, tally) : entry));
+  if (depth === 0) {
+    // multiedit: one edit's metadata per edit.
+    if (Array.isArray(copy.results)) copy.results = copy.results.map((entry) => (isRecord(entry) ? fileAwareToolMetadata(entry, path, tally, 1) : entry));
+    if (isRecord(copy.v2)) copy.v2 = fileAwareToolMetadata(copy.v2, path, tally, 1);
+  }
+  return copy;
+}
+
+/** A read tool's state with the file text it returned prescrubbed. */
+function fileAwareReadState(state: Record<string, unknown>, path: string, tally: { count: number }): void {
+  prescrub(state, "output", (text) => redactFileText(text, path, tally));
+  if (Array.isArray(state.content)) {
+    state.content = state.content.map((item) => {
+      if (!isRecord(item) || item.type !== "text") return item;
+      const copy: Record<string, unknown> = { ...item };
+      prescrub(copy, "text", (text) => redactFileText(text, path, tally));
+      return copy;
+    });
+  }
+  if (isRecord(state.metadata)) {
+    const metadata: Record<string, unknown> = { ...state.metadata };
+    prescrub(metadata, "preview", (text) => redactFileText(text, path, tally));
+    if (isRecord(metadata.display)) {
+      const display: Record<string, unknown> = { ...metadata.display };
+      prescrub(display, "text", (text) => redactFileText(text, path, tally));
+      metadata.display = display;
+    }
+    state.metadata = metadata;
+  }
+}
+
+/** The lower-cased tool name of an engine tool part (`tool`, else the 2.x `name`), or null. */
+function fileToolName(part: Record<string, unknown>): string | null {
+  const raw = typeof part.tool === "string" ? part.tool : typeof part.name === "string" ? part.name : null;
+  if (raw === null) return null;
+  const name = raw.toLowerCase().split(".").at(-1) ?? "";
+  return FILE_WRITE_TOOLS.has(name) || FILE_PATCH_TOOLS.has(name) || FILE_READ_TOOLS.has(name) ? name : null;
+}
+
+/**
+ * The record with the strings that carry file text prescrubbed under their
+ * file's mode, or the record itself when it is neither a file tool part
+ * (`{type: "tool", tool|name, state}`) nor a "turn.diff" event. The
+ * backend's _file_aware_record.
+ */
+function fileAwareRecord(record: Record<string, unknown>, tally: { count: number }): Record<string, unknown> {
+  if (record.type === "turn.diff" && isRecord(record.data) && Array.isArray(record.data.files)) {
+    const files = record.data.files.map((entry) => {
+      if (!isRecord(entry)) return entry;
+      const copy: Record<string, unknown> = { ...entry };
+      prescrub(copy, "diff", (text) => redactDiffByFile(text, fileToolPath(entry.path), tally));
+      return copy;
+    });
+    return { ...record, data: { ...record.data, files } };
+  }
+  if (record.type !== "tool" || !isRecord(record.state)) return record;
+  const name = fileToolName(record);
+  if (name === null) return record;
+  const state: Record<string, unknown> = { ...record.state };
+  const v2 = isRecord(state.v2) ? { ...state.v2 } : null;
+  const inputs = [state.input, v2?.input].filter(isRecord);
+  const path = firstFilePath(inputs, FILE_TOOL_PATH_KEYS);
+  if (FILE_READ_TOOLS.has(name)) {
+    if (path !== null) fileAwareReadState(state, path, tally);
+    return { ...record, state };
+  }
+  if (isRecord(state.input)) state.input = fileAwareToolInput(state.input, name, path, tally);
+  if (isRecord(state.metadata)) state.metadata = fileAwareToolMetadata(state.metadata, path, tally);
+  if (v2 !== null) {
+    if (isRecord(v2.input)) v2.input = fileAwareToolInput(v2.input, name, path, tally);
+    state.v2 = v2;
+  }
+  return { ...record, state };
 }
 
 /**
@@ -1924,7 +2161,7 @@ function boundedTraceBatches(
     session_segment: state.segment,
     session_resumed: state.resumed,
     events,
-  }).value as Record<string, unknown> & { events: TraceEvent[] };
+  }, { fileAware: true }).value as Record<string, unknown> & { events: TraceEvent[] };
   const encode = (selected: unknown[], truncated: boolean, dropped: number): BoundedTraceBatch & { byteLength: number } => {
     const content = JSON.stringify({
     ...header,
@@ -2240,7 +2477,8 @@ export function filterUploadDiff(raw: string, inputTruncated = false): { diff: s
     if (!path || isUploadPathDenied(path)) continue;
     if (/^(?:Binary files .* differ|GIT binary patch)/m.test(section)) continue;
     // A diff is text even when the file is JSON: hunks are not parseable documents.
-    const redacted = redactUploadText(section, { context: path }).text;
+    // Each file's section under the mode its path selects, as the file's snapshot.
+    const redacted = redactUploadText(section, { context: path, mode: redactModeForPath(path) }).text;
     const size = Buffer.byteLength(redacted);
     if (used + size > MAX_UPLOAD_DIFF_BYTES) {
       truncated = true;

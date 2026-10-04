@@ -2261,10 +2261,13 @@ describe("session uploader scrubber parity: second-sample refinements", () => {
     expect(redactUploadText("LIVE_DSN = 'postgres://live:secret@host/db'\n", { context: "tests/fixtures.py", mode: "source" }).count).toBe(1);
     expect(redactUploadContent("fix.patch", PATCH)).toBe(PATCH.replace('"hunter2abc"', '"[REDACTED]"'));
     expect(redactUploadText(PATCH, { context: "fix.patch", mode: redactModeForPath("fix.patch") }).count).toBe(1);
-    // The envelope's git diff stays config, where a bare `hunter2abc` is a
-    // literal; the same line in a .patch file is a name.
+    // The envelope's git diff scrubs each file's section with that file's
+    // mode: in a .py section a bare `hunter2abc` is a name, as in the file
+    // itself; in a config file's section it is a literal.
     expect(filterUploadDiff("diff --git a/app/settings.py b/app/settings.py\n+password = hunter2abc\n").diff)
-      .toBe("diff --git a/app/settings.py b/app/settings.py\n+password = [REDACTED]\n");
+      .toBe("diff --git a/app/settings.py b/app/settings.py\n+password = hunter2abc\n");
+    expect(filterUploadDiff("diff --git a/app/settings.ini b/app/settings.ini\n+password = hunter2abc\n").diff)
+      .toBe("diff --git a/app/settings.ini b/app/settings.ini\n+password = [REDACTED]\n");
     expect(redactUploadText("+password = hunter2abc", { mode: redactModeForPath("fix.patch") })).toEqual({ text: "+password = hunter2abc", count: 0 });
   });
 
@@ -2419,7 +2422,7 @@ describe("session uploader scrubber parity: second-sample refinements", () => {
     expect(redactUploadContent("a.json", '{"__proto__": {"password": "hunter2abc"}}')).toBe('{"__proto__":{"password":"[REDACTED]"}}');
   });
 
-  test("a .patch file is scrubbed as source while the envelope's git diff stays config", async () => {
+  test("a .patch file is scrubbed as source, and the envelope's git diff with each file's own mode", async () => {
     const root = await mkdtemp(join(tmpdir(), "omnirush-upload-patch-"));
     roots.push(root);
     await git(root, "init", "-q");
@@ -2441,10 +2444,10 @@ describe("session uploader scrubber parity: second-sample refinements", () => {
     expect(content("app/settings.py")).toBe("import config\npassword = hunter2abc\n");
     expect(content("fix.patch")).toBe(PATCH.replace('"hunter2abc"', '"[REDACTED]"'));
     expect(content("notes.diff")).toBe("+password = hunter2abc\n");
-    // The envelope's git diff is config: the same bare value is a literal there.
+    // The envelope's git diff scrubs the .py section as source, as the file itself.
     const gitBlock = start.workspace.git as { diff: string };
-    expect(gitBlock.diff).toContain("+password = [REDACTED]");
-    expect(gitBlock.diff).not.toContain("hunter2abc");
+    expect(gitBlock.diff).toContain("+password = hunter2abc");
+    expect(gitBlock.diff).not.toContain("[REDACTED]");
   });
 });
 

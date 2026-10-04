@@ -1,0 +1,1368 @@
+[
+ {
+  "name": "opencode edit of a .ts file keeps code in oldString/newString",
+  "kind": "trace",
+  "input": {
+   "schema_version": 1,
+   "session_id": "ses_1",
+   "events": [
+    {
+     "at": "2026-10-04T00:00:00.000Z",
+     "type": "turn.messages",
+     "data": {
+      "messages": [
+       {
+        "info": {
+         "id": "msg_1",
+         "role": "assistant"
+        },
+        "parts": [
+         {
+          "type": "tool",
+          "callID": "call_1",
+          "tool": "edit",
+          "state": {
+           "status": "completed",
+           "input": {
+            "filePath": "/work/proj/src/a.ts",
+            "oldString": "export function f(){}",
+            "newString": "export async function f(token:string){await fetch(u)}"
+           },
+           "output": "Edit applied successfully.",
+           "metadata": {
+            "diff": "Index: /work/proj/src/a.ts\n===================================================================\n--- /work/proj/src/a.ts\n+++ /work/proj/src/a.ts\n@@ -1,1 +1,1 @@\n-export function f(){}\n+export async function f(token:string){await fetch(u)}\n",
+            "filediff": {
+             "file": "/work/proj/src/a.ts",
+             "before": "export function f(){}\n",
+             "after": "export async function f(token:string){await fetch(u)}\n",
+             "additions": 1,
+             "deletions": 1
+            }
+           }
+          }
+         }
+        ]
+       }
+      ],
+      "part": 1,
+      "parts": 1
+     }
+    }
+   ]
+  },
+  "expected": {
+   "schema_version": 1,
+   "session_id": "ses_1",
+   "events": [
+    {
+     "at": "2026-10-04T00:00:00.000Z",
+     "type": "turn.messages",
+     "data": {
+      "messages": [
+       {
+        "info": {
+         "id": "msg_1",
+         "role": "assistant"
+        },
+        "parts": [
+         {
+          "type": "tool",
+          "callID": "call_1",
+          "tool": "edit",
+          "state": {
+           "status": "completed",
+           "input": {
+            "filePath": "/work/proj/src/a.ts",
+            "oldString": "export function f(){}",
+            "newString": "export async function f(token:string){await fetch(u)}"
+           },
+           "output": "Edit applied successfully.",
+           "metadata": {
+            "diff": "Index: /work/proj/src/a.ts\n===================================================================\n--- /work/proj/src/a.ts\n+++ /work/proj/src/a.ts\n@@ -1,1 +1,1 @@\n-export function f(){}\n+export async function f(token:string){await fetch(u)}\n",
+            "filediff": {
+             "file": "/work/proj/src/a.ts",
+             "before": "export function f(){}\n",
+             "after": "export async function f(token:string){await fetch(u)}\n",
+             "additions": 1,
+             "deletions": 1
+            }
+           }
+          }
+         }
+        ]
+       }
+      ],
+      "part": 1,
+      "parts": 1
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "opencode write of a .ts file keeps code with a real newline",
+  "kind": "trace",
+  "input": {
+   "schema_version": 1,
+   "session_id": "ses_1",
+   "events": [
+    {
+     "at": "2026-10-04T00:00:00.000Z",
+     "type": "turn.messages",
+     "data": {
+      "messages": [
+       {
+        "info": {
+         "id": "msg_1",
+         "role": "assistant"
+        },
+        "parts": [
+         {
+          "type": "tool",
+          "callID": "call_1",
+          "tool": "write",
+          "state": {
+           "status": "completed",
+           "input": {
+            "filePath": "/work/proj/src/b.ts",
+            "content": "const g = async(token:string)=>{}\nfunction a(token:string){await b}"
+           },
+           "output": "Wrote file successfully."
+          }
+         }
+        ]
+       }
+      ],
+      "part": 1,
+      "parts": 1
+     }
+    }
+   ]
+  },
+  "expected": {
+   "schema_version": 1,
+   "session_id": "ses_1",
+   "events": [
+    {
+     "at": "2026-10-04T00:00:00.000Z",
+     "type": "turn.messages",
+     "data": {
+      "messages": [
+       {
+        "info": {
+         "id": "msg_1",
+         "role": "assistant"
+        },
+        "parts": [
+         {
+          "type": "tool",
+          "callID": "call_1",
+          "tool": "write",
+          "state": {
+           "status": "completed",
+           "input": {
+            "filePath": "/work/proj/src/b.ts",
+            "content": "const g = async(token:string)=>{}\nfunction a(token:string){await b}"
+           },
+           "output": "Wrote file successfully."
+          }
+         }
+        ]
+       }
+      ],
+      "part": 1,
+      "parts": 1
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "pi edit with edits sent as a JSON string: escapes are never eaten",
+  "kind": "trace",
+  "input": {
+   "schema_version": 1,
+   "session_id": "ses_1",
+   "events": [
+    {
+     "at": "2026-10-04T00:00:00.000Z",
+     "type": "turn.messages",
+     "data": {
+      "messages": [
+       {
+        "info": {
+         "id": "msg_1",
+         "role": "assistant"
+        },
+        "parts": [
+         {
+          "type": "tool",
+          "callID": "call_1",
+          "tool": "edit",
+          "state": {
+           "status": "completed",
+           "input": {
+            "path": "src/c.ts",
+            "edits": "[{\"oldText\": \"a\", \"newText\": \"async(token:string)=>{}\\nfunction a(token:string){await b}\"}]"
+           },
+           "output": "ok"
+          }
+         }
+        ]
+       }
+      ],
+      "part": 1,
+      "parts": 1
+     }
+    }
+   ]
+  },
+  "expected": {
+   "schema_version": 1,
+   "session_id": "ses_1",
+   "events": [
+    {
+     "at": "2026-10-04T00:00:00.000Z",
+     "type": "turn.messages",
+     "data": {
+      "messages": [
+       {
+        "info": {
+         "id": "msg_1",
+         "role": "assistant"
+        },
+        "parts": [
+         {
+          "type": "tool",
+          "callID": "call_1",
+          "tool": "edit",
+          "state": {
+           "status": "completed",
+           "input": {
+            "path": "src/c.ts",
+            "edits": "[{\"oldText\": \"a\", \"newText\": \"async(token:string)=>{}\\nfunction a(token:string){await b}\"}]"
+           },
+           "output": "ok"
+          }
+         }
+        ]
+       }
+      ],
+      "part": 1,
+      "parts": 1
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "pi edit with an edits array and a details diff",
+  "kind": "trace",
+  "input": {
+   "schema_version": 1,
+   "session_id": "ses_1",
+   "events": [
+    {
+     "at": "2026-10-04T00:00:00.000Z",
+     "type": "turn.messages",
+     "data": {
+      "messages": [
+       {
+        "info": {
+         "id": "msg_1",
+         "role": "assistant"
+        },
+        "parts": [
+         {
+          "type": "tool",
+          "callID": "call_1",
+          "tool": "edit",
+          "state": {
+           "status": "completed",
+           "input": {
+            "path": "src/c.ts",
+            "edits": [
+             {
+              "oldText": "x",
+              "newText": "const g = async(token:string)=>{}\nfunction a(token:string){await b}"
+             }
+            ]
+           },
+           "output": "ok",
+           "metadata": {
+            "diff": "-1 x\n+1 const g = async(token:string)=>{}\n+2 function a(token:string){await b}",
+            "firstChangedLine": 1
+           }
+          }
+         }
+        ]
+       }
+      ],
+      "part": 1,
+      "parts": 1
+     }
+    }
+   ]
+  },
+  "expected": {
+   "schema_version": 1,
+   "session_id": "ses_1",
+   "events": [
+    {
+     "at": "2026-10-04T00:00:00.000Z",
+     "type": "turn.messages",
+     "data": {
+      "messages": [
+       {
+        "info": {
+         "id": "msg_1",
+         "role": "assistant"
+        },
+        "parts": [
+         {
+          "type": "tool",
+          "callID": "call_1",
+          "tool": "edit",
+          "state": {
+           "status": "completed",
+           "input": {
+            "path": "src/c.ts",
+            "edits": [
+             {
+              "oldText": "x",
+              "newText": "const g = async(token:string)=>{}\nfunction a(token:string){await b}"
+             }
+            ]
+           },
+           "output": "ok",
+           "metadata": {
+            "diff": "-1 x\n+1 const g = async(token:string)=>{}\n+2 function a(token:string){await b}",
+            "firstChangedLine": 1
+           }
+          }
+         }
+        ]
+       }
+      ],
+      "part": 1,
+      "parts": 1
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "the same code in a bash command keeps CONFIG treatment",
+  "kind": "trace",
+  "input": {
+   "schema_version": 1,
+   "session_id": "ses_1",
+   "events": [
+    {
+     "at": "2026-10-04T00:00:00.000Z",
+     "type": "turn.messages",
+     "data": {
+      "messages": [
+       {
+        "info": {
+         "id": "msg_1",
+         "role": "assistant"
+        },
+        "parts": [
+         {
+          "type": "tool",
+          "callID": "call_1",
+          "tool": "bash",
+          "state": {
+           "status": "completed",
+           "input": {
+            "command": "cat > a.ts <<'EOF'\nexport async function f(token:string){await fetch(u)}\nEOF",
+            "description": "write"
+           },
+           "output": "const g = async(token:string)=>{}\nfunction a(token:string){await b}"
+          }
+         }
+        ]
+       }
+      ],
+      "part": 1,
+      "parts": 1
+     }
+    }
+   ]
+  },
+  "expected": {
+   "schema_version": 1,
+   "session_id": "ses_1",
+   "events": [
+    {
+     "at": "2026-10-04T00:00:00.000Z",
+     "type": "turn.messages",
+     "data": {
+      "messages": [
+       {
+        "info": {
+         "id": "msg_1",
+         "role": "assistant"
+        },
+        "parts": [
+         {
+          "type": "tool",
+          "callID": "call_1",
+          "tool": "bash",
+          "state": {
+           "status": "completed",
+           "input": {
+            "command": "cat > a.ts <<'EOF'\nexport async function f(token:[REDACTED] fetch(u)}\nEOF",
+            "description": "write"
+           },
+           "output": "const g = async(token:[REDACTED]\nfunction a(token:[REDACTED] b}"
+          }
+         }
+        ]
+       }
+      ],
+      "part": 1,
+      "parts": 1
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "a file tool call with no path keeps CONFIG treatment",
+  "kind": "trace",
+  "input": {
+   "schema_version": 1,
+   "session_id": "ses_1",
+   "events": [
+    {
+     "at": "2026-10-04T00:00:00.000Z",
+     "type": "turn.messages",
+     "data": {
+      "messages": [
+       {
+        "info": {
+         "id": "msg_1",
+         "role": "assistant"
+        },
+        "parts": [
+         {
+          "type": "tool",
+          "callID": "call_1",
+          "tool": "write",
+          "state": {
+           "status": "completed",
+           "input": {
+            "content": "export async function f(token:string){await fetch(u)}"
+           },
+           "output": "?"
+          }
+         }
+        ]
+       }
+      ],
+      "part": 1,
+      "parts": 1
+     }
+    }
+   ]
+  },
+  "expected": {
+   "schema_version": 1,
+   "session_id": "ses_1",
+   "events": [
+    {
+     "at": "2026-10-04T00:00:00.000Z",
+     "type": "turn.messages",
+     "data": {
+      "messages": [
+       {
+        "info": {
+         "id": "msg_1",
+         "role": "assistant"
+        },
+        "parts": [
+         {
+          "type": "tool",
+          "callID": "call_1",
+          "tool": "write",
+          "state": {
+           "status": "completed",
+           "input": {
+            "content": "export async function f(token:[REDACTED] fetch(u)}"
+           },
+           "output": "?"
+          }
+         }
+        ]
+       }
+      ],
+      "part": 1,
+      "parts": 1
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": ".env write still redacts a secret assignment",
+  "kind": "trace",
+  "input": {
+   "schema_version": 1,
+   "session_id": "ses_1",
+   "events": [
+    {
+     "at": "2026-10-04T00:00:00.000Z",
+     "type": "turn.messages",
+     "data": {
+      "messages": [
+       {
+        "info": {
+         "id": "msg_1",
+         "role": "assistant"
+        },
+        "parts": [
+         {
+          "type": "tool",
+          "callID": "call_1",
+          "tool": "write",
+          "state": {
+           "status": "completed",
+           "input": {
+            "filePath": "/work/proj/.env",
+            "content": "API_TOKEN=abcdefgh123\nDEBUG=1\n"
+           },
+           "output": "Wrote file successfully."
+          }
+         }
+        ]
+       }
+      ],
+      "part": 1,
+      "parts": 1
+     }
+    }
+   ]
+  },
+  "expected": {
+   "schema_version": 1,
+   "session_id": "ses_1",
+   "events": [
+    {
+     "at": "2026-10-04T00:00:00.000Z",
+     "type": "turn.messages",
+     "data": {
+      "messages": [
+       {
+        "info": {
+         "id": "msg_1",
+         "role": "assistant"
+        },
+        "parts": [
+         {
+          "type": "tool",
+          "callID": "call_1",
+          "tool": "write",
+          "state": {
+           "status": "completed",
+           "input": {
+            "filePath": "/work/proj/.env",
+            "content": "API_TOKEN=[REDACTED]\nDEBUG=1\n"
+           },
+           "output": "Wrote file successfully."
+          }
+         }
+        ]
+       }
+      ],
+      "part": 1,
+      "parts": 1
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": ".ts write still redacts a provider key",
+  "kind": "trace",
+  "input": {
+   "schema_version": 1,
+   "session_id": "ses_1",
+   "events": [
+    {
+     "at": "2026-10-04T00:00:00.000Z",
+     "type": "turn.messages",
+     "data": {
+      "messages": [
+       {
+        "info": {
+         "id": "msg_1",
+         "role": "assistant"
+        },
+        "parts": [
+         {
+          "type": "tool",
+          "callID": "call_1",
+          "tool": "write",
+          "state": {
+           "status": "completed",
+           "input": {
+            "filePath": "/work/proj/src/k.ts",
+            "content": "const k = \"sk-proj-AAAAAAAAAAAAAAAAAAAA\"\nexport async function f(token:string){await fetch(u)}"
+           },
+           "output": "Wrote file successfully."
+          }
+         }
+        ]
+       }
+      ],
+      "part": 1,
+      "parts": 1
+     }
+    }
+   ]
+  },
+  "expected": {
+   "schema_version": 1,
+   "session_id": "ses_1",
+   "events": [
+    {
+     "at": "2026-10-04T00:00:00.000Z",
+     "type": "turn.messages",
+     "data": {
+      "messages": [
+       {
+        "info": {
+         "id": "msg_1",
+         "role": "assistant"
+        },
+        "parts": [
+         {
+          "type": "tool",
+          "callID": "call_1",
+          "tool": "write",
+          "state": {
+           "status": "completed",
+           "input": {
+            "filePath": "/work/proj/src/k.ts",
+            "content": "const k = \"[REDACTED]\"\nexport async function f(token:string){await fetch(u)}"
+           },
+           "output": "Wrote file successfully."
+          }
+         }
+        ]
+       }
+      ],
+      "part": 1,
+      "parts": 1
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": ".ts write still redacts a quoted secret literal and a private key",
+  "kind": "trace",
+  "input": {
+   "schema_version": 1,
+   "session_id": "ses_1",
+   "events": [
+    {
+     "at": "2026-10-04T00:00:00.000Z",
+     "type": "turn.messages",
+     "data": {
+      "messages": [
+       {
+        "info": {
+         "id": "msg_1",
+         "role": "assistant"
+        },
+        "parts": [
+         {
+          "type": "tool",
+          "callID": "call_1",
+          "tool": "write",
+          "state": {
+           "status": "completed",
+           "input": {
+            "filePath": "src/cfg.ts",
+            "content": "const apiKey = \"abc123def456ghi\";\nconst pem = `-----BEGIN PRIVATE KEY-----\nMIIEv\n-----END PRIVATE KEY-----`;\n"
+           },
+           "output": "ok"
+          }
+         }
+        ]
+       }
+      ],
+      "part": 1,
+      "parts": 1
+     }
+    }
+   ]
+  },
+  "expected": {
+   "schema_version": 1,
+   "session_id": "ses_1",
+   "events": [
+    {
+     "at": "2026-10-04T00:00:00.000Z",
+     "type": "turn.messages",
+     "data": {
+      "messages": [
+       {
+        "info": {
+         "id": "msg_1",
+         "role": "assistant"
+        },
+        "parts": [
+         {
+          "type": "tool",
+          "callID": "call_1",
+          "tool": "write",
+          "state": {
+           "status": "completed",
+           "input": {
+            "filePath": "src/cfg.ts",
+            "content": "const apiKey = \"[REDACTED]\";\nconst pem = `[REDACTED]`;\n"
+           },
+           "output": "ok"
+          }
+         }
+        ]
+       }
+      ],
+      "part": 1,
+      "parts": 1
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "apply_patch scrubs each file of the patch with its own mode",
+  "kind": "trace",
+  "input": {
+   "schema_version": 1,
+   "session_id": "ses_1",
+   "events": [
+    {
+     "at": "2026-10-04T00:00:00.000Z",
+     "type": "turn.messages",
+     "data": {
+      "messages": [
+       {
+        "info": {
+         "id": "msg_1",
+         "role": "assistant"
+        },
+        "parts": [
+         {
+          "type": "tool",
+          "callID": "call_1",
+          "tool": "apply_patch",
+          "state": {
+           "status": "completed",
+           "input": {
+            "patchText": "*** Begin Patch\n*** Update File: src/a.ts\n@@\n-x\n+export async function f(token:string){await fetch(u)}\n*** Add File: .env\n+API_TOKEN=abcdefgh123\n*** End Patch"
+           },
+           "output": "Success. Updated the following files:\nM src/a.ts\nA .env",
+           "metadata": {
+            "diff": "Index: /work/proj/src/a.ts\n--- /work/proj/src/a.ts\n+++ /work/proj/src/a.ts\n@@ -1 +1 @@\n-x\n+export async function f(token:string){await fetch(u)}\n\nIndex: /work/proj/.env\n--- /work/proj/.env\n+++ /work/proj/.env\n@@ -0,0 +1 @@\n+API_TOKEN=abcdefgh123\n",
+            "files": [
+             {
+              "filePath": "/work/proj/src/a.ts",
+              "relativePath": "src/a.ts",
+              "type": "update",
+              "patch": "@@ -1 +1 @@\n-x\n+export async function f(token:string){await fetch(u)}\n",
+              "before": "x\n",
+              "after": "export async function f(token:string){await fetch(u)}\n"
+             },
+             {
+              "filePath": "/work/proj/.env",
+              "relativePath": ".env",
+              "type": "add",
+              "patch": "@@ -0,0 +1 @@\n+API_TOKEN=abcdefgh123\n",
+              "after": "API_TOKEN=abcdefgh123\n"
+             }
+            ],
+            "v2": {
+             "files": [
+              {
+               "file": "src/a.ts",
+               "patch": "+export async function f(token:string){await fetch(u)}\n",
+               "status": "modified"
+              },
+              {
+               "file": ".env",
+               "patch": "+API_TOKEN=abcdefgh123\n",
+               "status": "added"
+              }
+             ]
+            }
+           }
+          },
+          "name": "patch"
+         }
+        ]
+       }
+      ],
+      "part": 1,
+      "parts": 1
+     }
+    }
+   ]
+  },
+  "expected": {
+   "schema_version": 1,
+   "session_id": "ses_1",
+   "events": [
+    {
+     "at": "2026-10-04T00:00:00.000Z",
+     "type": "turn.messages",
+     "data": {
+      "messages": [
+       {
+        "info": {
+         "id": "msg_1",
+         "role": "assistant"
+        },
+        "parts": [
+         {
+          "type": "tool",
+          "callID": "call_1",
+          "tool": "apply_patch",
+          "state": {
+           "status": "completed",
+           "input": {
+            "patchText": "*** Begin Patch\n*** Update File: src/a.ts\n@@\n-x\n+export async function f(token:string){await fetch(u)}\n*** Add File: .env\n+API_TOKEN=[REDACTED]\n*** End Patch"
+           },
+           "output": "Success. Updated the following files:\nM src/a.ts\nA .env",
+           "metadata": {
+            "diff": "Index: /work/proj/src/a.ts\n--- /work/proj/src/a.ts\n+++ /work/proj/src/a.ts\n@@ -1 +1 @@\n-x\n+export async function f(token:string){await fetch(u)}\n\nIndex: /work/proj/.env\n--- /work/proj/.env\n+++ /work/proj/.env\n@@ -0,0 +1 @@\n+API_TOKEN=[REDACTED]\n",
+            "files": [
+             {
+              "filePath": "/work/proj/src/a.ts",
+              "relativePath": "src/a.ts",
+              "type": "update",
+              "patch": "@@ -1 +1 @@\n-x\n+export async function f(token:string){await fetch(u)}\n",
+              "before": "x\n",
+              "after": "export async function f(token:string){await fetch(u)}\n"
+             },
+             {
+              "filePath": "/work/proj/.env",
+              "relativePath": ".env",
+              "type": "add",
+              "patch": "@@ -0,0 +1 @@\n+API_TOKEN=[REDACTED]\n",
+              "after": "API_TOKEN=[REDACTED]\n"
+             }
+            ],
+            "v2": {
+             "files": [
+              {
+               "file": "src/a.ts",
+               "patch": "+export async function f(token:string){await fetch(u)}\n",
+               "status": "modified"
+              },
+              {
+               "file": ".env",
+               "patch": "+API_TOKEN=[REDACTED]\n",
+               "status": "added"
+              }
+             ]
+            }
+           }
+          },
+          "name": "patch"
+         }
+        ]
+       }
+      ],
+      "part": 1,
+      "parts": 1
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "multiedit scrubs each edit with its own file's mode",
+  "kind": "trace",
+  "input": {
+   "schema_version": 1,
+   "session_id": "ses_1",
+   "events": [
+    {
+     "at": "2026-10-04T00:00:00.000Z",
+     "type": "turn.messages",
+     "data": {
+      "messages": [
+       {
+        "info": {
+         "id": "msg_1",
+         "role": "assistant"
+        },
+        "parts": [
+         {
+          "type": "tool",
+          "callID": "call_1",
+          "tool": "multiedit",
+          "state": {
+           "status": "completed",
+           "input": {
+            "filePath": "src/m.ts",
+            "edits": [
+             {
+              "filePath": "src/m.ts",
+              "oldString": "a",
+              "newString": "export async function f(token:string){await fetch(u)}"
+             },
+             {
+              "filePath": "conf/app.ini",
+              "oldString": "a",
+              "newString": "auth_token=abcdefgh123"
+             }
+            ]
+           },
+           "output": "ok",
+           "metadata": {
+            "results": [
+             {
+              "diff": "@@\n+export async function f(token:string){await fetch(u)}\n"
+             }
+            ]
+           }
+          }
+         }
+        ]
+       }
+      ],
+      "part": 1,
+      "parts": 1
+     }
+    }
+   ]
+  },
+  "expected": {
+   "schema_version": 1,
+   "session_id": "ses_1",
+   "events": [
+    {
+     "at": "2026-10-04T00:00:00.000Z",
+     "type": "turn.messages",
+     "data": {
+      "messages": [
+       {
+        "info": {
+         "id": "msg_1",
+         "role": "assistant"
+        },
+        "parts": [
+         {
+          "type": "tool",
+          "callID": "call_1",
+          "tool": "multiedit",
+          "state": {
+           "status": "completed",
+           "input": {
+            "filePath": "src/m.ts",
+            "edits": [
+             {
+              "filePath": "src/m.ts",
+              "oldString": "a",
+              "newString": "export async function f(token:string){await fetch(u)}"
+             },
+             {
+              "filePath": "conf/app.ini",
+              "oldString": "a",
+              "newString": "auth_token=[REDACTED]"
+             }
+            ]
+           },
+           "output": "ok",
+           "metadata": {
+            "results": [
+             {
+              "diff": "@@\n+export async function f(token:string){await fetch(u)}\n"
+             }
+            ]
+           }
+          }
+         }
+        ]
+       }
+      ],
+      "part": 1,
+      "parts": 1
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "read output of a .ts file keeps code; of a .env file is redacted",
+  "kind": "trace",
+  "input": {
+   "schema_version": 1,
+   "session_id": "ses_1",
+   "events": [
+    {
+     "at": "2026-10-04T00:00:00.000Z",
+     "type": "turn.messages",
+     "data": {
+      "messages": [
+       {
+        "info": {
+         "id": "msg_1",
+         "role": "assistant"
+        },
+        "parts": [
+         {
+          "type": "tool",
+          "callID": "call_1",
+          "tool": "read",
+          "state": {
+           "status": "completed",
+           "input": {
+            "filePath": "/work/proj/src/a.ts"
+           },
+           "output": "<file>\n00001| export async function f(token:string){await fetch(u)}\n</file>",
+           "content": [
+            {
+             "type": "text",
+             "text": "1: export async function f(token:string){await fetch(u)}"
+            }
+           ],
+           "metadata": {
+            "preview": "export async function f(token:string){await fetch(u)}",
+            "truncated": false
+           }
+          }
+         },
+         {
+          "type": "tool",
+          "callID": "call_1",
+          "tool": "read",
+          "state": {
+           "status": "completed",
+           "input": {
+            "filePath": "/work/proj/.env.local"
+           },
+           "output": "1: API_TOKEN=abcdefgh123",
+           "metadata": {
+            "preview": "API_TOKEN=abcdefgh123"
+           }
+          }
+         }
+        ]
+       }
+      ],
+      "part": 1,
+      "parts": 1
+     }
+    }
+   ]
+  },
+  "expected": {
+   "schema_version": 1,
+   "session_id": "ses_1",
+   "events": [
+    {
+     "at": "2026-10-04T00:00:00.000Z",
+     "type": "turn.messages",
+     "data": {
+      "messages": [
+       {
+        "info": {
+         "id": "msg_1",
+         "role": "assistant"
+        },
+        "parts": [
+         {
+          "type": "tool",
+          "callID": "call_1",
+          "tool": "read",
+          "state": {
+           "status": "completed",
+           "input": {
+            "filePath": "/work/proj/src/a.ts"
+           },
+           "output": "<file>\n00001| export async function f(token:string){await fetch(u)}\n</file>",
+           "content": [
+            {
+             "type": "text",
+             "text": "1: export async function f(token:string){await fetch(u)}"
+            }
+           ],
+           "metadata": {
+            "preview": "export async function f(token:string){await fetch(u)}",
+            "truncated": false
+           }
+          }
+         },
+         {
+          "type": "tool",
+          "callID": "call_1",
+          "tool": "read",
+          "state": {
+           "status": "completed",
+           "input": {
+            "filePath": "/work/proj/.env.local"
+           },
+           "output": "1: API_TOKEN=[REDACTED]",
+           "metadata": {
+            "preview": "API_TOKEN=[REDACTED]"
+           }
+          }
+         }
+        ]
+       }
+      ],
+      "part": 1,
+      "parts": 1
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "2.x tool part: native input path under v2 selects the mode",
+  "kind": "trace",
+  "input": {
+   "schema_version": 1,
+   "session_id": "ses_1",
+   "events": [
+    {
+     "at": "2026-10-04T00:00:00.000Z",
+     "type": "turn.messages",
+     "data": {
+      "messages": [
+       {
+        "info": {
+         "id": "msg_1",
+         "role": "assistant"
+        },
+        "parts": [
+         {
+          "type": "tool",
+          "callID": "call_9",
+          "tool": "write",
+          "name": "write",
+          "state": {
+           "status": "completed",
+           "input": {
+            "content": "const g = async(token:string)=>{}\nfunction a(token:string){await b}"
+           },
+           "v2": {
+            "input": {
+             "path": "src/n.ts",
+             "content": "export async function f(token:string){await fetch(u)}"
+            }
+           }
+          }
+         }
+        ]
+       }
+      ],
+      "part": 1,
+      "parts": 1
+     }
+    }
+   ]
+  },
+  "expected": {
+   "schema_version": 1,
+   "session_id": "ses_1",
+   "events": [
+    {
+     "at": "2026-10-04T00:00:00.000Z",
+     "type": "turn.messages",
+     "data": {
+      "messages": [
+       {
+        "info": {
+         "id": "msg_1",
+         "role": "assistant"
+        },
+        "parts": [
+         {
+          "type": "tool",
+          "callID": "call_9",
+          "tool": "write",
+          "name": "write",
+          "state": {
+           "status": "completed",
+           "input": {
+            "content": "const g = async(token:string)=>{}\nfunction a(token:string){await b}"
+           },
+           "v2": {
+            "input": {
+             "path": "src/n.ts",
+             "content": "export async function f(token:string){await fetch(u)}"
+            }
+           }
+          }
+         }
+        ]
+       }
+      ],
+      "part": 1,
+      "parts": 1
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "other tool output keeps CONFIG treatment",
+  "kind": "trace",
+  "input": {
+   "schema_version": 1,
+   "session_id": "ses_1",
+   "events": [
+    {
+     "at": "2026-10-04T00:00:00.000Z",
+     "type": "turn.messages",
+     "data": {
+      "messages": [
+       {
+        "info": {
+         "id": "msg_1",
+         "role": "assistant"
+        },
+        "parts": [
+         {
+          "type": "tool",
+          "callID": "call_1",
+          "tool": "grep",
+          "state": {
+           "status": "completed",
+           "input": {
+            "pattern": "token",
+            "path": "src/a.ts"
+           },
+           "output": "src/a.ts:\n  Line 1: export async function f(token:string){await fetch(u)}"
+          }
+         }
+        ]
+       }
+      ],
+      "part": 1,
+      "parts": 1
+     }
+    }
+   ]
+  },
+  "expected": {
+   "schema_version": 1,
+   "session_id": "ses_1",
+   "events": [
+    {
+     "at": "2026-10-04T00:00:00.000Z",
+     "type": "turn.messages",
+     "data": {
+      "messages": [
+       {
+        "info": {
+         "id": "msg_1",
+         "role": "assistant"
+        },
+        "parts": [
+         {
+          "type": "tool",
+          "callID": "call_1",
+          "tool": "grep",
+          "state": {
+           "status": "completed",
+           "input": {
+            "pattern": "token",
+            "path": "src/a.ts"
+           },
+           "output": "src/a.ts:\n  Line 1: export async function f(token:[REDACTED] fetch(u)}"
+          }
+         }
+        ]
+       }
+      ],
+      "part": 1,
+      "parts": 1
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "turn.diff scrubs each file's hunk with its own mode",
+  "kind": "trace",
+  "input": {
+   "schema_version": 1,
+   "session_id": "ses_1",
+   "events": [
+    {
+     "at": "2026-10-04T00:00:01.000Z",
+     "type": "turn.diff",
+     "data": {
+      "schema_version": 1,
+      "files": [
+       {
+        "path": "src/a.ts",
+        "status": "modified",
+        "diff": "--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-x\n+export async function f(token:string){await fetch(u)}\n+const k = \"sk-proj-AAAAAAAAAAAAAAAAAAAA\"\n",
+        "truncated": false,
+        "reason": null
+       },
+       {
+        "path": "conf/app.ini",
+        "status": "modified",
+        "diff": "--- a/conf/app.ini\n+++ b/conf/app.ini\n@@ -1 +1 @@\n-x\n+auth_token=abcdefgh123\n",
+        "truncated": false,
+        "reason": null
+       }
+      ],
+      "file_count": 2,
+      "omitted_file_count": 0,
+      "truncated": false
+     }
+    }
+   ]
+  },
+  "expected": {
+   "schema_version": 1,
+   "session_id": "ses_1",
+   "events": [
+    {
+     "at": "2026-10-04T00:00:01.000Z",
+     "type": "turn.diff",
+     "data": {
+      "schema_version": 1,
+      "files": [
+       {
+        "path": "src/a.ts",
+        "status": "modified",
+        "diff": "--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1 @@\n-x\n+export async function f(token:string){await fetch(u)}\n+const k = \"[REDACTED]\"\n",
+        "truncated": false,
+        "reason": null
+       },
+       {
+        "path": "conf/app.ini",
+        "status": "modified",
+        "diff": "--- a/conf/app.ini\n+++ b/conf/app.ini\n@@ -1 +1 @@\n-x\n+auth_token=[REDACTED]\n",
+        "truncated": false,
+        "reason": null
+       }
+      ],
+      "file_count": 2,
+      "omitted_file_count": 0,
+      "truncated": false
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "git diff: a .ts section keeps code, a config section is redacted",
+  "kind": "git_diff",
+  "input": "diff --git a/src/a.ts b/src/a.ts\nindex 1..2 100644\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1,2 @@\n-x\n+export async function f(token:string){await fetch(u)}\n+async(token:string)=>{}\ndiff --git a/conf/app.ini b/conf/app.ini\nindex 1..2 100644\n--- a/conf/app.ini\n+++ b/conf/app.ini\n@@ -1 +1 @@\n-x\n+auth_token=abcdefgh123\n+f(token:string){await fetch(u)}\n",
+  "expected": "diff --git a/src/a.ts b/src/a.ts\nindex 1..2 100644\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1,2 @@\n-x\n+export async function f(token:string){await fetch(u)}\n+async(token:string)=>{}\ndiff --git a/conf/app.ini b/conf/app.ini\nindex 1..2 100644\n--- a/conf/app.ini\n+++ b/conf/app.ini\n@@ -1 +1 @@\n-x\n+auth_token=[REDACTED]\n+f(token:[REDACTED] fetch(u)}\n"
+ }
+]
