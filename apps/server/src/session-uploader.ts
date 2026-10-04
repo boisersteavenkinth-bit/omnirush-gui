@@ -2,7 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
 import { createReadStream, createWriteStream, watch, type FSWatcher, type WriteStream } from "node:fs";
 import { lstat, mkdir, open, readFile, readdir, readlink, rename, rm, stat } from "node:fs/promises";
-import { release as osRelease, tmpdir } from "node:os";
+import { homedir, release as osRelease, tmpdir } from "node:os";
 import nodePath, { basename, dirname, extname, join, relative, resolve, sep, type PlatformPath } from "node:path";
 import { promisify } from "node:util";
 import { createZstdCompress } from "node:zlib";
@@ -27,6 +27,8 @@ import { writeFileAtomic } from "./atomic-write.js";
 import { XCODE_CLT_MISSING, gitSkipReason } from "./command-guard.js";
 import { ExcludedFiles, listGitIgnored, type HashCache } from "./excluded-files.js";
 import { ToolchainCache, type CollectOptions as ToolchainOptions, type UploadToolchain } from "./toolchain.js";
+import { ContextCapture, type ContextOptions } from "./context/index.js";
+import bundledBestPractices from "./bundled-best-practices.json" with { type: "json" };
 
 const execFileAsync = promisify(execFile);
 
@@ -545,6 +547,11 @@ type SessionUploaderOptions = {
    * byte-exact project archive.
    */
   onBinaryFile?: (sessionId: string, path: string) => void;
+  /**
+   * Capture context (context/): an object turns it on (the capture host
+   * always passes one) and overrides its options; absent or false: off.
+   */
+  context?: false | Partial<ContextOptions>;
 };
 
 export type TraceCapabilities = {
@@ -3985,6 +3992,8 @@ export class SessionUploader {
   private traceSchemaProbe: Promise<2 | 3> | null = null;
   /** Work counters for tests and profiling. */
   readonly metrics: UploadMetrics = freshMetrics();
+  /** Capture context (context/), null when off. */
+  readonly context: ContextCapture | null;
 
   constructor(options: SessionUploaderOptions = {}) {
     this.uploadUrl = resolveUploadUrl(options.gatewayUrl ?? process.env.OMNIRUSH_GATEWAY_URL);
@@ -4035,6 +4044,7 @@ export class SessionUploader {
       this.stateMigrated,
     );
     void this.stateMigrated.then(() => this.cleanTempDir(60 * 60_000)).catch(() => undefined);
+    this.context = !options.context || !this.enabled ? null : this.createContext(stateDir, options.context);
     if (this.spoolDir) {
       if (this.enabled) {
         // Uploads spooled by a previous process are retried once this one is up.
@@ -4045,6 +4055,59 @@ export class SessionUploader {
         void this.clearSpool().catch(() => undefined);
       }
     }
+  }
+
+  /** Capture context wired to this uploader: its trace, its scrub, the project archive and the archive's exclusions. */
+  private createContext(stateDir: string | null, overrides: Partial<ContextOptions>): ContextCapture | null {
+    let exclusion: ((absolute: string) => string | null) | null = null;
+    // Loaded lazily: session-archive/outside.ts imports this module.
+    void import("./session-archive/outside.js").then((module) => {
+      const home = (() => {
+        try {
+          return homedir() || null;
+        } catch {
+          return null;
+        }
+      })();
+      const appDirs = stateDir ? [stateDir] : [];
+      exclusion = (absolute) => module.outsideExclusion(absolute, { appDirs, home });
+    }, () => undefined);
+    const bundle = bundledBestPractices as { source?: { commit?: string }; skills?: Array<{ name?: string; content?: string }> };
+    const bundledSkills = (bundle.skills ?? []).filter((skill) => typeof skill.name === "string" && typeof skill.content === "string").map((skill) => ({
+      name: skill.name!,
+      version: bundle.source?.commit ? bundle.source.commit.slice(0, 12) : null,
+      sha256: createHash("sha256").update(skill.content!).digest("hex"),
+    }));
+    const capture = new ContextCapture({
+      client: "gui",
+      appVersion: this.appVersion ?? null,
+      engineVersion: this.engineVersion ?? null,
+      cacheDir: stateDir ? join(stateDir, "context") : null,
+      scrub: {
+        text: (text) => redactUploadText(text).text,
+        json: (value) => redactUploadJson(value).value as typeof value,
+        content: (path, text) => redactUploadContent(path, text),
+      },
+      record: (sessionId, type, data) => this.recordContext(sessionId, type, data),
+      reportPath: (sessionId, absolute) => this.onPathTouched?.(sessionId, absolute),
+      // Until the archive's rules are loaded nothing outside is archived.
+      exclusion: (absolute) => (exclusion ? exclusion(absolute) : "pending"),
+      denied: (relPath) => isUploadPathDenied(relPath),
+      model: (sessionId) => this.sessions.get(sessionId)?.model ?? null,
+      bundledSkills,
+      // The app's own runtime skills and engine config live in its state directory (omnirush-runtime-config.ts).
+      bundledSkillDirs: stateDir ? [join(stateDir, "skills")] : [],
+      configFiles: stateDir ? [join(stateDir, "runtime-opencode-config.json")] : [],
+      log: this.log,
+      ...overrides,
+    });
+    return capture.enabled ? capture : null;
+  }
+
+  /** Appends a capture-context event; also while a finished session's last upload is being prepared. */
+  private recordContext(sessionId: string, type: string, data: unknown): void {
+    const state = this.sessions.get(sessionId);
+    if (state) this.appendTrace(state, type, data);
   }
 
   private async loadLedger(): Promise<void> {
@@ -4297,6 +4360,7 @@ export class SessionUploader {
     };
     state.ready = this.prepareSession(state);
     this.sessions.set(sessionId, state);
+    this.context?.sessionStarted(sessionId, root);
     this.enqueue(state, async () => {
       await state.ready;
       try {
@@ -4734,6 +4798,7 @@ export class SessionUploader {
       }
     }
     this.appendTrace(state, type, data);
+    if (type === "turn.messages" && isRecord(data)) this.context?.turnMessages(sessionId, data.messages);
   }
 
   /** Appends one trace event, keeping only the newest MAX_UPLOAD_TRACE_EVENTS. */
@@ -4928,6 +4993,10 @@ export class SessionUploader {
     if (trigger === "prompt") {
       state.relevance.clear();
       state.turnWrittenPaths.clear();
+      // After the turn's artifact baseline (set just below) is listed.
+      this.context?.turnStarted(sessionId, Promise.resolve().then(() => state.artifactBaseline));
+    } else {
+      this.context?.turnEnded(sessionId);
     }
     // The artifact baseline must reflect the workspace as the turn begins, not
     // once the queued start snapshot has finished uploading.
@@ -5066,6 +5135,7 @@ export class SessionUploader {
       }
     }
     state.finished = true;
+    this.context?.sessionEnded(sessionId);
     if (state.changeTimer) clearTimeout(state.changeTimer);
     if (state.deferTimer) clearTimeout(state.deferTimer);
     state.changeTimer = null;
@@ -5076,6 +5146,8 @@ export class SessionUploader {
     void this.flushIgnoreBatch(state);
     this.enqueue(state, async () => {
       await state.ready;
+      // Capture context still collecting (bounded wait) rides along with the last trace.
+      await this.context?.settled(sessionId);
       if (state.trace.length > 0) pendingTrace.push(...state.trace.splice(0));
       await state.changeCaptureTail;
       if (finalTrace !== undefined) pendingTrace.push({ at: new Date().toISOString(), type: "session.completed", data: finalTrace });

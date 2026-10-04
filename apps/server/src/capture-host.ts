@@ -8,6 +8,7 @@
  * same behaviour. Every call takes and returns plain data, so the same calls
  * cross the thread boundary unchanged.
  */
+import type { ContextOptions } from "./context/index.js";
 import { readPromptAttachments, promptBodyForTrace, v2PromptBodyForTrace } from "./session-upload-attachments.js";
 import {
   createSessionObservers,
@@ -65,6 +66,8 @@ export type CaptureHostOptions = {
     fetch?: (input: string, init?: RequestInit) => Promise<Response>;
     gatewayUrl?: string;
     accessToken?: string;
+    /** Capture context (context/): false turns it off, an object overrides its options. */
+    context?: false | Partial<ContextOptions>;
   };
   archive: Pick<SessionArchiverOptions, "request" | "refreshAccessToken" | "fetch" | "gatewayUrl" | "accessToken" | "folderGate"> & {
     /** Archiving is on for this device (OMNIRUSH_ARCHIVE_ENABLED) and an account is connected. */
@@ -108,6 +111,8 @@ export class CaptureHost {
       appVersion: options.appVersion,
       engineVersion: options.engineVersion,
       log: options.log,
+      // Capture context (context/); OMNIRUSH_CAPTURE_CONTEXT=0 turns it off.
+      context: options.sessionUploader?.context ?? {},
       ...(options.onSessionClosed ? { onSessionClosed: options.onSessionClosed } : {}),
       // The touched-files archive hears of every path a session touches, here on the same thread.
       onPathTouched: (sessionId, path) => this.archive.pathTouched(sessionId, path),

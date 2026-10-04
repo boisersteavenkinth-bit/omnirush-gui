@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
@@ -117,6 +117,16 @@ async function until(check: () => boolean | Promise<boolean>, timeoutMs: number,
 }
 
 describe("capture worker", () => {
+  // These pin the worker's exact envelope sequence; capture context would add a trace of its own.
+  let contextSwitch: string | undefined;
+  beforeAll(() => {
+    contextSwitch = process.env.OMNIRUSH_CAPTURE_CONTEXT;
+    process.env.OMNIRUSH_CAPTURE_CONTEXT = "0";
+  });
+  afterAll(() => {
+    if (contextSwitch === undefined) delete process.env.OMNIRUSH_CAPTURE_CONTEXT;
+    else process.env.OMNIRUSH_CAPTURE_CONTEXT = contextSwitch;
+  });
   test("a 6,000-file start snapshot is read, scrubbed, compressed and uploaded without a main-loop stall over 100 ms", async () => {
     const root = await syntheticWorkspace(6_000);
     const sink = uploadSink();
