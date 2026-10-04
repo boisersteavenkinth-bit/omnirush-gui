@@ -53,7 +53,44 @@ type BrokerOptions = {
   subagentRetryDelayMs?: number;
   /** Whether a picked sub-agent model is in its refusal cooldown (sent straight to the main model). */
   subagentModelRefused?: (model: string) => boolean;
+  /** Hears the gateway's mandatory-update signals (see GatewayUpdateSignal). */
+  onUpdateSignal?: (signal: GatewayUpdateSignal) => void;
+  /**
+   * The desktop app's version: every request to omnirush.ai then names it in
+   * `X-OmniRush-Client: gui/<version>`, so the backend knows an updated app
+   * from its first call. Unset (a standalone server) sends no header.
+   */
+  clientVersion?: string;
 };
+
+export const CLIENT_HEADER = "X-OmniRush-Client";
+
+/** `gui/<version>` for a plain version string, or null. */
+export function guiClientHeaderValue(version: string | null | undefined): string | null {
+  const trimmed = version?.trim().replace(/^v/i, "") ?? "";
+  return /^[0-9A-Za-z][0-9A-Za-z.+-]{0,63}$/.test(trimmed) ? `gui/${trimmed}` : null;
+}
+
+/** `init` with the client header added; every other header and option is kept. */
+function withClientHeader(init: RequestInit | undefined, value: string): RequestInit {
+  const headers = new Headers(init?.headers);
+  headers.set(CLIENT_HEADER, value);
+  return { ...init, headers };
+}
+
+/**
+ * omnirush.ai asking this app to update: before the deadline every gateway
+ * answer carries `x-omnirush-update-required: <minimum>; deadline=<iso>`;
+ * after it, model requests from an outdated app get HTTP 426
+ * `update_required`. Session uploads, project archives, sign-in, refresh and
+ * the profile are never refused, so nothing here stops them.
+ */
+export type GatewayUpdateSignal =
+  | { kind: "header"; value: string }
+  | { kind: "rejection"; message: string | null };
+
+export const UPDATE_REQUIRED_HEADER = "x-omnirush-update-required";
+export const UPDATE_REQUIRED_CODE = "update_required";
 
 /**
  * Upstream model streams have been observed to end mid-response (the proxy
@@ -141,6 +178,7 @@ const GATEWAY_ERROR_COPY: Record<string, string> = {
   voice_unavailable: "voice input is not available on this account yet.",
   transcription_unavailable: "the transcription service did not answer. Try again in a moment.",
   audio_unreadable: "the recording could not be read. Try again.",
+  update_required: "this version of OmniRush.ai is no longer supported. Update the app to keep using models; your sessions are kept.",
 };
 
 /** Readable copy for a gateway error code, or null for a code it does not know. */
@@ -463,6 +501,8 @@ function readableErrorBody(text: string, grant: string | null): { body: string; 
   const code = bareCode ?? stringField(nested?.code);
   if (!code) return null;
   const message = (grant && code === "daily_grant_exhausted" ? `omnirush.ai: ${grant.charAt(0).toLowerCase()}${grant.slice(1)}` : null)
+    // The server names the version to install; keep its words.
+    ?? (code === UPDATE_REQUIRED_CODE ? stringField(nested?.message) ?? stringField(payload.message) : null)
     ?? gatewayErrorMessage(code, stringField(nested?.message))
     ?? (bareCode ? `omnirush.ai could not complete the model request (${code}).` : null);
   if (!message) return null;
@@ -481,7 +521,10 @@ async function readableErrorResponse(response: Response, consoleUrl: string | nu
   const headers = responseHeaders(response.headers);
   // A spent grant stays spent until its reset: the engine would otherwise
   // resend the request ten times, each after the 429's Retry-After (60 s).
-  if (readable?.code === "daily_grant_exhausted") headers.set("x-should-retry", "false");
+  // An outdated app stays refused until it is updated.
+  if (readable?.code === "daily_grant_exhausted" || readable?.code === UPDATE_REQUIRED_CODE || response.status === 426) {
+    headers.set("x-should-retry", "false");
+  }
   return new Response(readable?.body ?? text, {
     status: response.status,
     statusText: response.statusText,
@@ -733,6 +776,7 @@ const ACCOUNT_REFUSED = new Set([
   "consent_version_outdated",
   "omnirush_account_required",
   "model_request_too_large",
+  "update_required",
 ]);
 const SUBAGENT_BUSY_STATUSES = new Set([429, 502, 503, 504]);
 
@@ -856,6 +900,8 @@ export class OmniRushGatewayBroker {
   private readonly onSubagentFallback?: BrokerOptions["onSubagentFallback"];
   private readonly subagentRetryDelayMs: number;
   private readonly subagentModelRefused?: (model: string) => boolean;
+  private readonly onUpdateSignal?: (signal: GatewayUpdateSignal) => void;
+  private readonly clientHeader: string | null;
   private refreshInFlight: Promise<boolean> | null = null;
   /** Whether the last failed refresh left the session as it was (unreachable, 5xx, contended). */
   private lastRefreshTransient = false;
@@ -874,13 +920,55 @@ export class OmniRushGatewayBroker {
     this.engineToken = options.engineToken?.trim() ?? "";
     this.invalidate = options.credentials?.invalidate;
     this.refreshOwner = options.credentials?.refresh;
-    this.fetcher = options.fetch ?? externalFetch;
+    const fetcher = options.fetch ?? externalFetch;
+    this.clientHeader = guiClientHeaderValue(options.clientVersion);
+    const clientHeader = this.clientHeader;
+    // Every call the broker makes goes to omnirush.ai (model, upload, archive
+    // API, catalog, voice, refresh); presigned S3 part uploads never pass here.
+    this.fetcher = clientHeader ? (input, init) => fetcher(input, withClientHeader(init, clientHeader)) : fetcher;
     this.fileUploader = options.uploadFile;
     this.log = options.log;
     this.sessionUploadBudget = options.sessionUploadBudget ?? SESSION_UPLOAD_BUDGET;
     this.onSubagentFallback = options.onSubagentFallback;
     this.subagentRetryDelayMs = options.subagentRetryDelayMs ?? SUBAGENT_RETRY_DELAY_MS;
     this.subagentModelRefused = options.subagentModelRefused;
+    this.onUpdateSignal = options.onUpdateSignal;
+  }
+
+  /**
+   * Passes the gateway's update signals on: the header from any answer, and
+   * a 426 / `update_required` refusal of a model request. Read from a clone,
+   * so the response itself is untouched; a listener that throws is ignored.
+   */
+  private async noteUpdateSignals(response: Response, modelRequest: boolean): Promise<void> {
+    if (!this.onUpdateSignal) return;
+    try {
+      const header = response.headers.get(UPDATE_REQUIRED_HEADER)?.trim();
+      if (header) this.onUpdateSignal({ kind: "header", value: header });
+      if (!modelRequest || response.ok) return;
+      let code = response.status === 426 ? UPDATE_REQUIRED_CODE : null;
+      let message: string | null = null;
+      if ((response.headers.get("content-type") ?? "").includes("application/json")) {
+        const text = await response.clone().text().catch(() => "");
+        try {
+          const payload: unknown = JSON.parse(text);
+          if (isRecord(payload)) {
+            const nested = isRecord(payload.error) ? payload.error : null;
+            const bodyCode = stringField(nested?.code) ?? stringField(payload.detail) ?? stringField(payload.error);
+            if (bodyCode === UPDATE_REQUIRED_CODE) code = bodyCode;
+            message = stringField(nested?.message) ?? stringField(payload.message);
+          }
+        } catch {
+          // Not JSON: the status alone decides.
+        }
+      }
+      if (code === UPDATE_REQUIRED_CODE) {
+        this.log?.("warn", "omnirush.ai refused a model request: this app version must be updated", { status: response.status });
+        this.onUpdateSignal({ kind: "rejection", message });
+      }
+    } catch {
+      // The update gate is advisory; the response goes on as it came.
+    }
   }
 
   get enabled(): boolean {
@@ -949,6 +1037,7 @@ export class OmniRushGatewayBroker {
     } else if (!response.ok && response.status !== 401 && body !== undefined) {
       response = await this.subagentFallback(request, normalizedPath, body, response);
     }
+    await this.noteUpdateSignals(response, true);
     const contentType = response.headers.get("content-type") ?? "";
     // Sign-in failures keep their own answer above; every other gateway
     // refusal reaches the user as readable copy instead of a bare code.
@@ -993,11 +1082,13 @@ export class OmniRushGatewayBroker {
     return this.withDeviceBearer(async (state) => {
       const requestSignal = signal ? AbortSignal.any([AbortSignal.timeout(timeoutMs), signal]) : AbortSignal.timeout(timeoutMs);
       const url = apiUrl(state.gatewayUrl, SESSION_UPLOAD_ENDPOINT_PATH);
-      const headers = {
+      const headers: Record<string, string> = {
         Authorization: `Bearer ${state.accessToken}`,
         "Content-Type": "application/zstd",
         "X-OmniRush-Session-ID": sessionId,
       };
+      // The Electron file transport bypasses this.fetcher.
+      if (this.clientHeader) headers[CLIENT_HEADER] = this.clientHeader;
       if (this.fileUploader) {
         return untilAborted(this.fileUploader(url, { method: "POST", headers, path, size, signal: requestSignal }), requestSignal);
       }
@@ -1154,6 +1245,8 @@ export class OmniRushGatewayBroker {
       spent = this.state.accessToken;
       response = await send(this.state);
     }
+    // Uploads and archives are never refused for the version; only the header counts here.
+    await this.noteUpdateSignals(response, false);
     return response;
   }
 

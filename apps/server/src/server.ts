@@ -988,6 +988,11 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
     // the refused model for a while, and the session uploader records the model the
     // sub-agent's messages really ran on.
     subagentModelRefused: (model) => subagentModelRefusals(config).isRefused(model),
+    // The desktop's update gate (banner, blocked view); session uploads and
+    // project archives go on whatever it says.
+    ...(config.omnirushGatewayCredentials?.onUpdateSignal ? { onUpdateSignal: config.omnirushGatewayCredentials.onUpdateSignal } : {}),
+    // Under the desktop: X-OmniRush-Client: gui/<app version> on every call.
+    ...(config.appVersion?.trim() ? { clientVersion: config.appVersion.trim() } : {}),
     onSubagentFallback: (event) => {
       if (event.reason !== "refused_recently") subagentModelRefusals(config).mark(event.requested, event.reason);
       recordSubagentModelFallback(config, event.rootSessionId, {

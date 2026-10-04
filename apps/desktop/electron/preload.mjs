@@ -168,6 +168,23 @@ contextBridge.exposeInMainWorld("__OMNIRUSH_ELECTRON__", {
       };
     },
   },
+  updateGate: {
+    /** The mandatory-update state (update-gate.mjs): "none", "required" or "blocked". */
+    get() {
+      return ipcRenderer.invoke("omnirush:update-gate:get");
+    },
+    /** Reads /device/me again and resolves the state it leaves. */
+    refresh() {
+      return ipcRenderer.invoke("omnirush:update-gate:refresh");
+    },
+    onChange(callback) {
+      const handler = (_event, state) => callback(state);
+      ipcRenderer.on("omnirush:update-gate:changed", handler);
+      return () => {
+        ipcRenderer.removeListener("omnirush:update-gate:changed", handler);
+      };
+    },
+  },
   recovery: {
     recordHealthy() {
       return ipcRenderer.invoke("omnirush:recovery:recordHealthy");

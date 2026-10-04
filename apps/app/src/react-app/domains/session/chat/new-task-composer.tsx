@@ -4,6 +4,7 @@ import type { Agent } from "@opencode-ai/sdk/v2/client";
 
 import type { CloudImportedPlugin } from "@/app/cloud/import-state";
 import { createDenClient, readDenSettings } from "@/app/lib/den";
+import { useUpdateGateBlocked } from "@/app/lib/update-gate";
 import type { OmniRushServerClient } from "@/app/lib/omnirush-server";
 import type { ComposerAttachment, McpServerEntry, McpStatusMap, ModelOption, ModelRef, SkillCard, SlashCommandOption } from "@/app/types";
 import { t } from "@/i18n";
@@ -120,6 +121,8 @@ const FALLBACK_MODEL: ModelRef = DEFAULT_MODEL;
  * created session, where the normal send path uploads them into the workspace.
  */
 export function NewTaskComposer(props: NewTaskComposerProps) {
+  // Model requests are refused for this app version until it is updated.
+  const updateBlocked = useUpdateGateBlocked();
   const context = props.context;
   const draftOwnerKey = context?.draftOwnerKey ?? "legacy";
   const [mentions, setMentions] = useState<Record<string, ComposerMentionKind>>({});
@@ -444,7 +447,7 @@ export function NewTaskComposer(props: NewTaskComposerProps) {
       steering={false}
       submissionPreparing={props.busy || pendingPrompt !== null || preparingAttachments || failedSubmission !== null}
       queuedCount={0}
-      disabled={Boolean(context?.modelUnavailable)}
+      disabled={Boolean(context?.modelUnavailable) || updateBlocked}
       modelUnavailable={context?.modelUnavailable}
       modelUnavailableMessage={context?.modelUnavailableMessage}
       organizationModelsEmpty={context?.organizationModelsEmpty}
