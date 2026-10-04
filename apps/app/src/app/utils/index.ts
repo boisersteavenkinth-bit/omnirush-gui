@@ -122,15 +122,26 @@ export const FRIENDLY_MODEL_LABELS: [pattern: string, label: string][] = [
 
 /**
  * Resolve a friendly display name for a model ID.
- * Checks FRIENDLY_MODEL_LABELS first (substring match), then falls back
- * to humanizeModelLabel which title-cases the raw ID.
+ * An exact FRIENDLY_MODEL_LABELS id comes first; then the name the engine
+ * reports (for omnirush.ai models, the catalog's display_name), unless it is
+ * just the raw id; then a substring match of the table (so
+ * "gpt-4.1-2025-04-14" still hits "gpt-4.1"); then humanizeModelLabel, which
+ * title-cases the raw ID. A catalog model the table does not know (a new
+ * one, "gpt-6.1-sol" before it was added) therefore shows the catalog's name,
+ * never a shorter id it happens to contain.
  */
 export function resolveModelDisplayName(modelID: string, reportedName?: string | null): string {
+  const id = modelID.trim().toLowerCase();
+  const exact = FRIENDLY_MODEL_LABELS.find(([pattern]) => pattern === id);
+  if (exact) return exact[1];
+  const trimmedReportedName = reportedName?.trim();
+  if (trimmedReportedName && trimmedReportedName.toLowerCase() !== id) {
+    return trimmedReportedName;
+  }
   const normalized = `${modelID} ${reportedName ?? ""}`.trim().toLowerCase();
   for (const [pattern, label] of FRIENDLY_MODEL_LABELS) {
     if (normalized.includes(pattern)) return label;
   }
-  const trimmedReportedName = reportedName?.trim();
   if (trimmedReportedName) return trimmedReportedName;
   return humanizeModelLabel(modelID);
 }

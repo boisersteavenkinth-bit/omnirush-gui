@@ -23,10 +23,11 @@ export const HIDE_TITLEBAR_PREF_KEY = "omnirush.hideTitlebar";
 
 /**
  * The models the engine serves before the account's catalog first syncs (and
- * offline); the first entry is the default. The catalog itself comes from the
- * server, so any other catalog model is just as valid.
+ * offline); the first entry is the default. Mirrors the server's
+ * builtinOmniRushModelCatalog (the backend's list at 2026-10-04). Only a
+ * fallback: the picker lists whatever the account's catalog lists.
  */
-export const BUILTIN_OMNIRUSH_MODEL_IDS = ["gpt-6-astra", "gpt-6-sol", "gpt-5.6-sol"] as const;
+export const BUILTIN_OMNIRUSH_MODEL_IDS = ["gpt-6-astra", "gpt-6.1-sol", "gpt-6-sol"] as const;
 
 export const DEFAULT_MODEL: ModelRef = {
   providerID: "omnirush",

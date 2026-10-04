@@ -70,14 +70,21 @@ describe("sub-agent model routes", () => {
       expect(initial.signedIn).toBe(true);
       expect((initial.models as Array<{ id: string; name: string; efforts: string[] }>).map((model) => [model.id, model.name, model.efforts.join(",")])).toEqual([
         ["gpt-6-astra", "GPT 6 Astra", "low,high,xhigh,max"],
+        ["gpt-6.1-sol", "GPT 6.1 Sol", "low,high,xhigh,max"],
         ["gpt-6-sol", "GPT 6 Sol", "low,high,xhigh,max"],
-        ["gpt-5.6-sol", "GPT-5.6 Sol", "low,high,xhigh,max"],
       ]);
-      // A missing preference defaults to GPT-5.6 Sol while preserving the main effort.
-      expect(await resolve({ sessionId: "ses_child", rootSessionId: "ses_main", inherited: main, main })).toEqual({
-        model: { providerID: "omnirush", modelID: "gpt-5.6-sol" },
+      // A missing preference names GPT-5.6 Sol; a catalog that does not list it keeps the main model and effort.
+      expect(await resolve({ sessionId: "ses_child", rootSessionId: "ses_main", inherited: main, main })).toMatchObject({
+        model: { providerID: "omnirush", modelID: "gpt-6-astra" },
         variant: "max",
-        gatewayFallback: { model: "gpt-6-astra", effort: "max" },
+        fallback: { requested: "gpt-5.6-sol", used: "gpt-6-astra", reason: "not_in_catalog" },
+      });
+      // GPT 6.1 Sol, from the catalog, is a sub-agent model like any other.
+      await fetch(`${base}/omnirush/subagent-model`, { method: "PUT", headers: client, body: JSON.stringify({ model: "gpt-6.1-sol", effort: "xhigh" }) });
+      expect(await resolve({ sessionId: "ses_child", rootSessionId: "ses_main", inherited: main, main })).toEqual({
+        model: { providerID: "omnirush", modelID: "gpt-6.1-sol" },
+        variant: "xhigh",
+        gatewayFallback: { model: "gpt-6-astra", effort: "xhigh" },
       });
 
       const bad = await fetch(`${base}/omnirush/subagent-model`, { method: "PUT", headers: client, body: JSON.stringify({ model: "gpt-6-sol", effort: "turbo" }) });

@@ -6,12 +6,14 @@ import { fileURLToPath } from "node:url";
 
 import { OmniRushGatewayBroker, grantExhaustedCopy, guardEventStream, type GrantClock } from "./omnirush-gateway-broker.js";
 import { OmniRushReasoningEffort } from "./opencode-plugins/omnirush-reasoning-effort.js";
+import { omnirushModelWantsReasoningSummary, sanitizeOmniRushModelCatalog } from "./omnirush-model-catalog.js";
 import type { OmniRushGatewayCredentialBundle } from "./types.js";
 
 type UpstreamCall = { body: Record<string, unknown>; headers: Headers };
 
-function capturingBroker(calls: UpstreamCall[]) {
+function capturingBroker(calls: UpstreamCall[], extra: Partial<ConstructorParameters<typeof OmniRushGatewayBroker>[0]> = {}) {
   return new OmniRushGatewayBroker({
+    ...extra,
     credentials: {
       gatewayUrl: "https://gateway.example/omnirush/v1",
       accessToken: "access-token",
@@ -250,6 +252,32 @@ describe("OmniRush gateway broker", () => {
       { ...bodies[1], reasoning: { effort: "high", summary: "auto" } },
       { ...bodies[2], reasoning: { summary: "auto" } },
       ...bodies.slice(3),
+    ]);
+  });
+
+  test("summaries follow the account's catalog: GPT 6.1 Sol and any new Codex-route model, never Muse", async () => {
+    // Without a catalog the built-in one decides: GPT 6.1 Sol is in it.
+    const builtinCalls: UpstreamCall[] = [];
+    await capturingBroker(builtinCalls).handle(gatewayRequest({ model: "gpt-6.1-sol", input: "x" }), "responses");
+    expect(builtinCalls.map((call) => call.body)).toEqual([{ model: "gpt-6.1-sol", input: "x", reasoning: { summary: "auto" } }]);
+
+    const catalog = sanitizeOmniRushModelCatalog({
+      data: [
+        { id: "gpt-6-astra", family: "OpenAI", default: true, reasoning_levels: ["low", "high", "xhigh", "max"] },
+        { id: "gpt-7.2-nova", family: "OpenAI", reasoning_levels: ["low", "high"] },
+        { id: "meta-muse-spark", family: "Meta Muse", reasoning_levels: ["minimal", "low"] },
+      ],
+    })!;
+    const calls: UpstreamCall[] = [];
+    const broker = capturingBroker(calls, { reasoningSummaryFor: (model) => omnirushModelWantsReasoningSummary(catalog, model) });
+    for (const model of ["gpt-7.2-nova", "meta-muse-spark", "gpt-6.1-sol"]) {
+      await broker.handle(gatewayRequest({ model, input: "x" }), "responses");
+    }
+    expect(calls.map((call) => call.body)).toEqual([
+      { model: "gpt-7.2-nova", input: "x", reasoning: { summary: "auto" } },
+      { model: "meta-muse-spark", input: "x" },
+      // Not in this account's catalog: left as the engine made it.
+      { model: "gpt-6.1-sol", input: "x" },
     ]);
   });
 

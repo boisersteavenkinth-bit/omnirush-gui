@@ -9,8 +9,10 @@
  * never point the engine anywhere but the local gateway broker.
  *
  * The last good catalog is kept at <runtimeStorageDir>/omnirush-model-catalog.json.
- * Without one (first run, offline, or a backend that fails) the engine gets
- * the built-in Astra, GPT 6 Sol and GPT-5.6 Sol (the v1.0.9 metadata).
+ * Every list the app shows (model picker, sub-agent models, names) comes from
+ * it; nothing filters by model id. Without one (first run, offline, or a
+ * backend that fails) the engine gets the built-in fallback: the backend's
+ * list at 2026-10-04 (GPT 6 Astra, GPT 6.1 Sol, GPT 6 Sol).
  */
 import { mkdir, readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
@@ -79,14 +81,15 @@ function catalogModel(
 }
 
 /**
- * The Codex-route models before the first sync: Astra (the default), GPT 6
- * Sol and GPT-5.6 Sol, with the v1.0.9 metadata (same efforts as Astra).
+ * The fallback before the first sync (and when no catalog was ever stored):
+ * the backend's list at 2026-10-04, Astra the default, with the Codex-route
+ * metadata. Only a fallback: the synced catalog replaces it whole.
  */
 export function builtinOmniRushModelCatalog(): OmniRushModelCatalog {
   return [
     catalogModel("gpt-6-astra", "GPT 6 Astra", PROVIDER_FAMILY, true),
+    catalogModel("gpt-6.1-sol", "GPT 6.1 Sol", PROVIDER_FAMILY, false),
     catalogModel("gpt-6-sol", "GPT 6 Sol", PROVIDER_FAMILY, false),
-    catalogModel("gpt-5.6-sol", "GPT-5.6 Sol", PROVIDER_FAMILY, false),
   ];
 }
 
@@ -122,8 +125,8 @@ function sanitizeModel(raw: unknown): OmniRushCatalogModel | null {
   // could never answer through it.
   if (raw.api !== undefined && raw.api !== null && raw.api !== "responses") return null;
   // An older backend lists only id, display_name, default and
-  // reasoning_levels: known ids keep their built-in metadata, new ids get the
-  // shared defaults.
+  // reasoning_levels: the rest gets the shared defaults (the Codex-route
+  // metadata). Any id is taken, dots included; none is special.
   const fallback = builtinOmniRushModelCatalog().find((model) => model.id === id)
     ?? catalogModel(id, id, null, false);
   const limits = isRecord(raw.limits) ? raw.limits : {};
@@ -240,4 +243,17 @@ export function engineModelsFromCatalog(catalog: OmniRushModelCatalog): Record<s
     ...(model.family && model.family !== PROVIDER_FAMILY ? { family: model.family } : {}),
     ...(model.status === "beta" ? { status: "beta" } : {}),
   }]));
+}
+
+/**
+ * Whether the broker asks for reasoning summaries on a Responses request for
+ * `modelId`: a reasoning model of the catalog on the Codex route (the
+ * provider's own family; the engine opts in for GPT-5 ids only). Decided by
+ * the catalog, so a model added to it (gpt-6.1-sol) gets the summaries the
+ * transcript shows without a desktop release.
+ */
+export function omnirushModelWantsReasoningSummary(catalog: OmniRushModelCatalog, modelId: unknown): boolean {
+  if (typeof modelId !== "string") return false;
+  const model = catalog.find((entry) => entry.id === modelId);
+  return Boolean(model && model.capabilities.reasoning && (model.family ?? PROVIDER_FAMILY) === PROVIDER_FAMILY);
 }
