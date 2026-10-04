@@ -2380,15 +2380,68 @@ function filterListing(candidates: string[], priorityPaths: ReadonlySet<string> 
   return { paths, denied, truncated: eligible.length > paths.length, deniedPaths, overflowPaths };
 }
 
+/** How deep repositories inside repositories are followed, and how many listed paths they may add. */
+const MAX_NESTED_REPO_DEPTH = 4;
+const MAX_NESTED_REPO_PATHS = MAX_RAW_LISTING_FILES;
+
+async function gitListing(dir: string): Promise<string[]> {
+  const { stdout } = await execFileAsync("git", ["-C", dir, "ls-files", "-co", "--exclude-standard", "-z"], {
+    encoding: "buffer",
+    maxBuffer: 16 * 1024 * 1024,
+    timeout: 15_000,
+  });
+  return Buffer.from(stdout).toString("utf8").split("\0").filter(Boolean);
+}
+
+/** The `path = ...` values of a `.gitmodules` (a submodule's folder), or none. */
+async function submodulePaths(dir: string): Promise<Set<string>> {
+  try {
+    const text = await readFile(join(dir, ".gitmodules"), "utf8");
+    return new Set([...text.matchAll(/^\s*path\s*=\s*(.+?)\s*$/gm)].map((match) => match[1]!.replace(/\/+$/, "")));
+  } catch {
+    return new Set();
+  }
+}
+
+/**
+ * Git lists a repository inside the work tree (a clone, a `git init` in a
+ * subfolder) as one `dir/` entry and a submodule as its bare path, so their
+ * files were in neither the snapshot nor excluded_files. Each is listed from
+ * its own index instead (its own ignore rules apply; never its `.git`),
+ * nested ones too, bounded in depth and count. A folder git cannot list is
+ * left as it was.
+ */
+export async function expandNestedRepos(root: string, listed: string[], depth = 0, budget = { left: MAX_NESTED_REPO_PATHS }): Promise<string[]> {
+  const submodules = await submodulePaths(root);
+  const out: string[] = [];
+  for (const path of listed) {
+    const bare = path.replace(/\/+$/, "");
+    const nested = path.endsWith("/") || submodules.has(bare);
+    if (!nested || depth >= MAX_NESTED_REPO_DEPTH || budget.left <= 0) {
+      out.push(path);
+      continue;
+    }
+    const dir = join(root, ...bare.split("/"));
+    let inner: string[];
+    try {
+      await lstat(join(dir, ".git"));
+      if ((await lstat(dir)).isSymbolicLink()) throw new Error("symlink");
+      inner = await gitListing(dir);
+    } catch {
+      out.push(path);
+      continue;
+    }
+    inner = inner.slice(0, Math.max(0, budget.left));
+    budget.left -= inner.length;
+    for (const child of await expandNestedRepos(dir, inner, depth + 1, budget)) out.push(`${bare}/${child}`);
+  }
+  return out;
+}
+
 async function listWorkspaceFiles(root: string, priorityPaths: ReadonlySet<string> = new Set(), limit = MAX_FILES): Promise<WorkspaceListing> {
   try {
     if (await gitSkipReason()) throw new Error(XCODE_CLT_MISSING);
-    const { stdout } = await execFileAsync("git", ["-C", root, "ls-files", "-co", "--exclude-standard", "-z"], {
-      encoding: "buffer",
-      maxBuffer: 16 * 1024 * 1024,
-      timeout: 15_000,
-    });
-    return filterListing(Buffer.from(stdout).toString("utf8").split("\0"), priorityPaths, limit);
+    return filterListing(await expandNestedRepos(root, await gitListing(root)), priorityPaths, limit);
   } catch {
     const raw = await walkFallback(root, root, [], { paths: [], denied: 0, truncated: false }, priorityPaths);
     const limited = filterListing(raw.paths, priorityPaths, limit);
@@ -3154,7 +3207,7 @@ async function hasRealAncestors(root: string, path: string, seen: AncestorCache 
 type ScanContext = {
   root: string;
   /** The resolved root with a trailing separator: every file inspected must start with it. */
-  rootPrefix: string;
+  sessionSubdir: string;
   cache: Map<string, HashCacheEntry>;
   texts: RedactedTextCache;
   metrics: UploadMetrics;
@@ -3187,7 +3240,7 @@ function scanContext(root: string, cache: Map<string, HashCacheEntry>, texts: Re
   const base = resolve(root);
   return {
     root,
-    rootPrefix: base.endsWith(sep) ? base : `${base}${sep}`,
+    sessionSubdir: base.endsWith(sep) ? base : `${base}${sep}`,
     cache,
     texts,
     metrics,
@@ -3209,7 +3262,7 @@ function scanContext(root: string, cache: Map<string, HashCacheEntry>, texts: Re
 async function inspectFile(context: ScanContext, path: string): Promise<HashCacheEntry | null> {
   const { cache, metrics, pool } = context;
   const absolute = resolve(context.root, path);
-  if (!absolute.startsWith(context.rootPrefix) || !(await hasRealAncestors(context.root, path, context.ancestors))) return null;
+  if (!absolute.startsWith(context.sessionSubdir) || !(await hasRealAncestors(context.root, path, context.ancestors))) return null;
   let file;
   try {
     file = await lstat(absolute);
@@ -4287,14 +4340,13 @@ export class SessionUploader {
    * denied, binary, oversized, gitignored and capped files; a targeted one
    * only what it inspected.
    */
-  private async excludedFiles(root: string, scan: ScanResult, omitted: readonly SnapshotCandidate[], full: boolean, maxBytes: number): Promise<unknown> {
+  private async excludedFiles(root: string, scan: ScanResult, omitted: readonly SnapshotCandidate[], ignoredListing: readonly string[] | null, maxBytes: number): Promise<unknown> {
     const excluded = new ExcludedFiles(root, { uploadPath: portablePathForUpload, hashes: this.excludedHashes });
     for (const path of scan.deniedPaths ?? []) excluded.add(path, "privacy");
     for (const [path, size] of scan.tooLargePaths ?? []) excluded.add(path, "too_large", { size });
     for (const [path, size] of scan.binaryPaths ?? []) excluded.add(path, "binary", { size });
-    if (full) {
-      for (const path of await listGitIgnored(root)) excluded.add(path, isUploadPathDenied(path.replace(/\/$/, "")) ? "privacy" : "gitignored");
-    }
+    // A full scan (`ignoredListing` given): the gitignored files, a denied one as privacy.
+    for (const path of ignoredListing ?? []) excluded.add(path, isUploadPathDenied(path.replace(/\/$/, "")) ? "privacy" : "gitignored");
     for (const path of scan.cappedPaths ?? []) excluded.add(path, "snapshot_cap");
     for (const candidate of omitted) excluded.add(candidate.path, "snapshot_cap", { size: candidate.bytes, sha256: scan.manifest.get(candidate.path)?.sha256 ?? null });
     return excluded.finish(maxBytes);
@@ -5605,6 +5657,11 @@ export class SessionUploader {
         ...snapshotPriorityPaths([], git),
       ]);
       const candidates = candidatesFor(scan, state.relevance, gitPaths);
+      // A full listing names the gitignored files too: a denied one (a gitignored
+      // `.env`) is left out for privacy and counted with the denied files, so
+      // denied_file_count and excluded_files' privacy count agree.
+      const ignoredListing = !(targeted && previous !== null) ? await listGitIgnored(state.root) : null;
+      const deniedCount = scan.deniedCount + (ignoredListing ?? []).filter((path) => isUploadPathDenied(path.replace(/\/$/, ""))).length;
       // The last snapshot waits briefly for a collection still running (toolchain.ts).
       const environment = await this.sessionEnvironment(state.root, type === "end" ? FINAL_TOOLCHAIN_WAIT_MS : undefined);
       const rootName = workspaceRootName(state.root);
@@ -5618,7 +5675,7 @@ export class SessionUploader {
         trigger,
         touched_paths: touchedPaths,
         ...PRIVACY_POLICY,
-        denied_file_count: scan.deniedCount,
+        denied_file_count: deniedCount,
         root_name: rootName,
         git: { commit: git?.commit ?? null, branch: git?.branch ?? null, dirty: git ? String(git.dirty) : "false" },
       });
@@ -5696,7 +5753,7 @@ export class SessionUploader {
         },
         privacy: () => ({
           ...PRIVACY_POLICY,
-          denied_file_count: scan.deniedCount,
+          denied_file_count: deniedCount,
           manifest_truncated: scan.manifestTruncated,
           files_truncated: omittedCount > 0,
           diff_truncated: git?.diff_truncated ?? false,
@@ -5709,7 +5766,7 @@ export class SessionUploader {
           excluded_files: await this.excludedFiles(state.root, scan, [
             ...candidates.filter((candidate) => !selection.selected.has(candidate.path)),
             ...capOmitted,
-          ], !(targeted && previous !== null), budget - contentUsed + EXCLUDED_FILES_MARGIN_BYTES),
+          ], ignoredListing, budget - contentUsed + EXCLUDED_FILES_MARGIN_BYTES),
         }),
       });
       if (omittedCount > 0) {
