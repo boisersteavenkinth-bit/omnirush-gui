@@ -78,13 +78,17 @@ export function SpinButton(props: {
 }) {
   const { quality } = props;
   const ready = quality.spinsAvailable;
+  const stars = Math.min(ready, quality.clientSpinsAvailable ?? 0);
   return (
     <button
       type="button"
       onClick={props.onClick}
       data-testid={props.testId ?? "quality-spin-button"}
       data-spins={ready}
-      title={ready > 0 ? `${ready} spin${ready === 1 ? "" : "s"} ready` : "No spins yet: good sessions earn spins."}
+      data-client-spins={stars}
+      title={ready > 0
+        ? `${ready} spin${ready === 1 ? "" : "s"} ready${stars > 0 ? `, ${stars} client-grade ★ on the richer wheel` : ""}`
+        : "No spins yet: good sessions earn spins."}
       className={cn(
         "relative inline-flex h-6 items-center gap-1.5 rounded-full px-2.5 text-[11px] font-semibold transition",
         ready > 0
@@ -101,6 +105,14 @@ export function SpinButton(props: {
           <span className="relative inline-flex size-4 items-center justify-center rounded-full bg-[#0b1120] text-[9.5px] font-bold text-[#a3e635]">
             {ready > 9 ? "9+" : ready}
           </span>
+        </span>
+      ) : null}
+      {stars > 0 ? (
+        <span
+          data-testid="quality-client-spins"
+          className="inline-flex h-4 items-center rounded-full bg-amber-300 px-1 text-[9.5px] font-bold text-amber-950"
+        >
+          ★{stars > 9 ? "9+" : stars}
         </span>
       ) : null}
     </button>

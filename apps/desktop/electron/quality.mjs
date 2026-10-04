@@ -18,6 +18,7 @@ export const SPIN_REFUSALS = /** @type {const} */ (["no_spins", "wheel_resting",
  *   tokensMultiplier: number,
  *   spinsAvailable: number,
  *   reproSpinsAvailable: number,
+ *   clientSpinsAvailable: number,
  *   spinsExpireAt: string | null,
  *   nextTierHint: string | null,
  *   tips: string[],
@@ -127,6 +128,8 @@ export function parseAccountQuality(value) {
     tokensMultiplier: Number.isFinite(multiplier) && multiplier > 0 ? multiplier : 1,
     spinsAvailable,
     reproSpinsAvailable: Math.min(spinsAvailable, count(value.repro_spins_available)),
+    // Of those, earned by client-grade sessions (the richer wheel).
+    clientSpinsAvailable: Math.min(spinsAvailable, count(value.client_spins_available)),
     spinsExpireAt: isoTime(value.spins_expire_at),
     nextTierHint: text(value.next_tier_hint),
     tips: Array.isArray(value.tips) ? value.tips.map(text).filter((tip) => tip !== null).slice(0, 8) : [],
@@ -179,6 +182,8 @@ export function parseSpinResult(value) {
     nearMiss: value.near_miss === true,
     jackpotTokens: count(value.jackpot_tokens) || null,
     streakDays: value.streak_days === undefined || value.streak_days === null ? null : count(value.streak_days),
+    // A spin earned by a client-grade session, on the richer wheel (`segments` is the wheel used).
+    clientGrade: value.client_grade === true,
   };
 }
 
@@ -197,10 +202,17 @@ export function parseQualitySessions(value) {
       workspace: text(session.workspace),
       spins: count(session.spins),
       counted: session.counted === true,
-      reproducible: ["pass", "fail", "unknown"].includes(session.reproducible) ? session.reproducible : null,
+      // The looser reward level; `reproClient` is the strict client grade.
+      reproducible: reproLevel(session.reproducible),
+      reproClient: reproLevel(session.repro_client),
+      clientGrade: session.client_grade === true,
       workSize: Number.isInteger(session.work_size) ? Math.min(4, Math.max(0, session.work_size)) : null,
       work: parseSessionWork(session.work),
     }));
+}
+
+function reproLevel(value) {
+  return value === "pass" || value === "fail" || value === "unknown" ? value : null;
 }
 
 function parseSessionWork(value) {

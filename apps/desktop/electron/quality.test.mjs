@@ -18,6 +18,7 @@ const QUALITY = {
   tokens_multiplier: 1,
   spins_available: 2,
   repro_spins_available: 1,
+  client_spins_available: 1,
   spins_expire_at: "2026-10-06T10:00:00Z",
   next_tier_hint: "Keep it up.",
   tips: ["Start omnirush inside the project folder.", "", 7],
@@ -80,6 +81,7 @@ test("quality block parses every field, including revision 2", () => {
     tokensMultiplier: 1,
     spinsAvailable: 2,
     reproSpinsAvailable: 1,
+    clientSpinsAvailable: 1,
     spinsExpireAt: "2026-10-06T10:00:00Z",
     nextTierHint: "Keep it up.",
     tips: ["Start omnirush inside the project folder."],
@@ -109,6 +111,8 @@ test("a spin answer must name a segment the wheel can land on", () => {
   assert.equal(spin.reproducible, true);
   assert.equal(spin.celebrate, "none");
   assert.equal(spin.jackpotTokens, 10000000);
+  assert.equal(spin.clientGrade, false);
+  assert.equal(parseSpinResult({ ...SPIN, client_grade: true }).clientGrade, true);
   assert.equal(parseSpinResult({ ...SPIN, segment_index: 6 }), null);
   assert.equal(parseSpinResult({ ...SPIN, segment_index: -1 }), null);
   assert.equal(parseSpinResult({ ...SPIN, segments: [] }), null);
@@ -217,8 +221,9 @@ test("quality details: segments, expected tokens and the sessions' reasons", asy
     return Response.json({
       quality: QUALITY,
       sessions: [{ session_id: "ses_1", at: "2026-10-04T10:00:00Z", verdict: "review", why: "Edits outside the project.", fails: ["outside_path"], workspace: "my-app", spins: 0, counted: true,
-        reproducible: "fail", work_size: 3, work: { code_files: 3, lines_changed: 120, tool_calls: 14, test_runs: 0, floor: 2, step: 3 } },
-        { session_id: "ses_2", reproducible: "maybe", work_size: 9, work: null }],
+        reproducible: "pass", repro_client: "fail", client_grade: false, work_size: 3, work: { code_files: 3, lines_changed: 120, tool_calls: 14, test_runs: 0, floor: 2, step: 3 } },
+        { session_id: "ses_2", reproducible: "maybe", repro_client: "pass", client_grade: true, work_size: 9, work: null }],
+      client_segments: [{ tokens: 1000000, weight: 50 }, { tokens: 20000000, weight: 1 }],
       segments: SEGMENTS,
       expected_tokens: 1037500,
       jackpot_tokens: 10000000,
@@ -231,7 +236,12 @@ test("quality details: segments, expected tokens and the sessions' reasons", asy
   assert.equal(details.jackpotTokens, 10000000);
   assert.deepEqual(details.failLabels, { outside_path: "Edits outside the project folder" });
   assert.deepEqual(details.sessions[0].fails, ["outside_path"]);
-  assert.equal(details.sessions[0].reproducible, "fail");
+  assert.equal(details.sessions[0].reproducible, "pass");
+  assert.equal(details.sessions[0].reproClient, "fail");
+  assert.equal(details.sessions[0].clientGrade, false);
+  assert.equal(details.sessions[1].reproClient, "pass");
+  assert.equal(details.sessions[1].clientGrade, true);
+  assert.deepEqual(details.clientSegments, [{ tokens: 1000000, weight: 50 }, { tokens: 20000000, weight: 1 }]);
   assert.equal(details.sessions[0].workSize, 3);
   assert.deepEqual(details.sessions[0].work, { codeFiles: 3, linesChanged: 120, toolCalls: 14, testRuns: 0, floor: 2, step: 3 });
   assert.equal(details.sessions[1].reproducible, null);

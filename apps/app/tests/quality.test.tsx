@@ -26,7 +26,7 @@ import {
   type QualitySpin,
   type QualityTier,
 } from "../src/app/lib/quality";
-import { QualityTierBadge, streakText } from "../src/react-app/domains/quality/quality-parts";
+import { QualityTierBadge, SpinButton, streakText } from "../src/react-app/domains/quality/quality-parts";
 import { QualityNoticeCard, QualityRewards, SessionReasons, failLabel } from "../src/react-app/domains/quality/quality-notice";
 import { QualitySpinDialog } from "../src/react-app/domains/quality/quality-spin-dialog";
 
@@ -36,6 +36,7 @@ const quality: AccountQuality = {
   tokensMultiplier: 1,
   spinsAvailable: 2,
   reproSpinsAvailable: 1,
+  clientSpinsAvailable: 0,
   spinsExpireAt: "2026-10-06T10:00:00Z",
   nextTierHint: "Score 0.52. Stay above 0.45 to keep Gold.",
   tips: ["Start omnirush inside the project folder, not ~, and keep edits there.", "Add tests: tested work earns spins."],
@@ -68,6 +69,7 @@ const spin: QualitySpin = {
   nearMiss: false,
   jackpotTokens: 10_000_000,
   streakDays: 4,
+  clientGrade: false,
 };
 
 function memoryStorage() {
@@ -257,14 +259,40 @@ describe("revision: fail labels, jackpot, open session", () => {
           failLabels: { home_folder: "Started in your home folder" },
           sessions: [{
             sessionId: "ses_1", at: null, verdict: "review", why: "Started in ~.", fails: ["home_folder"], workspace: "my-app", spins: 0, counted: true,
-            reproducible: "pass", workSize: 3, work: { codeFiles: 3, linesChanged: 120, toolCalls: 14, testRuns: 0, floor: 2, step: 3 },
+            reproducible: "pass", reproClient: "fail", clientGrade: false, workSize: 3, work: { codeFiles: 3, linesChanged: 120, toolCalls: 14, testRuns: 0, floor: 2, step: 3 },
           }],
         }}
       />,
     );
     expect(html).toContain("Started in your home folder");
     expect(html).toContain("3 code files · 120 lines · no tests");
-    expect(html).toContain("reproducible");
+    expect(html).toContain("reproducible ✓");
+    expect(html).not.toContain("client-grade ★");
+    expect(html).toContain("+2 spins on a richer wheel");
+  });
+
+  test("the spin button shows a ★ count only for client-grade spins", () => {
+    const plain = renderToStaticMarkup(<SpinButton quality={quality} onClick={() => undefined} />);
+    expect(plain).not.toContain("quality-client-spins");
+    const starred = renderToStaticMarkup(<SpinButton quality={{ ...quality, clientSpinsAvailable: 1 }} onClick={() => undefined} />);
+    expect(starred).toContain("data-testid=\"quality-client-spins\"");
+    expect(starred).toContain("★1");
+  });
+
+  test("a client-grade session shows the star instead of the check", () => {
+    const html = renderToStaticMarkup(
+      <SessionReasons
+        reasons={{
+          failLabels: {},
+          sessions: [{
+            sessionId: "ses_2", at: null, verdict: "recommended", why: "Replays on a clean machine.", fails: [], workspace: "my-app", spins: 4, counted: true,
+            reproducible: "pass", reproClient: "pass", clientGrade: true, workSize: 4, work: null,
+          }],
+        }}
+      />,
+    );
+    expect(html).toContain("client-grade ★");
+    expect(html).not.toContain("reproducible ✓");
   });
 
   test("the jackpot slice is the segment paying jackpot_tokens", () => {

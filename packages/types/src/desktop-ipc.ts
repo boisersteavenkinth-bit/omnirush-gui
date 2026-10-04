@@ -216,6 +216,8 @@ export type OmniRushAccountQuality = {
   spinsAvailable: number;
   /** Of `spinsAvailable`, those earned by reproducible sessions (always payable). */
   reproSpinsAvailable: number;
+  /** Of `spinsAvailable`, those earned by client-grade sessions (the richer wheel). */
+  clientSpinsAvailable: number;
   /** UTC ISO 8601, the soonest expiry. */
   spinsExpireAt: string | null;
   nextTierHint: string | null;
@@ -253,7 +255,12 @@ export type OmniRushQualitySession = {
   workspace: string | null;
   spins: number;
   counted: boolean;
+  /** The reward level of reproducibility. */
   reproducible: "pass" | "fail" | "unknown" | null;
+  /** The strict client grade. */
+  reproClient: "pass" | "fail" | "unknown" | null;
+  /** Client-grade: +2 spins, on the richer wheel. */
+  clientGrade: boolean;
   /** The work-size step, 0..4. */
   workSize: number | null;
   work: { codeFiles: number; linesChanged: number; toolCalls: number; testRuns: number; floor: number; step: number } | null;
@@ -261,6 +268,8 @@ export type OmniRushQualitySession = {
 
 export type OmniRushQualityDetails = {
   segments: OmniRushWheelSegment[];
+  /** The richer wheel client-grade spins use. */
+  clientSegments: OmniRushWheelSegment[];
   expectedTokens: number | null;
   /** The top segment's prize. */
   jackpotTokens: number | null;
@@ -295,6 +304,8 @@ export type OmniRushQualitySpin = {
   nearMiss: boolean;
   jackpotTokens: number | null;
   streakDays: number | null;
+  /** Earned by a client-grade session; spun on the richer wheel. */
+  clientGrade: boolean;
 };
 
 export type OmniRushQualitySpinRefusal = "no_spins" | "wheel_resting" | "quality_rewards_off";

@@ -270,6 +270,9 @@ export function nearMissText(spin: QualitySpin, jackpotTokens?: number | null): 
   return `So close to ${compactTokenCount(jackpot)}!`;
 }
 
+/** The star, explained wherever it shows. */
+export const CLIENT_GRADE_NOTE = "★ Client-grade sessions earn +2 spins on a richer wheel.";
+
 export function newSpinIdempotencyKey(): string {
   return globalThis.crypto.randomUUID();
 }

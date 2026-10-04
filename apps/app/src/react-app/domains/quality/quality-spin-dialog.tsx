@@ -7,6 +7,7 @@ import { cn } from "@/lib/utils";
 import { omnirushAccountStatus, omnirushQualityDetails, omnirushQualitySpin, omnirushQualitySpins } from "../../../app/lib/desktop";
 import { compactTokenCount } from "../../../app/lib/omnirush-usage";
 import {
+  CLIENT_GRADE_NOTE,
   DEFAULT_WHEEL_SEGMENTS,
   SOUND_STORAGE_KEY,
   canSpinNow,
@@ -176,12 +177,23 @@ export function QualitySpinDialog(props: QualitySpinDialogProps) {
         data-phase={phase}
         className="relative w-full max-w-[520px] overflow-hidden rounded-[28px] border border-white/10 bg-[radial-gradient(ellipse_at_top,#1a2e05_0%,#0b1120_45%,#05070c_100%)] p-6 text-white shadow-2xl shadow-black/60"
       >
+        {result?.clientGrade ? (
+          <div
+            data-testid="quality-client-grade-header"
+            className="-mx-6 -mt-6 mb-4 bg-gradient-to-r from-amber-500/30 via-amber-300/25 to-amber-500/30 px-6 py-2 text-center text-xs font-bold uppercase tracking-[0.24em] text-amber-200"
+          >
+            ★ client-grade wheel
+          </div>
+        ) : null}
         <div className="flex items-start justify-between gap-3">
           <div className="min-w-0">
             <div className="flex items-center gap-2">
               <QualityTierBadge quality={quality} />
               <span className="text-[11px] text-white/50">
                 {spinsLeft} spin{spinsLeft === 1 ? "" : "s"} ready
+                {!result && quality.clientSpinsAvailable > 0 ? (
+                  <span className="ms-1 font-semibold text-amber-200" data-testid="quality-dialog-client-spins">· ★{quality.clientSpinsAvailable} client-grade</span>
+                ) : null}
               </span>
             </div>
             <h2 id="quality-spin-title" className="mt-2 text-2xl font-semibold tracking-[-0.02em]">
@@ -267,9 +279,13 @@ export function QualitySpinDialog(props: QualitySpinDialogProps) {
                 {spinPayoutText(result)}
               </div>
               <div className="mt-2 flex flex-wrap items-center justify-center gap-2 text-[11px]">
-                {result.reproducible ? (
+                {result.clientGrade ? (
+                  <span className="inline-flex items-center gap-1 rounded-full border border-amber-300/50 bg-amber-300/15 px-2 py-0.5 font-semibold text-amber-200">
+                    client-grade ★
+                  </span>
+                ) : result.reproducible ? (
                   <span className="inline-flex items-center gap-1 rounded-full border border-[#a3e635]/40 bg-[#a3e635]/10 px-2 py-0.5 text-[#d9f99d]">
-                    <Sparkles className="size-3" aria-hidden="true" /> Reproducible session
+                    <Sparkles className="size-3" aria-hidden="true" /> reproducible ✓
                   </span>
                 ) : null}
                 {result.alreadySpun ? <span className="text-white/50">This spin was already counted.</span> : null}
@@ -291,6 +307,7 @@ export function QualitySpinDialog(props: QualitySpinDialogProps) {
             <div className="pt-4 text-sm text-white/60">
               {quality.preview ? "Preview: spins show what you would win, and pay 0 tokens." : "The wheel decides. Every prize goes into your pot."}
               {expectedTokens ? <span className="block text-white/40">Average spin: {compactTokenCount(expectedTokens)} tokens</span> : null}
+              <span className="mt-1 block text-[11px] text-amber-200/70" data-testid="quality-client-grade-note">{CLIENT_GRADE_NOTE}</span>
             </div>
           )}
         </div>

@@ -1003,7 +1003,7 @@ function QualityFooterStrip({ quality }: { quality: AccountQuality }) {
       >
         {hint ? <ProgressRing progress={hint.progress} size={16} stroke={2.25} /> : null}
         <span className="truncate">
-          {hint ? `next ${Math.round(hint.progress * 100)}%` : quality.streakDays > 0 ? `${quality.streakDays}-day streak` : "How to earn spins"}
+          {hint ? `${Math.round(hint.progress * 100)}%` : quality.streakDays > 0 ? `${quality.streakDays}-day streak` : "How to earn spins"}
         </span>
       </button>
     </div>

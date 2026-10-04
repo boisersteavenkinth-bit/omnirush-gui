@@ -1129,6 +1129,7 @@ export function createDesktopOmniRushAccountStore({
       const jackpot = Number(payload.jackpot_tokens);
       return {
         segments: parseWheelSegments(payload.segments),
+        clientSegments: parseWheelSegments(payload.client_segments),
         expectedTokens: Number.isFinite(expected) ? expected : null,
         jackpotTokens: Number.isFinite(jackpot) && jackpot > 0 ? jackpot : null,
         sessions: parseQualitySessions(payload.sessions),

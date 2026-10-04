@@ -6,6 +6,7 @@ import { cn } from "@/lib/utils";
 
 import { omnirushAccountStatus, omnirushQualityDetails } from "../../../app/lib/desktop";
 import {
+  CLIENT_GRADE_NOTE,
   NOTICE_SEEN_STORAGE_KEY,
   NUDGE_SEEN_STORAGE_KEY,
   canSpinNow,
@@ -56,6 +57,8 @@ export function SessionReasons({ reasons }: { reasons: QualitySessionReasons | n
   if (sessions === null) return <div className="text-xs text-white/50">Loading your sessions…</div>;
   if (!sessions.length) return <div className="text-xs text-white/50">No sessions checked yet. They are checked about once an hour.</div>;
   return (
+    <>
+    <p className="mb-2 text-[11px] text-amber-200/80" data-testid="quality-client-grade-note">{CLIENT_GRADE_NOTE}</p>
     <ul className="space-y-2" data-testid="quality-session-reasons">
       {sessions.slice(0, 6).map((session) => (
         <li key={session.sessionId} className="rounded-xl border border-white/10 bg-black/20 px-3 py-2">
@@ -67,10 +70,12 @@ export function SessionReasons({ reasons }: { reasons: QualitySessionReasons | n
           </div>
           {session.why ? <div className="mt-0.5 text-xs leading-5 text-white/80">{session.why}</div> : null}
           {workSummary(session.work) ? <div className="mt-0.5 text-[10.5px] text-white/45">{workSummary(session.work)}</div> : null}
-          {session.fails.length || session.reproducible === "pass" ? (
+          {session.fails.length || session.reproducible === "pass" || session.clientGrade ? (
             <div className="mt-1 flex flex-wrap gap-1">
-              {session.reproducible === "pass" ? (
-                <span className="rounded-full bg-[#a3e635]/15 px-1.5 py-0.5 text-[10px] text-[#d9f99d]">reproducible</span>
+              {session.clientGrade ? (
+                <span data-testid="quality-client-grade" className="rounded-full bg-amber-300/15 px-1.5 py-0.5 text-[10px] font-semibold text-amber-200">client-grade ★</span>
+              ) : session.reproducible === "pass" ? (
+                <span data-testid="quality-reproducible" className="rounded-full bg-[#a3e635]/15 px-1.5 py-0.5 text-[10px] text-[#d9f99d]">reproducible ✓</span>
               ) : null}
               {session.fails.map((fail) => (
                 <span key={fail} data-fail={fail} className="rounded-full bg-white/[0.06] px-1.5 py-0.5 text-[10px] text-white/60">
@@ -82,6 +87,7 @@ export function SessionReasons({ reasons }: { reasons: QualitySessionReasons | n
         </li>
       ))}
     </ul>
+    </>
   );
 }
 
