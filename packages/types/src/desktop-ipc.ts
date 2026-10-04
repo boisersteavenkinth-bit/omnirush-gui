@@ -278,8 +278,23 @@ export type OmniRushQualityDetails = {
   failLabels: Record<string, string>;
 };
 
-/** GET /me/quality/spins totals. */
-export type OmniRushQualitySpinTotals = { spun: number; paidTokens: number };
+export type OmniRushQualitySpinRecord = {
+  id: string;
+  status: "ready" | "spun" | "expired" | "forfeit";
+  reason: string | null;
+  reproducible: boolean;
+  /** Earned by a replay-ready (client-grade) session. */
+  clientGrade: boolean;
+  sessionId: string | null;
+  earnedAt: string | null;
+  expiresAt: string | null;
+  spunAt: string | null;
+  prizeTokens: number | null;
+  paidTokens: number | null;
+};
+
+/** GET /me/quality/spins: totals and the newest spins (up to 10). */
+export type OmniRushQualitySpinTotals = { spun: number; paidTokens: number; recent: OmniRushQualitySpinRecord[] };
 
 export type OmniRushWheelSegment = { tokens: number; weight: number };
 

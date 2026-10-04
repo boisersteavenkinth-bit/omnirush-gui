@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { createDesktopOmniRushAccountStore } from "./omnirush-account.mjs";
-import { parseAccountQuality, parseSpinResult, spinIdempotencyKey, spinRefusal } from "./quality.mjs";
+import { parseAccountQuality, parseSpinHistory, parseSpinResult, spinIdempotencyKey, spinRefusal } from "./quality.mjs";
 
 const GATEWAY = "http://localhost:8090/omnirush/v1";
 const SEGMENTS = [
@@ -261,4 +261,20 @@ test("the profile read names the open session: /device/me?session_id=", async ()
   await store.status();
   await store.status({ sessionId: "../etc?x=1" });
   assert.deepEqual(seen, ["?session_id=ses_abc123", "", ""]);
+});
+
+test("spins history: totals and the last 10 spins, each marked when replay-ready", () => {
+  const spins = Array.from({ length: 12 }, (_, index) => ({
+    id: `spin-${index}`, status: index === 0 ? "ready" : "spun", reason: null, reproducible: true, client_grade: index === 1,
+    session_id: "ses_1", earned_at: "2026-10-04T10:00:00Z", expires_at: "2026-10-06T10:00:00Z",
+    spun_at: index === 0 ? null : "2026-10-04T11:00:00Z", prize_tokens: index === 0 ? null : 1000000, paid_tokens: index === 0 ? null : 1000000,
+  }));
+  const history = parseSpinHistory({ spins, totals: { spun: 12, paid_tokens: 18250000 } });
+  assert.equal(history.spun, 12);
+  assert.equal(history.paidTokens, 18250000);
+  assert.equal(history.recent.length, 10);
+  assert.equal(history.recent[0].prizeTokens, null);
+  assert.equal(history.recent[1].clientGrade, true);
+  assert.equal(history.recent[2].clientGrade, false);
+  assert.equal(parseSpinHistory(null), null);
 });

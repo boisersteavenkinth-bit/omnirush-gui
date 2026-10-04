@@ -5,6 +5,7 @@ import {
   DEFAULT_WHEEL_SEGMENTS,
   NOTICE_SEEN_STORAGE_KEY,
   canSpinNow,
+  countUpValue,
   jackpotIndex,
   refreshAccountStatus,
   setQualitySessionId,
@@ -28,7 +29,7 @@ import {
 } from "../src/app/lib/quality";
 import { QualityTierBadge, SpinButton, streakText } from "../src/react-app/domains/quality/quality-parts";
 import { QualityNoticeCard, QualityRewards, SessionReasons, failLabel } from "../src/react-app/domains/quality/quality-notice";
-import { QualitySpinDialog } from "../src/react-app/domains/quality/quality-spin-dialog";
+import { QualitySpinDialog, RecentSpins } from "../src/react-app/domains/quality/quality-spin-dialog";
 
 const quality: AccountQuality = {
   tier: "gold",
@@ -253,6 +254,8 @@ describe("revision: fail labels, jackpot, open session", () => {
     expect(failLabel("outside_path", { outside_path: "Edits outside the project folder" })).toBe("Edits outside the project folder");
     expect(failLabel("outside_path")).toBe("edits outside the project folder");
     expect(failLabel("capture_truncated")).toBe("capture truncated");
+    expect(failLabel("old_client")).toBe("old app version");
+    expect(failLabel("x", { x: "Recorded by an old client" })).toBe("Recorded by an old app version");
     const html = renderToStaticMarkup(
       <SessionReasons
         reasons={{
@@ -267,11 +270,11 @@ describe("revision: fail labels, jackpot, open session", () => {
     expect(html).toContain("Started in your home folder");
     expect(html).toContain("3 code files · 120 lines · no tests");
     expect(html).toContain("reproducible ✓");
-    expect(html).not.toContain("client-grade ★");
+    expect(html).not.toContain("replay-ready ★");
     expect(html).toContain("+2 spins on a richer wheel");
   });
 
-  test("the spin button shows a ★ count only for client-grade spins", () => {
+  test("the spin button shows a ★ count only for replay-ready spins", () => {
     const plain = renderToStaticMarkup(<SpinButton quality={quality} onClick={() => undefined} />);
     expect(plain).not.toContain("quality-client-spins");
     const starred = renderToStaticMarkup(<SpinButton quality={{ ...quality, clientSpinsAvailable: 1 }} onClick={() => undefined} />);
@@ -279,7 +282,7 @@ describe("revision: fail labels, jackpot, open session", () => {
     expect(starred).toContain("★1");
   });
 
-  test("a client-grade session shows the star instead of the check", () => {
+  test("a replay-ready session shows the star instead of the check", () => {
     const html = renderToStaticMarkup(
       <SessionReasons
         reasons={{
@@ -291,7 +294,7 @@ describe("revision: fail labels, jackpot, open session", () => {
         }}
       />,
     );
-    expect(html).toContain("client-grade ★");
+    expect(html).toContain("replay-ready ★");
     expect(html).not.toContain("reproducible ✓");
   });
 
@@ -314,5 +317,62 @@ describe("revision: fail labels, jackpot, open session", () => {
     await refreshAccountStatus(read);
     expect(calls).toEqual([{ sessionId: "ses_open" }, null]);
     useAccountStatusStore.getState().set(null);
+  });
+});
+
+describe("replay-ready wording, history and the count-up", () => {
+  test("users never read the word client", () => {
+    const starred = { ...quality, clientSpinsAvailable: 2, tier: "coaching" as const };
+    const notice = { id: "c-1", kind: "tier-coaching", title: "Here is how to get spins", body: "" };
+    const html = [
+      renderToStaticMarkup(<SpinButton quality={starred} onClick={() => undefined} />),
+      renderToStaticMarkup(<QualityNoticeCard quality={starred} notice={notice} onSpin={() => undefined} onDismiss={() => undefined} />),
+      renderToStaticMarkup(<QualitySpinDialog quality={starred} onClose={() => undefined} />),
+      renderToStaticMarkup(
+        <SessionReasons
+          reasons={{
+            failLabels: {},
+            sessions: [{
+              sessionId: "s", at: null, verdict: null, why: null, fails: ["old_client", "client_tool"], workspace: null, spins: 2, counted: true,
+              reproducible: "pass", reproClient: "pass", clientGrade: true, workSize: null, work: null,
+            }],
+          }}
+        />,
+      ),
+      renderToStaticMarkup(<RecentSpins spins={[{ id: "a", status: "spun", reason: null, reproducible: true, clientGrade: true, sessionId: null, earnedAt: null, expiresAt: null, spunAt: null, prizeTokens: 2_000_000, paidTokens: 2_000_000 }]} />),
+    ].join("\n");
+    // Only attribute values (test ids, data-*) may say "client"; no text a user reads.
+    const text = html.replace(/<[^>]*>/g, " ");
+    expect(text.toLowerCase()).not.toContain("client");
+    expect(text).toContain("old app version");
+    expect(text).toContain("replay-ready ★");
+    expect(text).toContain("Replay-ready sessions earn +2 spins on a richer wheel.");
+  });
+
+  test("recent spins: the last 10, ★ on replay-ready ones", () => {
+    const spins = Array.from({ length: 12 }, (_, index) => ({
+      id: `s${index}`, status: "spun" as const, reason: null, reproducible: true, clientGrade: index % 2 === 0, sessionId: null,
+      earnedAt: null, expiresAt: null, spunAt: null, prizeTokens: 500_000, paidTokens: 500_000,
+    }));
+    const html = renderToStaticMarkup(<RecentSpins spins={spins} />);
+    expect(html.match(/<li /g)?.length).toBe(10);
+    expect(html.match(/data-replay-ready/g)?.length).toBe(5);
+    expect(html).toContain("★ 500K");
+    expect(renderToStaticMarkup(<RecentSpins spins={[]} />)).toBe("");
+  });
+
+  test("the count-up ends exactly on the server's prize and never passes it", () => {
+    for (const value of [0, 250_000, 1_000_000, 1_234_567, 9_999_999, 10_000_000]) {
+      let last = 0;
+      for (let step = 0; step <= 100; step += 1) {
+        const shown = countUpValue(value, step / 100);
+        expect(shown).toBeLessThanOrEqual(value);
+        expect(shown).toBeGreaterThanOrEqual(last);
+        last = shown;
+      }
+      expect(countUpValue(value, 1)).toBe(value);
+      expect(countUpValue(value, 1.5)).toBe(value);
+      if (value > 0) expect(countUpValue(value, 0.999)).toBeLessThan(value);
+    }
   });
 });

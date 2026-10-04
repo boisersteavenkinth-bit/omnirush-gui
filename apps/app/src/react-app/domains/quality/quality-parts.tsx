@@ -87,7 +87,7 @@ export function SpinButton(props: {
       data-spins={ready}
       data-client-spins={stars}
       title={ready > 0
-        ? `${ready} spin${ready === 1 ? "" : "s"} ready${stars > 0 ? `, ${stars} client-grade ★ on the richer wheel` : ""}`
+        ? `${ready} spin${ready === 1 ? "" : "s"} ready${stars > 0 ? `, ${stars} replay-ready ★ on the richer wheel` : ""}`
         : "No spins yet: good sessions earn spins."}
       className={cn(
         "relative inline-flex h-6 items-center gap-1.5 rounded-full px-2.5 text-[11px] font-semibold transition",

@@ -13,7 +13,7 @@ import {
   writePlaintextCredentialFile,
 } from "./plaintext-credential-file.mjs";
 import { CLIENT_HEADER, guiClientHeaderValue, parseClientUpdate } from "./update-gate.mjs";
-import { parseAccountQuality, parseFailLabels, parseQualitySessions, profileSessionId, parseSpinResult, parseWheelSegments, spinIdempotencyKey, spinRefusal } from "./quality.mjs";
+import { parseAccountQuality, parseFailLabels, parseQualitySessions, parseSpinHistory, profileSessionId, parseSpinResult, parseWheelSegments, spinIdempotencyKey, spinRefusal } from "./quality.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -1140,15 +1140,12 @@ export function createDesktopOmniRushAccountStore({
     }
   }
 
-  /** GET /me/quality/spins totals; null when unavailable. */
+  /** GET /me/quality/spins: totals and the last 10 spins; null when unavailable. */
   async function qualitySpinTotals() {
     try {
       const response = await sendAuthorized("/me/quality/spins", { method: "GET" });
       if (!response?.ok) return null;
-      const payload = await response.json();
-      const totals = payload && typeof payload === "object" ? payload.totals : null;
-      if (!totals || typeof totals !== "object") return null;
-      return { spun: Math.max(0, Number(totals.spun) || 0), paidTokens: Math.max(0, Number(totals.paid_tokens) || 0) };
+      return parseSpinHistory(await response.json());
     } catch {
       return null;
     }

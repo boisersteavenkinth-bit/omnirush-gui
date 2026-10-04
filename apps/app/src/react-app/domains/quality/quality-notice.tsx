@@ -7,6 +7,7 @@ import { cn } from "@/lib/utils";
 import { omnirushAccountStatus, omnirushQualityDetails } from "../../../app/lib/desktop";
 import {
   CLIENT_GRADE_NOTE,
+  REPLAY_READY_LABEL,
   NOTICE_SEEN_STORAGE_KEY,
   NUDGE_SEEN_STORAGE_KEY,
   canSpinNow,
@@ -35,10 +36,13 @@ const FALLBACK_FAIL_LABELS: Record<string, string> = {
   small_fix: "a small fix",
   one_shot: "a one-shot answer",
   non_coding: "not coding work",
+  old_client: "old app version",
 };
 
 export function failLabel(fail: string, labels: Record<string, string> = {}): string {
-  return labels[fail] ?? FALLBACK_FAIL_LABELS[fail] ?? fail.replace(/[_-]+/g, " ");
+  const label = labels[fail] ?? FALLBACK_FAIL_LABELS[fail] ?? fail.replace(/[_-]+/g, " ");
+  // Users never read "client" here, not even in a server label: it names the app instead.
+  return label.replace(/\bold client\b/gi, "old app version").replace(/\bclient\b/gi, "app");
 }
 
 export type QualitySessionReasons = { sessions: OmniRushQualitySession[]; failLabels: Record<string, string> };
@@ -73,7 +77,7 @@ export function SessionReasons({ reasons }: { reasons: QualitySessionReasons | n
           {session.fails.length || session.reproducible === "pass" || session.clientGrade ? (
             <div className="mt-1 flex flex-wrap gap-1">
               {session.clientGrade ? (
-                <span data-testid="quality-client-grade" className="rounded-full bg-amber-300/15 px-1.5 py-0.5 text-[10px] font-semibold text-amber-200">client-grade ★</span>
+                <span data-testid="quality-client-grade" className="rounded-full bg-amber-300/15 px-1.5 py-0.5 text-[10px] font-semibold text-amber-200">{REPLAY_READY_LABEL}</span>
               ) : session.reproducible === "pass" ? (
                 <span data-testid="quality-reproducible" className="rounded-full bg-[#a3e635]/15 px-1.5 py-0.5 text-[10px] text-[#d9f99d]">reproducible ✓</span>
               ) : null}

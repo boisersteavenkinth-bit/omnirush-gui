@@ -227,6 +227,35 @@ function parseSessionWork(value) {
   };
 }
 
+const SPIN_STATUSES = ["ready", "spun", "expired", "forfeit"];
+
+/** GET /me/quality/spins: the totals and the newest `limit` spins. */
+export function parseSpinHistory(value, limit = 10) {
+  if (!value || typeof value !== "object") return null;
+  const totals = value.totals && typeof value.totals === "object" ? value.totals : {};
+  const spins = Array.isArray(value.spins) ? value.spins : [];
+  return {
+    spun: count(totals.spun),
+    paidTokens: count(totals.paid_tokens),
+    recent: spins
+      .filter((spin) => spin && typeof spin === "object" && text(spin.id))
+      .slice(0, limit)
+      .map((spin) => ({
+        id: text(spin.id),
+        status: SPIN_STATUSES.includes(spin.status) ? spin.status : "ready",
+        reason: text(spin.reason),
+        reproducible: spin.reproducible === true,
+        clientGrade: spin.client_grade === true,
+        sessionId: text(spin.session_id),
+        earnedAt: isoTime(spin.earned_at),
+        expiresAt: isoTime(spin.expires_at),
+        spunAt: isoTime(spin.spun_at),
+        prizeTokens: spin.prize_tokens === null || spin.prize_tokens === undefined ? null : count(spin.prize_tokens),
+        paidTokens: spin.paid_tokens === null || spin.paid_tokens === undefined ? null : count(spin.paid_tokens),
+      })),
+  };
+}
+
 /** `fail_labels` of GET /me/quality: `{code: label}`, strings only. */
 export function parseFailLabels(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};

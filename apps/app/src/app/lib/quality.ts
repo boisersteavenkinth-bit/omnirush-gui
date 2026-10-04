@@ -271,7 +271,19 @@ export function nearMissText(spin: QualitySpin, jackpotTokens?: number | null): 
 }
 
 /** The star, explained wherever it shows. */
-export const CLIENT_GRADE_NOTE = "★ Client-grade sessions earn +2 spins on a richer wheel.";
+export const CLIENT_GRADE_NOTE = "★ Replay-ready sessions earn +2 spins on a richer wheel.";
+/** What users read for a client-grade session or spin (internal fields keep `client`). */
+export const REPLAY_READY_LABEL = "replay-ready ★";
+
+/**
+ * The prize shown `progress` (0..1) into the count-up: an ease-out that never
+ * passes the server's value and ends exactly on it.
+ */
+export function countUpValue(value: number, progress: number): number {
+  const p = Math.min(1, Math.max(0, progress));
+  if (p >= 1) return value;
+  return Math.min(value, Math.floor(value * (1 - (1 - p) ** 3)));
+}
 
 export function newSpinIdempotencyKey(): string {
   return globalThis.crypto.randomUUID();
