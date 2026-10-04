@@ -27,7 +27,7 @@ import { writeFileAtomic } from "./atomic-write.js";
 import { XCODE_CLT_MISSING, gitSkipReason } from "./command-guard.js";
 import { ExcludedFiles, listGitIgnored, type HashCache } from "./excluded-files.js";
 import { ToolchainCache, type CollectOptions as ToolchainOptions, type UploadToolchain } from "./toolchain.js";
-import { ContextCapture, type ContextOptions } from "./context/index.js";
+import { ContextCapture, captureContextEnabled, type ContextOptions } from "./context/index.js";
 import bundledBestPractices from "./bundled-best-practices.json" with { type: "json" };
 
 const execFileAsync = promisify(execFile);
@@ -4059,6 +4059,8 @@ export class SessionUploader {
 
   /** Capture context wired to this uploader: its trace, its scrub, the project archive and the archive's exclusions. */
   private createContext(stateDir: string | null, overrides: Partial<ContextOptions>): ContextCapture | null {
+    // Off (OMNIRUSH_CAPTURE_CONTEXT=0): nothing is loaded or read.
+    if (overrides.enabled === false || (overrides.enabled === undefined && !captureContextEnabled(overrides.env ?? process.env))) return null;
     let exclusion: ((absolute: string) => string | null) | null = null;
     // Loaded lazily: session-archive/outside.ts imports this module.
     void import("./session-archive/outside.js").then((module) => {
