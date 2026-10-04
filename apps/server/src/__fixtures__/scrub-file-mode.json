@@ -1360,6 +1360,952 @@
   }
  },
  {
+  "name": "opencode turn.completed: nested apply_patch part, its metadata diffs and the user message's summary.diffs (`file` key) keep code per file; the prompt stays CONFIG",
+  "kind": "trace",
+  "input": {
+   "schema_version": 1,
+   "session_id": "ses_1",
+   "events": [
+    {
+     "at": "2026-10-04T00:00:00.000Z",
+     "type": "engine.request",
+     "data": {
+      "agent": "omnirush-cli",
+      "prompt": "Create src/auth.ts with exactly these two lines:\nexport async function a(token:string){await fetch(u)}\nconst k = \"sk-proj-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"\nAppend the line API_TOKEN=abcdefgh123 to .env.",
+      "model": null
+     }
+    },
+    {
+     "at": "2026-10-04T00:00:01.000Z",
+     "type": "turn.completed",
+     "data": {
+      "messages": [
+       {
+        "info": {
+         "id": "msg_1",
+         "sessionID": "ses_1",
+         "role": "user",
+         "summary": {
+          "diffs": [
+           {
+            "file": ".env",
+            "patch": "Index: .env\n===================================================================\n--- .env\t\n+++ .env\t\n@@ -1,2 +1,3 @@\n APP_NAME=demo\n DEBUG=1\n+API_TOKEN=abcdefgh123\n",
+            "additions": 1,
+            "deletions": 0,
+            "status": "modified"
+           },
+           {
+            "file": "src/auth.ts",
+            "patch": "Index: src/auth.ts\n===================================================================\n--- src/auth.ts\t\n+++ src/auth.ts\t\n@@ -0,0 +1,2 @@\n+export async function a(token:string){await fetch(u)}\n+const k = \"sk-proj-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"\n",
+            "additions": 2,
+            "deletions": 0,
+            "status": "added"
+           }
+          ]
+         }
+        },
+        "parts": [
+         {
+          "id": "prt_1",
+          "type": "text",
+          "text": "Create src/auth.ts with exactly these two lines:\nexport async function a(token:string){await fetch(u)}\nconst k = \"sk-proj-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"\nAppend the line API_TOKEN=abcdefgh123 to .env."
+         }
+        ]
+       },
+       {
+        "info": {
+         "id": "msg_2",
+         "sessionID": "ses_1",
+         "role": "assistant"
+        },
+        "parts": [
+         {
+          "id": "prt_2",
+          "type": "step-start"
+         },
+         {
+          "id": "prt_3",
+          "type": "tool",
+          "callID": "call_1",
+          "tool": "apply_patch",
+          "state": {
+           "status": "completed",
+           "input": {
+            "patchText": "*** Begin Patch\n*** Add File: src/auth.ts\n+export async function a(token:string){await fetch(u)}\n+const k = \"sk-proj-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"\n*** Update File: .env\n@@\n+API_TOKEN=abcdefgh123\n*** End Patch"
+           },
+           "output": "Success. Updated the following files:\nA src/auth.ts\nM .env",
+           "metadata": {
+            "diff": "Index: /work/proj/src/auth.ts\n===================================================================\n--- /work/proj/src/auth.ts\n+++ /work/proj/src/auth.ts\n@@ -0,0 +1,2 @@\n+export async function a(token:string){await fetch(u)}\n+const k = \"sk-proj-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"\n\nIndex: /work/proj/.env\n===================================================================\n--- /work/proj/.env\n+++ /work/proj/.env\n@@ -1,2 +1,3 @@\n APP_NAME=demo\n DEBUG=1\n+API_TOKEN=abcdefgh123\n\n",
+            "files": [
+             {
+              "filePath": "/work/proj/src/auth.ts",
+              "relativePath": "src/auth.ts",
+              "type": "add",
+              "patch": "Index: /work/proj/src/auth.ts\n===================================================================\n--- /work/proj/src/auth.ts\n+++ /work/proj/src/auth.ts\n@@ -0,0 +1,2 @@\n+export async function a(token:string){await fetch(u)}\n+const k = \"sk-proj-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"\n",
+              "additions": 2,
+              "deletions": 0
+             },
+             {
+              "filePath": "/work/proj/.env",
+              "relativePath": ".env",
+              "type": "update",
+              "patch": "Index: /work/proj/.env\n===================================================================\n--- /work/proj/.env\n+++ /work/proj/.env\n@@ -1,2 +1,3 @@\n APP_NAME=demo\n DEBUG=1\n+API_TOKEN=abcdefgh123\n",
+              "additions": 1,
+              "deletions": 0
+             }
+            ],
+            "diagnostics": {},
+            "truncated": false
+           }
+          }
+         },
+         {
+          "id": "prt_4",
+          "type": "patch",
+          "files": [
+           "/work/proj/src/auth.ts",
+           "/work/proj/.env"
+          ]
+         }
+        ]
+       },
+       {
+        "info": {
+         "id": "msg_3",
+         "sessionID": "ses_1",
+         "role": "assistant"
+        },
+        "parts": [
+         {
+          "id": "prt_5",
+          "type": "tool",
+          "callID": "call_2",
+          "tool": "bash",
+          "state": {
+           "status": "completed",
+           "input": {
+            "command": "echo 'export async function a(token:string){await fetch(u)}'; tail -n1 .env"
+           },
+           "output": "export async function a(token:string){await fetch(u)}\nAPI_TOKEN=abcdefgh123\n",
+           "metadata": {
+            "output": "export async function a(token:string){await fetch(u)}\nAPI_TOKEN=abcdefgh123\n"
+           }
+          }
+         }
+        ]
+       }
+      ]
+     }
+    }
+   ]
+  },
+  "expected": {
+   "schema_version": 1,
+   "session_id": "ses_1",
+   "events": [
+    {
+     "at": "2026-10-04T00:00:00.000Z",
+     "type": "engine.request",
+     "data": {
+      "agent": "omnirush-cli",
+      "prompt": "Create src/auth.ts with exactly these two lines:\nexport async function a(token:[REDACTED] fetch(u)}\nconst k = \"[REDACTED]\"\nAppend the line API_TOKEN=[REDACTED] to .env.",
+      "model": null
+     }
+    },
+    {
+     "at": "2026-10-04T00:00:01.000Z",
+     "type": "turn.completed",
+     "data": {
+      "messages": [
+       {
+        "info": {
+         "id": "msg_1",
+         "sessionID": "ses_1",
+         "role": "user",
+         "summary": {
+          "diffs": [
+           {
+            "file": ".env",
+            "patch": "Index: .env\n===================================================================\n--- .env\t\n+++ .env\t\n@@ -1,2 +1,3 @@\n APP_NAME=demo\n DEBUG=1\n+API_TOKEN=[REDACTED]\n",
+            "additions": 1,
+            "deletions": 0,
+            "status": "modified"
+           },
+           {
+            "file": "src/auth.ts",
+            "patch": "Index: src/auth.ts\n===================================================================\n--- src/auth.ts\t\n+++ src/auth.ts\t\n@@ -0,0 +1,2 @@\n+export async function a(token:string){await fetch(u)}\n+const k = \"[REDACTED]\"\n",
+            "additions": 2,
+            "deletions": 0,
+            "status": "added"
+           }
+          ]
+         }
+        },
+        "parts": [
+         {
+          "id": "prt_1",
+          "type": "text",
+          "text": "Create src/auth.ts with exactly these two lines:\nexport async function a(token:[REDACTED] fetch(u)}\nconst k = \"[REDACTED]\"\nAppend the line API_TOKEN=[REDACTED] to .env."
+         }
+        ]
+       },
+       {
+        "info": {
+         "id": "msg_2",
+         "sessionID": "ses_1",
+         "role": "assistant"
+        },
+        "parts": [
+         {
+          "id": "prt_2",
+          "type": "step-start"
+         },
+         {
+          "id": "prt_3",
+          "type": "tool",
+          "callID": "call_1",
+          "tool": "apply_patch",
+          "state": {
+           "status": "completed",
+           "input": {
+            "patchText": "*** Begin Patch\n*** Add File: src/auth.ts\n+export async function a(token:string){await fetch(u)}\n+const k = \"[REDACTED]\"\n*** Update File: .env\n@@\n+API_TOKEN=[REDACTED]\n*** End Patch"
+           },
+           "output": "Success. Updated the following files:\nA src/auth.ts\nM .env",
+           "metadata": {
+            "diff": "Index: /work/proj/src/auth.ts\n===================================================================\n--- /work/proj/src/auth.ts\n+++ /work/proj/src/auth.ts\n@@ -0,0 +1,2 @@\n+export async function a(token:string){await fetch(u)}\n+const k = \"[REDACTED]\"\n\nIndex: /work/proj/.env\n===================================================================\n--- /work/proj/.env\n+++ /work/proj/.env\n@@ -1,2 +1,3 @@\n APP_NAME=demo\n DEBUG=1\n+API_TOKEN=[REDACTED]\n\n",
+            "files": [
+             {
+              "filePath": "/work/proj/src/auth.ts",
+              "relativePath": "src/auth.ts",
+              "type": "add",
+              "patch": "Index: /work/proj/src/auth.ts\n===================================================================\n--- /work/proj/src/auth.ts\n+++ /work/proj/src/auth.ts\n@@ -0,0 +1,2 @@\n+export async function a(token:string){await fetch(u)}\n+const k = \"[REDACTED]\"\n",
+              "additions": 2,
+              "deletions": 0
+             },
+             {
+              "filePath": "/work/proj/.env",
+              "relativePath": ".env",
+              "type": "update",
+              "patch": "Index: /work/proj/.env\n===================================================================\n--- /work/proj/.env\n+++ /work/proj/.env\n@@ -1,2 +1,3 @@\n APP_NAME=demo\n DEBUG=1\n+API_TOKEN=[REDACTED]\n",
+              "additions": 1,
+              "deletions": 0
+             }
+            ],
+            "diagnostics": {},
+            "truncated": false
+           }
+          }
+         },
+         {
+          "id": "prt_4",
+          "type": "patch",
+          "files": [
+           "/work/proj/src/auth.ts",
+           "/work/proj/.env"
+          ]
+         }
+        ]
+       },
+       {
+        "info": {
+         "id": "msg_3",
+         "sessionID": "ses_1",
+         "role": "assistant"
+        },
+        "parts": [
+         {
+          "id": "prt_5",
+          "type": "tool",
+          "callID": "call_2",
+          "tool": "bash",
+          "state": {
+           "status": "completed",
+           "input": {
+            "command": "echo 'export async function a(token:[REDACTED] fetch(u)}'; tail -n1 .env"
+           },
+           "output": "export async function a(token:[REDACTED] fetch(u)}\nAPI_TOKEN=[REDACTED]\n",
+           "metadata": {
+            "output": "export async function a(token:[REDACTED] fetch(u)}\nAPI_TOKEN=[REDACTED]\n"
+           }
+          }
+         }
+        ]
+       }
+      ]
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "pi turn.completed: write by `path`, edit with edits[] and a display diff, read of .env, 2.x name/v2 fields; turn.diff hunk",
+  "kind": "trace",
+  "input": {
+   "schema_version": 1,
+   "session_id": "ses_2",
+   "events": [
+    {
+     "at": "2026-10-04T00:00:00.000Z",
+     "type": "engine.request",
+     "data": {
+      "method": "POST",
+      "path": "/session/ses_2/prompt",
+      "body": {
+       "parts": [
+        {
+         "type": "text",
+         "text": "Create src/auth.ts with exactly these two lines:\nexport async function a(token:string){await fetch(u)}\nconst k = \"sk-proj-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"\nAppend the line API_TOKEN=abcdefgh123 to .env."
+        }
+       ],
+       "agent": "omnirush-cli"
+      }
+     }
+    },
+    {
+     "at": "2026-10-04T00:00:01.000Z",
+     "type": "turn.completed",
+     "data": {
+      "messages": [
+       {
+        "info": {
+         "id": "msg_1",
+         "role": "user",
+         "type": "user",
+         "text": "Create src/auth.ts with exactly these two lines:\nexport async function a(token:string){await fetch(u)}\nconst k = \"sk-proj-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"\nAppend the line API_TOKEN=abcdefgh123 to .env."
+        },
+        "parts": [
+         {
+          "id": "prt_1",
+          "type": "text",
+          "text": "Create src/auth.ts with exactly these two lines:\nexport async function a(token:string){await fetch(u)}\nconst k = \"sk-proj-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"\nAppend the line API_TOKEN=abcdefgh123 to .env."
+         }
+        ]
+       },
+       {
+        "info": {
+         "id": "msg_2",
+         "role": "assistant"
+        },
+        "parts": [
+         {
+          "id": "prt_2",
+          "type": "tool",
+          "callID": "call_1|fc_1",
+          "tool": "read",
+          "state": {
+           "status": "completed",
+           "input": {
+            "path": ".env",
+            "offset": 1,
+            "limit": 200
+           },
+           "output": "APP_NAME=demo\nAPI_TOKEN=abcdefgh123\n",
+           "content": [
+            {
+             "type": "text",
+             "text": "APP_NAME=demo\nAPI_TOKEN=abcdefgh123\n"
+            }
+           ]
+          },
+          "name": "read",
+          "executed": false,
+          "v2": {
+           "id": "call_1"
+          }
+         },
+         {
+          "id": "prt_3",
+          "type": "tool",
+          "callID": "call_2|fc_2",
+          "tool": "write",
+          "state": {
+           "status": "completed",
+           "input": {
+            "path": "src/auth.ts",
+            "content": "export async function a(token:string){await fetch(u)}\nconst k = \"sk-proj-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\""
+           },
+           "output": "Successfully wrote to src/auth.ts",
+           "content": [
+            {
+             "type": "text",
+             "text": "Successfully wrote to src/auth.ts"
+            }
+           ]
+          },
+          "name": "write",
+          "executed": false,
+          "v2": {
+           "id": "call_2"
+          }
+         },
+         {
+          "id": "prt_4",
+          "type": "tool",
+          "callID": "call_3|fc_3",
+          "tool": "edit",
+          "state": {
+           "status": "completed",
+           "input": {
+            "path": "src/auth.ts",
+            "edits": [
+             {
+              "oldText": "await fetch(u)",
+              "newText": "await fetch(u, {headers})"
+             }
+            ]
+           },
+           "output": "Successfully replaced 1 block(s) in src/auth.ts.",
+           "metadata": {
+            "diff": "-1 export async function a(token:string){await fetch(u)}\n+1 export async function a(token:string){await fetch(u, {headers})}",
+            "patch": "--- src/auth.ts\n+++ src/auth.ts\n@@ -1,1 +1,1 @@\n-export async function a(token:string){await fetch(u)}\n+export async function a(token:string){await fetch(u, {headers})}\n",
+            "firstChangedLine": 1
+           }
+          },
+          "name": "edit",
+          "executed": false,
+          "v2": {
+           "id": "call_3"
+          }
+         },
+         {
+          "id": "prt_5",
+          "type": "tool",
+          "callID": "call_4|fc_4",
+          "tool": "edit",
+          "state": {
+           "status": "completed",
+           "input": {
+            "path": ".env",
+            "edits": [
+             {
+              "oldText": "DEBUG=1\n",
+              "newText": "DEBUG=1\nAPI_TOKEN=abcdefgh123\n"
+             }
+            ]
+           },
+           "output": "Successfully replaced 1 block(s) in .env.",
+           "metadata": {
+            "diff": " 1 DEBUG=1\n+2 API_TOKEN=abcdefgh123",
+            "patch": "--- .env\n+++ .env\n@@ -1,1 +1,2 @@\n DEBUG=1\n+API_TOKEN=abcdefgh123\n",
+            "firstChangedLine": 2
+           }
+          },
+          "name": "edit",
+          "executed": false,
+          "v2": {
+           "id": "call_4"
+          }
+         },
+         {
+          "id": "prt_6",
+          "type": "patch",
+          "files": [
+           "/work/proj/src/auth.ts",
+           "/work/proj/.env"
+          ]
+         }
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "at": "2026-10-04T00:00:02.000Z",
+     "type": "turn.diff",
+     "data": {
+      "schema_version": 1,
+      "files": [
+       {
+        "path": "src/auth.ts",
+        "status": "added",
+        "before_sha256": null,
+        "after_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "additions": 2,
+        "deletions": 0,
+        "diff": "--- /dev/null\n+++ b/src/auth.ts\n@@ -0,0 +1,2 @@\n+export async function a(token:string){await fetch(u)}\n+const k = \"sk-proj-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"\n\\ No newline at end of file\n",
+        "truncated": false,
+        "reason": null
+       },
+       {
+        "path": ".env",
+        "status": "modified",
+        "before_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "after_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+        "additions": 1,
+        "deletions": 0,
+        "diff": "--- a/.env\n+++ b/.env\n@@ -1,1 +1,2 @@\n DEBUG=1\n+API_TOKEN=abcdefgh123\n",
+        "truncated": false,
+        "reason": null
+       }
+      ],
+      "file_count": 2,
+      "omitted_file_count": 0,
+      "truncated": false
+     }
+    }
+   ]
+  },
+  "expected": {
+   "schema_version": 1,
+   "session_id": "ses_2",
+   "events": [
+    {
+     "at": "2026-10-04T00:00:00.000Z",
+     "type": "engine.request",
+     "data": {
+      "method": "POST",
+      "path": "/session/ses_2/prompt",
+      "body": {
+       "parts": [
+        {
+         "type": "text",
+         "text": "Create src/auth.ts with exactly these two lines:\nexport async function a(token:[REDACTED] fetch(u)}\nconst k = \"[REDACTED]\"\nAppend the line API_TOKEN=[REDACTED] to .env."
+        }
+       ],
+       "agent": "omnirush-cli"
+      }
+     }
+    },
+    {
+     "at": "2026-10-04T00:00:01.000Z",
+     "type": "turn.completed",
+     "data": {
+      "messages": [
+       {
+        "info": {
+         "id": "msg_1",
+         "role": "user",
+         "type": "user",
+         "text": "Create src/auth.ts with exactly these two lines:\nexport async function a(token:[REDACTED] fetch(u)}\nconst k = \"[REDACTED]\"\nAppend the line API_TOKEN=[REDACTED] to .env."
+        },
+        "parts": [
+         {
+          "id": "prt_1",
+          "type": "text",
+          "text": "Create src/auth.ts with exactly these two lines:\nexport async function a(token:[REDACTED] fetch(u)}\nconst k = \"[REDACTED]\"\nAppend the line API_TOKEN=[REDACTED] to .env."
+         }
+        ]
+       },
+       {
+        "info": {
+         "id": "msg_2",
+         "role": "assistant"
+        },
+        "parts": [
+         {
+          "id": "prt_2",
+          "type": "tool",
+          "callID": "call_1|fc_1",
+          "tool": "read",
+          "state": {
+           "status": "completed",
+           "input": {
+            "path": ".env",
+            "offset": 1,
+            "limit": 200
+           },
+           "output": "APP_NAME=demo\nAPI_TOKEN=[REDACTED]\n",
+           "content": [
+            {
+             "type": "text",
+             "text": "APP_NAME=demo\nAPI_TOKEN=[REDACTED]\n"
+            }
+           ]
+          },
+          "name": "read",
+          "executed": false,
+          "v2": {
+           "id": "call_1"
+          }
+         },
+         {
+          "id": "prt_3",
+          "type": "tool",
+          "callID": "call_2|fc_2",
+          "tool": "write",
+          "state": {
+           "status": "completed",
+           "input": {
+            "path": "src/auth.ts",
+            "content": "export async function a(token:string){await fetch(u)}\nconst k = \"[REDACTED]\""
+           },
+           "output": "Successfully wrote to src/auth.ts",
+           "content": [
+            {
+             "type": "text",
+             "text": "Successfully wrote to src/auth.ts"
+            }
+           ]
+          },
+          "name": "write",
+          "executed": false,
+          "v2": {
+           "id": "call_2"
+          }
+         },
+         {
+          "id": "prt_4",
+          "type": "tool",
+          "callID": "call_3|fc_3",
+          "tool": "edit",
+          "state": {
+           "status": "completed",
+           "input": {
+            "path": "src/auth.ts",
+            "edits": [
+             {
+              "oldText": "await fetch(u)",
+              "newText": "await fetch(u, {headers})"
+             }
+            ]
+           },
+           "output": "Successfully replaced 1 block(s) in src/auth.ts.",
+           "metadata": {
+            "diff": "-1 export async function a(token:string){await fetch(u)}\n+1 export async function a(token:string){await fetch(u, {headers})}",
+            "patch": "--- src/auth.ts\n+++ src/auth.ts\n@@ -1,1 +1,1 @@\n-export async function a(token:string){await fetch(u)}\n+export async function a(token:string){await fetch(u, {headers})}\n",
+            "firstChangedLine": 1
+           }
+          },
+          "name": "edit",
+          "executed": false,
+          "v2": {
+           "id": "call_3"
+          }
+         },
+         {
+          "id": "prt_5",
+          "type": "tool",
+          "callID": "call_4|fc_4",
+          "tool": "edit",
+          "state": {
+           "status": "completed",
+           "input": {
+            "path": ".env",
+            "edits": [
+             {
+              "oldText": "DEBUG=1\n",
+              "newText": "DEBUG=1\nAPI_TOKEN=[REDACTED]\n"
+             }
+            ]
+           },
+           "output": "Successfully replaced 1 block(s) in .env.",
+           "metadata": {
+            "diff": " 1 DEBUG=1\n+2 API_TOKEN=[REDACTED]",
+            "patch": "--- .env\n+++ .env\n@@ -1,1 +1,2 @@\n DEBUG=1\n+API_TOKEN=[REDACTED]\n",
+            "firstChangedLine": 2
+           }
+          },
+          "name": "edit",
+          "executed": false,
+          "v2": {
+           "id": "call_4"
+          }
+         },
+         {
+          "id": "prt_6",
+          "type": "patch",
+          "files": [
+           "/work/proj/src/auth.ts",
+           "/work/proj/.env"
+          ]
+         }
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "at": "2026-10-04T00:00:02.000Z",
+     "type": "turn.diff",
+     "data": {
+      "schema_version": 1,
+      "files": [
+       {
+        "path": "src/auth.ts",
+        "status": "added",
+        "before_sha256": null,
+        "after_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "additions": 2,
+        "deletions": 0,
+        "diff": "--- /dev/null\n+++ b/src/auth.ts\n@@ -0,0 +1,2 @@\n+export async function a(token:string){await fetch(u)}\n+const k = \"[REDACTED]\"\n\\ No newline at end of file\n",
+        "truncated": false,
+        "reason": null
+       },
+       {
+        "path": ".env",
+        "status": "modified",
+        "before_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "after_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+        "additions": 1,
+        "deletions": 0,
+        "diff": "--- a/.env\n+++ b/.env\n@@ -1,1 +1,2 @@\n DEBUG=1\n+API_TOKEN=[REDACTED]\n",
+        "truncated": false,
+        "reason": null
+       }
+      ],
+      "file_count": 2,
+      "omitted_file_count": 0,
+      "truncated": false
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "session.diff event: each item's before/after/patch takes its own `file`'s mode, a pathless item stays CONFIG",
+  "kind": "trace",
+  "input": {
+   "schema_version": 1,
+   "session_id": "ses_3",
+   "events": [
+    {
+     "at": "2026-10-04T00:00:00.000Z",
+     "type": "session.diff",
+     "data": {
+      "sessionID": "ses_3",
+      "diff": [
+       {
+        "file": "src/auth.ts",
+        "before": "",
+        "after": "export async function a(token:string){await fetch(u)}\nconst k = \"sk-proj-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\"\n",
+        "additions": 2,
+        "deletions": 0,
+        "status": "added"
+       },
+       {
+        "filename": "lib/b.py",
+        "patch": "@@ -0,0 +1 @@\n+async def a(token:str)->Awaitable[None]: pass\n",
+        "additions": 1,
+        "deletions": 0
+       },
+       {
+        "file": ".env",
+        "before": "DEBUG=1\n",
+        "after": "DEBUG=1\nAPI_TOKEN=abcdefgh123\n",
+        "additions": 1,
+        "deletions": 0,
+        "status": "modified"
+       },
+       {
+        "patch": "@@ -0,0 +1 @@\n+export async function a(token:string){await fetch(u)}\n",
+        "additions": 1,
+        "deletions": 0
+       }
+      ]
+     }
+    }
+   ]
+  },
+  "expected": {
+   "schema_version": 1,
+   "session_id": "ses_3",
+   "events": [
+    {
+     "at": "2026-10-04T00:00:00.000Z",
+     "type": "session.diff",
+     "data": {
+      "sessionID": "ses_3",
+      "diff": [
+       {
+        "file": "src/auth.ts",
+        "before": "",
+        "after": "export async function a(token:string){await fetch(u)}\nconst k = \"[REDACTED]\"\n",
+        "additions": 2,
+        "deletions": 0,
+        "status": "added"
+       },
+       {
+        "filename": "lib/b.py",
+        "patch": "@@ -0,0 +1 @@\n+async def a(token:str)->Awaitable[None]: pass\n",
+        "additions": 1,
+        "deletions": 0
+       },
+       {
+        "file": ".env",
+        "before": "DEBUG=1\n",
+        "after": "DEBUG=1\nAPI_TOKEN=[REDACTED]\n",
+        "additions": 1,
+        "deletions": 0,
+        "status": "modified"
+       },
+       {
+        "patch": "@@ -0,0 +1 @@\n+export async function a(token:[REDACTED] fetch(u)}\n",
+        "additions": 1,
+        "deletions": 0
+       }
+      ]
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "pi toolCall blocks: write/edit arguments keep code by `path`/`file_path`; bash and read stay CONFIG",
+  "kind": "trace",
+  "input": {
+   "schema_version": 1,
+   "session_id": "ses_4",
+   "events": [
+    {
+     "at": "2026-10-04T00:00:00.000Z",
+     "type": "session.child",
+     "data": {
+      "child_session_id": "ses_5",
+      "parent_session_id": "ses_4",
+      "messages": [
+       {
+        "role": "assistant",
+        "content": [
+         {
+          "type": "toolCall",
+          "id": "call_1",
+          "name": "write",
+          "arguments": {
+           "path": "src/auth.ts",
+           "content": "export async function a(token:string){await fetch(u)}\nconst k = \"sk-proj-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\""
+          }
+         },
+         {
+          "type": "toolCall",
+          "id": "call_2",
+          "name": "edit",
+          "arguments": {
+           "file_path": "src/auth.ts",
+           "old_string": "fetch(u)",
+           "new_string": "fetch(u, {token:string})"
+          }
+         },
+         {
+          "type": "toolCall",
+          "id": "call_3",
+          "name": "edit",
+          "arguments": {
+           "path": ".env",
+           "edits": [
+            {
+             "oldText": "DEBUG=1",
+             "newText": "DEBUG=1\nAPI_TOKEN=abcdefgh123"
+            }
+           ]
+          }
+         },
+         {
+          "type": "toolCall",
+          "id": "call_4",
+          "name": "bash",
+          "arguments": {
+           "command": "echo 'export async function a(token:string){await fetch(u)}'"
+          }
+         },
+         {
+          "type": "toolCall",
+          "id": "call_5",
+          "name": "read",
+          "arguments": {
+           "path": "src/auth.ts"
+          }
+         }
+        ]
+       },
+       {
+        "role": "toolResult",
+        "toolCallId": "call_5",
+        "toolName": "read",
+        "content": [
+         {
+          "type": "text",
+          "text": "export async function a(token:string){await fetch(u)}"
+         }
+        ]
+       }
+      ]
+     }
+    }
+   ]
+  },
+  "expected": {
+   "schema_version": 1,
+   "session_id": "ses_4",
+   "events": [
+    {
+     "at": "2026-10-04T00:00:00.000Z",
+     "type": "session.child",
+     "data": {
+      "child_session_id": "ses_5",
+      "parent_session_id": "ses_4",
+      "messages": [
+       {
+        "role": "assistant",
+        "content": [
+         {
+          "type": "toolCall",
+          "id": "call_1",
+          "name": "write",
+          "arguments": {
+           "path": "src/auth.ts",
+           "content": "export async function a(token:string){await fetch(u)}\nconst k = \"[REDACTED]\""
+          }
+         },
+         {
+          "type": "toolCall",
+          "id": "call_2",
+          "name": "edit",
+          "arguments": {
+           "file_path": "src/auth.ts",
+           "old_string": "fetch(u)",
+           "new_string": "fetch(u, {token:string})"
+          }
+         },
+         {
+          "type": "toolCall",
+          "id": "call_3",
+          "name": "edit",
+          "arguments": {
+           "path": ".env",
+           "edits": [
+            {
+             "oldText": "DEBUG=1",
+             "newText": "DEBUG=1\nAPI_TOKEN=[REDACTED]"
+            }
+           ]
+          }
+         },
+         {
+          "type": "toolCall",
+          "id": "call_4",
+          "name": "bash",
+          "arguments": {
+           "command": "echo 'export async function a(token:[REDACTED] fetch(u)}'"
+          }
+         },
+         {
+          "type": "toolCall",
+          "id": "call_5",
+          "name": "read",
+          "arguments": {
+           "path": "src/auth.ts"
+          }
+         }
+        ]
+       },
+       {
+        "role": "toolResult",
+        "toolCallId": "call_5",
+        "toolName": "read",
+        "content": [
+         {
+          "type": "text",
+          "text": "export async function a(token:[REDACTED] fetch(u)}"
+         }
+        ]
+       }
+      ]
+     }
+    }
+   ]
+  }
+ },
+ {
   "name": "git diff: a .ts section keeps code, a config section is redacted",
   "kind": "git_diff",
   "input": "diff --git a/src/a.ts b/src/a.ts\nindex 1..2 100644\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1,2 @@\n-x\n+export async function f(token:string){await fetch(u)}\n+async(token:string)=>{}\ndiff --git a/conf/app.ini b/conf/app.ini\nindex 1..2 100644\n--- a/conf/app.ini\n+++ b/conf/app.ini\n@@ -1 +1 @@\n-x\n+auth_token=abcdefgh123\n+f(token:string){await fetch(u)}\n",
