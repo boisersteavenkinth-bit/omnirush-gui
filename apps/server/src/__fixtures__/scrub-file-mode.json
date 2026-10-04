@@ -2310,5 +2310,149 @@
   "kind": "git_diff",
   "input": "diff --git a/src/a.ts b/src/a.ts\nindex 1..2 100644\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1,2 @@\n-x\n+export async function f(token:string){await fetch(u)}\n+async(token:string)=>{}\ndiff --git a/conf/app.ini b/conf/app.ini\nindex 1..2 100644\n--- a/conf/app.ini\n+++ b/conf/app.ini\n@@ -1 +1 @@\n-x\n+auth_token=abcdefgh123\n+f(token:string){await fetch(u)}\n",
   "expected": "diff --git a/src/a.ts b/src/a.ts\nindex 1..2 100644\n--- a/src/a.ts\n+++ b/src/a.ts\n@@ -1 +1,2 @@\n-x\n+export async function f(token:string){await fetch(u)}\n+async(token:string)=>{}\ndiff --git a/conf/app.ini b/conf/app.ini\nindex 1..2 100644\n--- a/conf/app.ini\n+++ b/conf/app.ini\n@@ -1 +1 @@\n-x\n+auth_token=[REDACTED]\n+f(token:[REDACTED] fetch(u)}\n"
+ },
+ {
+  "name": "dpkg and other version strings are not IPv4 addresses",
+  "kind": "trace",
+  "input": {
+   "schema_version": 1,
+   "session_id": "ses_1",
+   "events": [
+    {
+     "at": "2026-10-04T00:00:00.000Z",
+     "type": "turn.messages",
+     "data": {
+      "messages": [
+       {
+        "info": {
+         "id": "msg_1",
+         "role": "assistant"
+        },
+        "parts": [
+         {
+          "type": "tool",
+          "callID": "call_1",
+          "tool": "bash",
+          "state": {
+           "status": "completed",
+           "input": {
+            "command": "dpkg-query -W -f '${Package} ${Version}\\n'"
+           },
+           "output": "postgresql-client-16 16.15-0ubuntu0.24.04.1\ntzdata 2024a-0ubuntu0.22.04.1\nlibc-bin 2.35-0ubuntu3.8\nopenssl 3.0.2-0ubuntu1.18\nsystemd ubuntu1.22.04.1\nlibfoo 1:2.3.4.5-1\nlibbar 1:2.3.4.5\ntool v1.2.3.4\nlibbaz 1.2.3.4.5\nlibqux 2.30-0ubuntu2.1.4.6\nlibx 1.0~rc1.2.3.4.5\nliby 9.9+dfsg-1.2.3.4\n"
+          }
+         }
+        ]
+       }
+      ]
+     }
+    }
+   ]
+  },
+  "expected": {
+   "schema_version": 1,
+   "session_id": "ses_1",
+   "events": [
+    {
+     "at": "2026-10-04T00:00:00.000Z",
+     "type": "turn.messages",
+     "data": {
+      "messages": [
+       {
+        "info": {
+         "id": "msg_1",
+         "role": "assistant"
+        },
+        "parts": [
+         {
+          "type": "tool",
+          "callID": "call_1",
+          "tool": "bash",
+          "state": {
+           "status": "completed",
+           "input": {
+            "command": "dpkg-query -W -f '${Package} ${Version}\\n'"
+           },
+           "output": "postgresql-client-16 16.15-0ubuntu0.24.04.1\ntzdata 2024a-0ubuntu0.22.04.1\nlibc-bin 2.35-0ubuntu3.8\nopenssl 3.0.2-0ubuntu1.18\nsystemd ubuntu1.22.04.1\nlibfoo 1:2.3.4.5-1\nlibbar 1:2.3.4.5\ntool v1.2.3.4\nlibbaz 1.2.3.4.5\nlibqux 2.30-0ubuntu2.1.4.6\nlibx 1.0~rc1.2.3.4.5\nliby 9.9+dfsg-1.2.3.4\n"
+          }
+         }
+        ]
+       }
+      ]
+     }
+    }
+   ]
+  }
+ },
+ {
+  "name": "real IPv4 addresses are still redacted",
+  "kind": "trace",
+  "input": {
+   "schema_version": 1,
+   "session_id": "ses_1",
+   "events": [
+    {
+     "at": "2026-10-04T00:00:00.000Z",
+     "type": "turn.messages",
+     "data": {
+      "messages": [
+       {
+        "info": {
+         "id": "msg_1",
+         "role": "assistant"
+        },
+        "parts": [
+         {
+          "type": "tool",
+          "callID": "call_1",
+          "tool": "bash",
+          "state": {
+           "status": "completed",
+           "input": {
+            "command": "curl http://203.0.113.9:8080/health"
+           },
+           "output": "10.0.0.5\nip=192.168.1.20\nGET http://203.0.113.9:8080 ok\nping from 8.8.8.8 (8.8.8.8): 56 bytes\nlisten 127.0.0.1:5432; peer 172.16.0.1.\n"
+          }
+         }
+        ]
+       }
+      ]
+     }
+    }
+   ]
+  },
+  "expected": {
+   "schema_version": 1,
+   "session_id": "ses_1",
+   "events": [
+    {
+     "at": "2026-10-04T00:00:00.000Z",
+     "type": "turn.messages",
+     "data": {
+      "messages": [
+       {
+        "info": {
+         "id": "msg_1",
+         "role": "assistant"
+        },
+        "parts": [
+         {
+          "type": "tool",
+          "callID": "call_1",
+          "tool": "bash",
+          "state": {
+           "status": "completed",
+           "input": {
+            "command": "curl http://[REDACTED_PII]:8080/health"
+           },
+           "output": "[REDACTED_PII]\nip=[REDACTED_PII]\nGET http://[REDACTED_PII]:8080 ok\nping from [REDACTED_PII] ([REDACTED_PII]): 56 bytes\nlisten [REDACTED_PII]:5432; peer [REDACTED_PII].\n"
+          }
+         }
+        ]
+       }
+      ]
+     }
+    }
+   ]
+  }
  }
 ]

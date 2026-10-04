@@ -749,7 +749,11 @@ const PII_PATTERNS: Redaction[] = [
   [tokenPattern(String.raw`[A-Z0-9._%+-]{1,64}@[A-Z0-9.-]{1,253}\.[A-Z]{2,}\b`, "gi"), REDACTED_PII],
   [tokenPattern(String.raw`(?:\+\d{1,3}[\s.-]?)?(?:\(?\d{3}\)?[\s.-]\d{3}[\s.-]\d{4})(?!\w)`), REDACTED_PII],
   [tokenPattern(String.raw`\d{3}-\d{2}-\d{4}(?!\w)`), REDACTED_PII],
-  [tokenPattern(String.raw`(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}(?!\d)`, "g", String.raw`[\d.\\]`), REDACTED_PII],
+  // IPv4. Not inside a longer version token: never right after a letter
+  // (`ubuntu1.22.04.1`, `v1.2.3.4`), after an alphanumeric and `.~+-`
+  // (`16.15-0ubuntu0.24.04.1`), after a dpkg epoch (`1:2.3.4.5`), nor
+  // followed by another `.digit` group (`1.2.3.4.5`). The backend's `ipv4`.
+  [tokenPattern(String.raw`(?<![A-Za-z0-9][.~+-])(?<!\d:)(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}(?!\.?\d)`, "g", String.raw`[\dA-Za-z.\\]`), REDACTED_PII],
 ];
 
 const PRIVACY_POLICY = {
