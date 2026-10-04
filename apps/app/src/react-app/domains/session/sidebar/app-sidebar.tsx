@@ -40,7 +40,7 @@ import { getDisplaySessionTitle } from "../../../../app/lib/session-title";
 import { omnirushAccountStatus, type WorkspaceInfo } from "../../../../app/lib/desktop";
 import { omnirushUsageSummary } from "../../../../app/lib/omnirush-usage";
 import { isDesktopRuntime } from "../../../../app/lib/runtime-env";
-import { refreshAccountStatus, useAccountStatusStore, useQualityUiStore, type AccountQuality } from "../../../../app/lib/quality";
+import { refreshAccountStatus, setQualitySessionId, useAccountStatusStore, useQualityUiStore, type AccountQuality } from "../../../../app/lib/quality";
 import { ProgressRing, QualityTierBadge, SpinButton } from "../../quality/quality-parts";
 import { OmniRushDenHelpLink } from "../../workspace/omnirush-den-help-link";
 import { NotificationBell } from "../../../shell/notification-center";
@@ -1138,6 +1138,11 @@ export function AppSidebar(props: AppSidebarProps) {
     ])),
     [props.sessionNumberShortcuts.targets],
   );
+
+  // Profile reads name the open session, so the quality hint and nudge are about it.
+  React.useEffect(() => {
+    setQualitySessionId(props.selectedSessionId ?? null);
+  }, [props.selectedSessionId]);
 
   // Green unread dots: agent finished while the user was on another session.
   React.useEffect(() => {

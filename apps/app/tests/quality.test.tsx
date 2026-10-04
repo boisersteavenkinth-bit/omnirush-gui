@@ -5,6 +5,9 @@ import {
   DEFAULT_WHEEL_SEGMENTS,
   NOTICE_SEEN_STORAGE_KEY,
   canSpinNow,
+  jackpotIndex,
+  refreshAccountStatus,
+  setQualitySessionId,
   nearMissText,
   noticeToShow,
   nudgeToShow,
@@ -24,7 +27,7 @@ import {
   type QualityTier,
 } from "../src/app/lib/quality";
 import { QualityTierBadge, streakText } from "../src/react-app/domains/quality/quality-parts";
-import { QualityNoticeCard, QualityRewards } from "../src/react-app/domains/quality/quality-notice";
+import { QualityNoticeCard, QualityRewards, SessionReasons, failLabel } from "../src/react-app/domains/quality/quality-notice";
 import { QualitySpinDialog } from "../src/react-app/domains/quality/quality-spin-dialog";
 
 const quality: AccountQuality = {
@@ -240,5 +243,48 @@ describe("spin results", () => {
     expect(html).toContain("250K · 35%");
     expect(html).toContain("Spin (2 ready)");
     expect(html).toContain("Today&#x27;s biggest win");
+  });
+});
+
+describe("revision: fail labels, jackpot, open session", () => {
+  test("fail codes read with the server's labels, a fallback otherwise", () => {
+    expect(failLabel("outside_path", { outside_path: "Edits outside the project folder" })).toBe("Edits outside the project folder");
+    expect(failLabel("outside_path")).toBe("edits outside the project folder");
+    expect(failLabel("capture_truncated")).toBe("capture truncated");
+    const html = renderToStaticMarkup(
+      <SessionReasons
+        reasons={{
+          failLabels: { home_folder: "Started in your home folder" },
+          sessions: [{
+            sessionId: "ses_1", at: null, verdict: "review", why: "Started in ~.", fails: ["home_folder"], workspace: "my-app", spins: 0, counted: true,
+            reproducible: "pass", workSize: 3, work: { codeFiles: 3, linesChanged: 120, toolCalls: 14, testRuns: 0, floor: 2, step: 3 },
+          }],
+        }}
+      />,
+    );
+    expect(html).toContain("Started in your home folder");
+    expect(html).toContain("3 code files · 120 lines · no tests");
+    expect(html).toContain("reproducible");
+  });
+
+  test("the jackpot slice is the segment paying jackpot_tokens", () => {
+    expect(jackpotIndex(DEFAULT_WHEEL_SEGMENTS, 10_000_000)).toBe(5);
+    expect(jackpotIndex(DEFAULT_WHEEL_SEGMENTS, 5_000_000)).toBe(4);
+    expect(jackpotIndex(DEFAULT_WHEEL_SEGMENTS, null)).toBe(5);
+    expect(nearMissText({ ...spin, nearMiss: true, jackpotTokens: null }, 20_000_000)).toBe("So close to 20M!");
+  });
+
+  test("profile reads name the open session", async () => {
+    const calls: unknown[] = [];
+    const read = async (options?: { sessionId?: string | null }) => {
+      calls.push(options ?? null);
+      return { connected: true, gatewayConfigured: true, quality: null };
+    };
+    setQualitySessionId("ses_open");
+    await refreshAccountStatus(read);
+    setQualitySessionId(null);
+    await refreshAccountStatus(read);
+    expect(calls).toEqual([{ sessionId: "ses_open" }, null]);
+    useAccountStatusStore.getState().set(null);
   });
 });

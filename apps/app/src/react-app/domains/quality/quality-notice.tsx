@@ -25,19 +25,34 @@ import type { OmniRushQualitySession } from "@omnirush/types/desktop-ipc";
 import { BiggestWinTicker, NextSpinHint, QualityTierBadge, StreakLine } from "./quality-parts";
 import { QualitySpinDialog } from "./quality-spin-dialog";
 
-const FAIL_LABELS: Record<string, string> = {
+/** Used only when the server sends no `fail_labels` entry for a code. */
+const FALLBACK_FAIL_LABELS: Record<string, string> = {
   outside_path: "edits outside the project folder",
-  windows: "recorded on Windows",
-  no_tests: "no tests",
-  too_small: "too little work to count",
+  home_folder: "started in the home folder",
+  wrong_folder: "started in another folder",
+  windows_host: "recorded on Windows",
+  small_fix: "a small fix",
+  one_shot: "a one-shot answer",
+  non_coding: "not coding work",
 };
 
-function failLabel(fail: string): string {
-  return FAIL_LABELS[fail] ?? fail.replace(/[_-]+/g, " ");
+export function failLabel(fail: string, labels: Record<string, string> = {}): string {
+  return labels[fail] ?? FALLBACK_FAIL_LABELS[fail] ?? fail.replace(/[_-]+/g, " ");
+}
+
+export type QualitySessionReasons = { sessions: OmniRushQualitySession[]; failLabels: Record<string, string> };
+
+function workSummary(work: OmniRushQualitySession["work"]): string | null {
+  if (!work) return null;
+  const parts = [`${work.codeFiles} code file${work.codeFiles === 1 ? "" : "s"}`, `${work.linesChanged} lines`];
+  parts.push(work.testRuns > 0 ? `${work.testRuns} test run${work.testRuns === 1 ? "" : "s"}` : "no tests");
+  return parts.join(" · ");
 }
 
 /** "See why": each recent session, with what earned spins and what held it back. */
-function SessionReasons({ sessions }: { sessions: OmniRushQualitySession[] | null }) {
+export function SessionReasons({ reasons }: { reasons: QualitySessionReasons | null }) {
+  if (reasons === null) return <div className="text-xs text-white/50">Loading your sessions…</div>;
+  const { sessions, failLabels } = reasons;
   if (sessions === null) return <div className="text-xs text-white/50">Loading your sessions…</div>;
   if (!sessions.length) return <div className="text-xs text-white/50">No sessions checked yet. They are checked about once an hour.</div>;
   return (
@@ -51,11 +66,15 @@ function SessionReasons({ sessions }: { sessions: OmniRushQualitySession[] | nul
             ) : null}
           </div>
           {session.why ? <div className="mt-0.5 text-xs leading-5 text-white/80">{session.why}</div> : null}
-          {session.fails.length ? (
+          {workSummary(session.work) ? <div className="mt-0.5 text-[10.5px] text-white/45">{workSummary(session.work)}</div> : null}
+          {session.fails.length || session.reproducible === "pass" ? (
             <div className="mt-1 flex flex-wrap gap-1">
+              {session.reproducible === "pass" ? (
+                <span className="rounded-full bg-[#a3e635]/15 px-1.5 py-0.5 text-[10px] text-[#d9f99d]">reproducible</span>
+              ) : null}
               {session.fails.map((fail) => (
-                <span key={fail} className="rounded-full bg-white/[0.06] px-1.5 py-0.5 text-[10px] text-white/60">
-                  {failLabel(fail)}
+                <span key={fail} data-fail={fail} className="rounded-full bg-white/[0.06] px-1.5 py-0.5 text-[10px] text-white/60">
+                  {failLabel(fail, failLabels)}
                 </span>
               ))}
             </div>
@@ -72,8 +91,8 @@ export type QualityNoticeCardProps = {
   notice: QualityNotice | null;
   onSpin: () => void;
   onDismiss: () => void;
-  /** GET /me/quality sessions for "see why"; fetched when first opened. */
-  loadSessions?: () => Promise<OmniRushQualitySession[] | null>;
+  /** GET /me/quality sessions (and fail labels) for "see why"; fetched when first opened. */
+  loadSessions?: () => Promise<QualitySessionReasons | null>;
 };
 
 /**
@@ -85,7 +104,7 @@ export function QualityNoticeCard(props: QualityNoticeCardProps) {
   const { quality, notice } = props;
   const coaching = isCoachingNotice(notice, quality);
   const [whyOpen, setWhyOpen] = useState(false);
-  const [sessions, setSessions] = useState<OmniRushQualitySession[] | null>(null);
+  const [sessions, setSessions] = useState<QualitySessionReasons | null>(null);
   const title = notice?.title ?? `Quality: ${qualityTierLabel(quality.tier)}`;
   const body = notice?.body || (notice ? "" : quality.nextTierHint ?? "");
   const spinnable = canSpinNow(quality);
@@ -93,7 +112,8 @@ export function QualityNoticeCard(props: QualityNoticeCardProps) {
   const toggleWhy = () => {
     setWhyOpen((open) => !open);
     if (sessions === null && props.loadSessions) {
-      void props.loadSessions().then((next) => setSessions(next ?? [])).catch(() => setSessions([]));
+      const none = { sessions: [], failLabels: {} };
+      void props.loadSessions().then((next) => setSessions(next ?? none)).catch(() => setSessions(none));
     }
   };
 
@@ -155,7 +175,7 @@ export function QualityNoticeCard(props: QualityNoticeCardProps) {
               See why
               <ChevronDown className={cn("size-3.5 transition", whyOpen && "rotate-180")} />
             </button>
-            {whyOpen ? <div className="mt-2 max-h-56 overflow-y-auto pe-1"><SessionReasons sessions={sessions} /></div> : null}
+            {whyOpen ? <div className="mt-2 max-h-56 overflow-y-auto pe-1"><SessionReasons reasons={sessions} /></div> : null}
           </div>
         ) : null}
 
@@ -247,7 +267,10 @@ export function QualityRewards() {
     useQualityUiStore.getState().openSpin();
   }, [markNoticeSeen]);
 
-  const loadSessions = useCallback(async () => (await omnirushQualityDetails())?.sessions ?? null, []);
+  const loadSessions = useCallback(async (): Promise<QualitySessionReasons | null> => {
+    const details = await omnirushQualityDetails();
+    return details ? { sessions: details.sessions, failLabels: details.failLabels ?? {} } : null;
+  }, []);
 
   if (!quality) return null;
   const showCard = !spinOpen && (panelOpen || notice !== null);

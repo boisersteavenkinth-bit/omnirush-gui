@@ -216,15 +216,39 @@ test("quality details: segments, expected tokens and the sessions' reasons", asy
     assert.equal(new URL(url).pathname, "/omnirush/me/quality");
     return Response.json({
       quality: QUALITY,
-      sessions: [{ session_id: "ses_1", at: "2026-10-04T10:00:00Z", verdict: "review", why: "Edits outside the project.", fails: ["outside_path"], workspace: "my-app", spins: 0, counted: true }],
+      sessions: [{ session_id: "ses_1", at: "2026-10-04T10:00:00Z", verdict: "review", why: "Edits outside the project.", fails: ["outside_path"], workspace: "my-app", spins: 0, counted: true,
+        reproducible: "fail", work_size: 3, work: { code_files: 3, lines_changed: 120, tool_calls: 14, test_runs: 0, floor: 2, step: 3 } },
+        { session_id: "ses_2", reproducible: "maybe", work_size: 9, work: null }],
       segments: SEGMENTS,
       expected_tokens: 1037500,
+      jackpot_tokens: 10000000,
+      fail_labels: { outside_path: "Edits outside the project folder", "bad key!": "x", empty: "" },
     });
   });
   const details = await store.qualityDetails();
   assert.equal(details.segments.length, 6);
   assert.equal(details.expectedTokens, 1037500);
+  assert.equal(details.jackpotTokens, 10000000);
+  assert.deepEqual(details.failLabels, { outside_path: "Edits outside the project folder" });
   assert.deepEqual(details.sessions[0].fails, ["outside_path"]);
+  assert.equal(details.sessions[0].reproducible, "fail");
+  assert.equal(details.sessions[0].workSize, 3);
+  assert.deepEqual(details.sessions[0].work, { codeFiles: 3, linesChanged: 120, toolCalls: 14, testRuns: 0, floor: 2, step: 3 });
+  assert.equal(details.sessions[1].reproducible, null);
+  assert.equal(details.sessions[1].workSize, 4);
+  assert.equal(details.sessions[1].work, null);
   const off = await signedInStore(async () => Response.json({ quality: null, sessions: [], segments: [] }));
   assert.equal(await off.qualityDetails(), null);
+});
+
+test("the profile read names the open session: /device/me?session_id=", async () => {
+  const seen = [];
+  const store = await signedInStore(async (url) => {
+    seen.push(new URL(url).search);
+    return Response.json({ email: "person@example.com", status: "active", quality: QUALITY });
+  });
+  await store.status({ sessionId: "ses_abc123" });
+  await store.status();
+  await store.status({ sessionId: "../etc?x=1" });
+  assert.deepEqual(seen, ["?session_id=ses_abc123", "", ""]);
 });

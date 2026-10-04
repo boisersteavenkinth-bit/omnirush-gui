@@ -86,6 +86,7 @@ export function QualitySpinDialog(props: QualitySpinDialogProps) {
   const reducedMotion = usePrefersReducedMotion();
   const [segments, setSegments] = useState<WheelSegment[]>(DEFAULT_WHEEL_SEGMENTS);
   const [expectedTokens, setExpectedTokens] = useState<number | null>(null);
+  const [jackpotTokens, setJackpotTokens] = useState<number | null>(null);
   const [totals, setTotals] = useState<{ spun: number; paidTokens: number } | null>(null);
   const [phase, setPhase] = useState<Phase>("idle");
   const [result, setResult] = useState<QualitySpin | null>(null);
@@ -103,6 +104,7 @@ export function QualitySpinDialog(props: QualitySpinDialogProps) {
         if (!active || !details) return;
         if (details.segments.length) setSegments(details.segments);
         setExpectedTokens(details.expectedTokens);
+        setJackpotTokens(details.jackpotTokens ?? null);
       })
       .catch(() => undefined);
     void omnirushQualitySpins()
@@ -159,7 +161,7 @@ export function QualitySpinDialog(props: QualitySpinDialogProps) {
   };
 
   const resting = !canSpinNow(quality) && quality.spinsAvailable > 0;
-  const tease = result && phase === "result" ? nearMissText(result) : null;
+  const tease = result && phase === "result" ? nearMissText(result, jackpotTokens) : null;
   const celebrate = result?.celebrate ?? "none";
   const busy = phase === "requesting" || phase === "spinning";
   const canSpin = !busy && spinsLeft > 0 && !(phase !== "result" && resting);
@@ -224,6 +226,7 @@ export function QualitySpinDialog(props: QualitySpinDialogProps) {
             nearMiss={result?.nearMiss ?? false}
             soundEnabled={soundEnabled}
             reducedMotion={reducedMotion}
+            jackpotTokens={result?.jackpotTokens ?? jackpotTokens}
             size={300}
           />
         </div>

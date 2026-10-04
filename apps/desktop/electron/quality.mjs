@@ -197,7 +197,40 @@ export function parseQualitySessions(value) {
       workspace: text(session.workspace),
       spins: count(session.spins),
       counted: session.counted === true,
+      reproducible: ["pass", "fail", "unknown"].includes(session.reproducible) ? session.reproducible : null,
+      workSize: Number.isInteger(session.work_size) ? Math.min(4, Math.max(0, session.work_size)) : null,
+      work: parseSessionWork(session.work),
     }));
+}
+
+function parseSessionWork(value) {
+  if (!value || typeof value !== "object") return null;
+  return {
+    codeFiles: count(value.code_files),
+    linesChanged: count(value.lines_changed),
+    toolCalls: count(value.tool_calls),
+    testRuns: count(value.test_runs),
+    floor: count(value.floor),
+    step: count(value.step),
+  };
+}
+
+/** `fail_labels` of GET /me/quality: `{code: label}`, strings only. */
+export function parseFailLabels(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  /** @type {Record<string, string>} */
+  const labels = {};
+  for (const [code, label] of Object.entries(value)) {
+    const clean = text(label);
+    if (clean && /^[a-z0-9_-]{1,64}$/i.test(code)) labels[code] = clean;
+  }
+  return labels;
+}
+
+/** A session id the profile request may name (`/device/me?session_id=`), or null. */
+export function profileSessionId(value) {
+  const id = text(value);
+  return id && /^[A-Za-z0-9_-]{1,128}$/.test(id) ? id : null;
 }
 
 /** `{"detail": "wheel_resting"}` (or `{"detail": {"code": ...}}`) from a 409. */

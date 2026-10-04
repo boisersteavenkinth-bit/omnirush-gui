@@ -253,12 +253,20 @@ export type OmniRushQualitySession = {
   workspace: string | null;
   spins: number;
   counted: boolean;
+  reproducible: "pass" | "fail" | "unknown" | null;
+  /** The work-size step, 0..4. */
+  workSize: number | null;
+  work: { codeFiles: number; linesChanged: number; toolCalls: number; testRuns: number; floor: number; step: number } | null;
 };
 
 export type OmniRushQualityDetails = {
   segments: OmniRushWheelSegment[];
   expectedTokens: number | null;
+  /** The top segment's prize. */
+  jackpotTokens: number | null;
   sessions: OmniRushQualitySession[];
+  /** `{code: label}` for the sessions' `fails`. */
+  failLabels: Record<string, string>;
 };
 
 /** GET /me/quality/spins totals. */
@@ -734,7 +742,7 @@ export type DesktopCommandMap = {
   // OmniRush.ai server sidecar
   omnirushServerInfo: { args: []; result: OmniRushServerInfo };
   omnirushAccountStatus: {
-    args: [];
+    args: [options?: { sessionId?: string | null }];
     result: OmniRushAccountStatus;
   };
   omnirushQualityDetails: { args: []; result: OmniRushQualityDetails | null };

@@ -2,6 +2,7 @@
 import { useEffect, useMemo, useRef } from "react";
 
 import {
+  jackpotIndex,
   sliceAtPointer,
   wheelAngleAt,
   wheelOvershoot,
@@ -27,6 +28,8 @@ export type QualityWheelProps = {
   /** Pixel size of the wheel (square). */
   size?: number;
   durationMs?: number;
+  /** The top prize (GET /me/quality `jackpot_tokens`); the biggest segment otherwise. */
+  jackpotTokens?: number | null;
 };
 
 /** Low prizes in slate and teal, rising to the lime jackpot. */
@@ -151,7 +154,7 @@ export function QualityWheel(props: QualityWheelProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [targetIndex, spinId]);
 
-  const jackpot = segments.length - 1;
+  const jackpot = jackpotIndex(segments, props.jackpotTokens);
   return (
     <div
       ref={rootRef}

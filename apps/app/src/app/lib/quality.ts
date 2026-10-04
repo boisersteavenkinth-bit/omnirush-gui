@@ -254,10 +254,19 @@ export function spinPayoutText(spin: QualitySpin): string {
   return `+${compactTokenCount(spin.tokens)} tokens added to your pot`;
 }
 
+/** The jackpot slice: the segment paying `jackpotTokens`, else the biggest prize. */
+export function jackpotIndex(segments: WheelSegment[], jackpotTokens?: number | null): number {
+  const named = jackpotTokens ? segments.findIndex((segment) => segment.tokens === jackpotTokens) : -1;
+  if (named >= 0) return named;
+  let best = 0;
+  segments.forEach((segment, index) => { if (segment.tokens > (segments[best]?.tokens ?? 0)) best = index; });
+  return best;
+}
+
 /** The near-miss tease, only when the server flags it. */
-export function nearMissText(spin: QualitySpin): string | null {
+export function nearMissText(spin: QualitySpin, jackpotTokens?: number | null): string | null {
   if (!spin.nearMiss) return null;
-  const jackpot = spin.jackpotTokens || Math.max(...spin.segments.map((segment) => segment.tokens));
+  const jackpot = spin.jackpotTokens || jackpotTokens || Math.max(...spin.segments.map((segment) => segment.tokens));
   return `So close to ${compactTokenCount(jackpot)}!`;
 }
 
@@ -278,15 +287,25 @@ export const useAccountStatusStore = create<AccountStatusStore>((set) => ({
 }));
 
 let inFlight: Promise<OmniRushAccountStatus | null> | null = null;
+let openSessionId: string | null = null;
+
+/** The session open in the app: profile reads name it so next_spin_hint and nudge speak about it. */
+export function setQualitySessionId(sessionId: string | null | undefined): void {
+  openSessionId = sessionId?.trim() || null;
+}
+
+export function qualitySessionId(): string | null {
+  return openSessionId;
+}
 
 /**
  * Reads the account status (/device/me) once for every caller in flight:
  * the sidebar footer and the quality popup share one request.
  */
 export function refreshAccountStatus(
-  read: () => Promise<OmniRushAccountStatus>,
+  read: (options?: { sessionId?: string | null }) => Promise<OmniRushAccountStatus>,
 ): Promise<OmniRushAccountStatus | null> {
-  inFlight ??= read()
+  inFlight ??= read(openSessionId ? { sessionId: openSessionId } : undefined)
     .then((status) => {
       useAccountStatusStore.getState().set(status);
       return status;

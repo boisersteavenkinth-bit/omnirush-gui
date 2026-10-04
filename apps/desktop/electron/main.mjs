@@ -2148,16 +2148,18 @@ const desktopCommandHandlers = {
       return runtimeManager.omnirushServerInfo();
   },
   "omnirushAccountStatus": async (event, ...args) => {
-      return omnirushAccountStore.status();
+      // Optional `{ sessionId }`: the session open in the app, for the quality hint.
+      const input = args[0] && typeof args[0] === "object" ? args[0] : {};
+      return omnirushAccountStore.status({ sessionId: typeof input.sessionId === "string" ? input.sessionId : null });
   },
   // Quality rewards: the wheel's segments and recent sessions, spin totals, and one spin with the device
   // credential (X-OmniRush-Client like every account request). A refusal
   // (409 no_spins / wheel_resting / quality_rewards_off) comes back as a
   // value, not a thrown error, so the dialog can say which one it was.
-  "omnirushQualityDetails": async () => {
+  "omnirushQualityDetails": async (event) => {
       return omnirushAccountStore.qualityDetails();
   },
-  "omnirushQualitySpins": async () => {
+  "omnirushQualitySpins": async (event) => {
       return omnirushAccountStore.qualitySpinTotals();
   },
   "omnirushQualitySpin": async (event, ...args) => {

@@ -13,7 +13,7 @@ import {
   writePlaintextCredentialFile,
 } from "./plaintext-credential-file.mjs";
 import { CLIENT_HEADER, guiClientHeaderValue, parseClientUpdate } from "./update-gate.mjs";
-import { parseAccountQuality, parseQualitySessions, parseSpinResult, parseWheelSegments, spinIdempotencyKey, spinRefusal } from "./quality.mjs";
+import { parseAccountQuality, parseFailLabels, parseQualitySessions, profileSessionId, parseSpinResult, parseWheelSegments, spinIdempotencyKey, spinRefusal } from "./quality.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -933,9 +933,11 @@ export function createDesktopOmniRushAccountStore({
    * expired while the app was idle, so a second one is allowed before the
    * session counts as gone.
    */
-  async function fetchProfile(credentials, refreshesLeft = 2) {
+  async function fetchProfile(credentials, refreshesLeft = 2, sessionId = null) {
     const profileUrl = controlPlaneBase(credentials.gatewayUrl);
     profileUrl.pathname += "/device/me";
+    // The open session: next_spin_hint and nudge then speak about it.
+    if (sessionId) profileUrl.searchParams.set("session_id", sessionId);
     const response = await send(profileUrl, {
       headers: { Authorization: `Bearer ${credentials.accessToken}` },
       signal: AbortSignal.timeout(20_000),
@@ -943,7 +945,7 @@ export function createDesktopOmniRushAccountStore({
     if (response.status === 401 && refreshesLeft > 0) {
       const refreshed = await refresh(credentials.accessToken);
       if (!refreshed) throw new InvalidAccountCredentialsError("Device session expired");
-      return fetchProfile(refreshed, refreshesLeft - 1);
+      return fetchProfile(refreshed, refreshesLeft - 1, sessionId);
     }
     if (response.status === 401 || response.status === 403) {
       throw new InvalidAccountCredentialsError("Device session expired");
@@ -1027,7 +1029,8 @@ export function createDesktopOmniRushAccountStore({
   }
 
   /** @returns {Promise<AccountStatus>} */
-  async function status() {
+  async function status(input = {}) {
+    const sessionId = profileSessionId(input?.sessionId);
     const credentials = await load();
     const configured = await configuredGatewayUrl();
     const gatewayConfigured = Boolean(configured);
@@ -1046,7 +1049,7 @@ export function createDesktopOmniRushAccountStore({
       return { connected: false, gatewayConfigured, ...server, ...storage };
     }
     try {
-      const profile = await fetchProfile(credentials);
+      const profile = await fetchProfile(credentials, 2, sessionId);
       return {
         connected: true,
         gatewayConfigured,
@@ -1123,10 +1126,13 @@ export function createDesktopOmniRushAccountStore({
       const payload = await response.json();
       if (!payload || typeof payload !== "object" || !payload.quality) return null;
       const expected = Number(payload.expected_tokens);
+      const jackpot = Number(payload.jackpot_tokens);
       return {
         segments: parseWheelSegments(payload.segments),
         expectedTokens: Number.isFinite(expected) ? expected : null,
+        jackpotTokens: Number.isFinite(jackpot) && jackpot > 0 ? jackpot : null,
         sessions: parseQualitySessions(payload.sessions),
+        failLabels: parseFailLabels(payload.fail_labels),
       };
     } catch {
       return null;
