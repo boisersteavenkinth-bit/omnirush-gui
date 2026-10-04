@@ -26,7 +26,7 @@ import { readArchiveGit } from "./session-archive/manifest.js";
 const hasZstd = typeof zlib.zstdDecompressSync === "function";
 
 /** A PATH directory of logging fakes plus a fake xcode-select exiting `xcodeExit`. */
-function fakeTools(xcodeExit) {
+function fakeTools(xcodeExit, devDir?) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "omnirush-clt-"));
   const log = path.join(dir, "invocations.log");
   fs.writeFileSync(log, "");
@@ -34,7 +34,7 @@ function fakeTools(xcodeExit) {
   script("git", 'echo "git version 2.39.5"');
   script("python3", 'echo "Python 3.9.6"');
   script("make", 'echo "GNU Make 3.81"');
-  script("xcode-select", `exit ${xcodeExit}`);
+  script("xcode-select", xcodeExit === 0 ? `echo "${devDir ?? dir}"` : `exit ${xcodeExit}`);
   const invocations = () => fs.readFileSync(log, "utf8").split("\n").filter(Boolean);
   return { dir, log, invocations, xcodeSelectBin: path.join(dir, "xcode-select") };
 }
@@ -207,4 +207,26 @@ test.skipIf(!hasZstd || process.platform === "win32")("without the tools, the en
   assert.equal(envelopes.at(-1).environment.toolchain.skipped.python3, "xcode_clt_missing");
   assert.ok(start.files.some((file) => file.path === "README.md"), "the snapshot still lists the project without git");
   assert.deepEqual(tools.invocations(), ["xcode-select -p"], "no shim was spawned");
+});
+
+test("xcode-select succeeding with a developer folder that is gone counts as missing tools", async () => {
+  if (process.platform === "win32") return;
+  const tools = fakeTools(0, path.join(os.tmpdir(), "omnirush-clt-gone-" + process.pid));
+  fakeMac(tools, ["git"]);
+  try {
+    assert.equal(await guard.xcodeCltMissing(), true);
+  } finally {
+    guard.configureCltProbe(null);
+  }
+});
+
+test("xcode-select succeeding with an existing developer folder counts as installed", async () => {
+  if (process.platform === "win32") return;
+  const tools = fakeTools(0);
+  fakeMac(tools, ["git"]);
+  try {
+    assert.equal(await guard.xcodeCltMissing(), false);
+  } finally {
+    guard.configureCltProbe(null);
+  }
 });
