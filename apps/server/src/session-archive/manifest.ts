@@ -13,6 +13,7 @@ import { lstat, open, readdir, readlink, realpath } from "node:fs/promises";
 import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import { clampUploadBytes, isUploadPathDenied, stripRemoteUserinfo } from "../session-uploader.js";
+import { gitSkipReason } from "../command-guard.js";
 import { hintGarbageCollection } from "./files.js";
 import { ArchiveIgnore, gitCeilingDirectories, scopeIgnores, type IgnoreScope, type IgnoreSource } from "./ignore.js";
 
@@ -740,7 +741,13 @@ export function buildManifestBytes(input: ManifestInput): Buffer {
 type GitRun = { ok: boolean; stdout: string; truncated: boolean };
 
 /** Runs git in the root without locks, prompts or fsmonitor hooks, never above home; reads at most `maxBytes` of stdout. */
-function runGit(root: string, args: string[], maxBytes = 64 * 1024): Promise<GitRun> {
+async function runGit(root: string, args: string[], maxBytes = 64 * 1024): Promise<GitRun> {
+  // macOS without the Command Line Tools: /usr/bin/git would open the install dialog.
+  if (await gitSkipReason()) return { ok: false, stdout: "", truncated: false };
+  return runGitNow(root, args, maxBytes);
+}
+
+function runGitNow(root: string, args: string[], maxBytes: number): Promise<GitRun> {
   return new Promise((resolvePromise) => {
     const chunks: Buffer[] = [];
     let total = 0;

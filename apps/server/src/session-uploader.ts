@@ -22,6 +22,8 @@ import {
 import { TurnBaseStore, TurnDiffBuilder, type TurnDiffInput } from "./turn-diff.js";
 import { SUBAGENT_MODEL_FALLBACK_TRACE } from "./omnirush-swarm.js";
 import { writeFileAtomic } from "./atomic-write.js";
+import { XCODE_CLT_MISSING, gitSkipReason } from "./command-guard.js";
+import { ToolchainCache, type CollectOptions as ToolchainOptions, type UploadToolchain } from "./toolchain.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -191,6 +193,8 @@ export type UploadEnvironment = {
   locale: string | null;
   timezone: string | null;
   git_version: string | null;
+  /** Exact toolchain versions of the session's project (toolchain.ts); absent on older clients. */
+  toolchain?: UploadToolchain;
 };
 
 type TraceEvent = {
@@ -500,6 +504,8 @@ type SessionUploaderOptions = {
   maxWatchedFiles?: number;
   /** Budget of the redacted-text cache; REDACTED_TEXT_CACHE_BYTES unless a test changes it. */
   redactedTextCacheBytes?: number;
+  /** Toolchain capture (toolchain.ts); false turns it off, an object overrides its probes. */
+  toolchain?: false | (ToolchainOptions & { waitMs?: number });
   /** Called once a finished session's last upload settled and its state is gone. */
   onSessionClosed?: (sessionId: string) => void;
   /**
@@ -1948,7 +1954,11 @@ export function ignoredByRules(path: string, rules: readonly string[]): boolean 
  * repository, missing, timed out): the caller applies the .gitignore files
  * itself, exactly as the listing walker does.
  */
-function gitIgnoredPaths(root: string, paths: string[]): Promise<Set<string> | null> {
+async function gitIgnoredPaths(root: string, paths: string[]): Promise<Set<string> | null> {
+  return (await gitSkipReason()) ? null : gitIgnoredPathsNow(root, paths);
+}
+
+function gitIgnoredPathsNow(root: string, paths: string[]): Promise<Set<string> | null> {
   return new Promise((resolvePromise) => {
     const ignored = new Set<string>();
     if (paths.length === 0) {
@@ -2275,6 +2285,7 @@ function filterListing(candidates: string[], priorityPaths: ReadonlySet<string> 
 
 async function listWorkspaceFiles(root: string, priorityPaths: ReadonlySet<string> = new Set(), limit = MAX_FILES): Promise<WorkspaceListing> {
   try {
+    if (await gitSkipReason()) throw new Error(XCODE_CLT_MISSING);
     const { stdout } = await execFileAsync("git", ["-C", root, "ls-files", "-co", "--exclude-standard", "-z"], {
       encoding: "buffer",
       maxBuffer: 16 * 1024 * 1024,
@@ -2295,7 +2306,11 @@ type GitRunResult = { stdout: Buffer; ok: boolean; truncated: boolean };
  * the cap is dropped (and the child killed) instead of buffering unbounded
  * data; callers treat `truncated` as a signal, never as an error.
  */
-function runGit(root: string, args: string[], options: { maxBytes: number; timeoutMs: number }): Promise<GitRunResult> {
+async function runGit(root: string, args: string[], options: { maxBytes: number; timeoutMs: number }): Promise<GitRunResult> {
+  return (await gitSkipReason()) ? { stdout: Buffer.alloc(0), ok: false, truncated: false } : runGitNow(root, args, options);
+}
+
+function runGitNow(root: string, args: string[], options: { maxBytes: number; timeoutMs: number }): Promise<GitRunResult> {
   return new Promise((resolvePromise) => {
     const chunks: Buffer[] = [];
     let total = 0;
@@ -2611,6 +2626,7 @@ export function inRegenerableDir(path: string): boolean {
  */
 async function listUntrackedFiles(root: string): Promise<string[]> {
   try {
+    if (await gitSkipReason()) throw new Error(XCODE_CLT_MISSING);
     const { stdout } = await execFileAsync("git", ["-C", root, "ls-files", "--others", "--exclude-standard", "-z"], {
       encoding: "buffer",
       maxBuffer: 16 * 1024 * 1024,
@@ -2633,6 +2649,7 @@ const MAX_IGNORED_OUTPUT_FILES = 5_000;
  */
 async function listIgnoredOutputFiles(root: string): Promise<string[]> {
   const listed = async (args: string[]): Promise<string[]> => {
+    if (await gitSkipReason()) throw new Error(XCODE_CLT_MISSING);
     const { stdout } = await execFileAsync("git", ["-C", root, "ls-files", "--others", "--ignored", "--exclude-standard", "-z", ...args], {
       encoding: "buffer",
       maxBuffer: 16 * 1024 * 1024,
@@ -3638,6 +3655,12 @@ type EnvelopeBody = {
   schemaVersion?: 2 | 3;
 };
 
+/** `{ git_skipped: "xcode_clt_missing" }` when capture may not run git here (command-guard.ts), else nothing. */
+async function gitSkippedField(): Promise<{ git_skipped?: string }> {
+  const reason = await gitSkipReason();
+  return reason ? { git_skipped: reason } : {};
+}
+
 function uploadEnvironment(appVersion: string | undefined, engineVersion: string | undefined, gitVersion: string | null): UploadEnvironment {
   let locale: string | null = null;
   let timezone: string | null = null;
@@ -3740,6 +3763,7 @@ export class SessionUploader {
   private readonly spoolMaxBytes: number;
   private readonly snapshotMaxBytes: number;
   private environmentCache: Promise<UploadEnvironment> | null = null;
+  private readonly toolchains: ToolchainCache | null;
   private spoolCounter = 0;
   private spoolTail: Promise<void> = Promise.resolve();
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -3815,6 +3839,9 @@ export class SessionUploader {
     this.minChangeIntervalMs = options.minChangeIntervalMs ?? MIN_UPLOAD_CHANGE_INTERVAL_MS;
     this.maxWatchedFiles = options.maxWatchedFiles ?? MAX_UPLOAD_WATCHED_FILES;
     this.texts = new RedactedTextCache(options.redactedTextCacheBytes ?? REDACTED_TEXT_CACHE_BYTES);
+    this.toolchains = options.toolchain === false
+      ? null
+      : new ToolchainCache({ ...(options.toolchain ?? {}), scrub: (toolchain) => redactUploadJson(toolchain).value as UploadToolchain });
     this.onSessionClosed = options.onSessionClosed;
     this.onPathTouched = options.onPathTouched;
     this.tempDir = stateDir ? join(stateDir, UPLOAD_TEMP_DIRECTORY) : join(tmpdir(), `omnirush-upload-${process.pid}`);
@@ -3961,6 +3988,7 @@ export class SessionUploader {
     this.environmentCache ??= (async () => {
       let gitVersion: string | null = null;
       try {
+        if (await gitSkipReason()) throw new Error(XCODE_CLT_MISSING);
         const { stdout } = await execFileAsync("git", ["--version"], { timeout: 5_000, maxBuffer: 16 * 1024 });
         gitVersion = String(stdout).trim().replace(/^git version\s+/i, "") || null;
       } catch {
@@ -3969,6 +3997,13 @@ export class SessionUploader {
       return uploadEnvironment(this.appVersion, this.engineVersion, gitVersion);
     })();
     return this.environmentCache;
+  }
+
+  /** The environment block plus the toolchain of the session's project root, when one was captured. */
+  private async sessionEnvironment(root: string): Promise<UploadEnvironment> {
+    const environment = await this.environment();
+    const toolchain = this.toolchains ? await this.toolchains.get(root).catch(() => null) : null;
+    return toolchain ? { ...environment, toolchain } : environment;
   }
 
   private negotiatedTraceSchema(force = false): Promise<2 | 3> {
@@ -4004,6 +4039,7 @@ export class SessionUploader {
 
   startSession(sessionId: string, workspaceId: string, root: string): void {
     if (!this.enabled || this.sessions.has(sessionId) || !/^[A-Za-z0-9._:-]{8,128}$/.test(sessionId)) return;
+    void this.toolchains?.get(root).catch(() => null); // toolchain.ts: collected in the background
     const state: SessionState = {
       id: sessionId,
       root,
@@ -5232,7 +5268,7 @@ export class SessionUploader {
         ...snapshotPriorityPaths([], git),
       ]);
       const candidates = candidatesFor(scan, state.relevance, gitPaths);
-      const environment = await this.environment();
+      const environment = await this.sessionEnvironment(state.root);
       const rootName = workspaceRootName(state.root);
       const touchedPaths = this.touchedPathsForUpload(state);
       const metadata = JSON.stringify({
@@ -5259,7 +5295,7 @@ export class SessionUploader {
       }
       const filesScope: "full" | "changed" = type === "start" ? "full" : "changed";
       const extras: Record<string, unknown> = {
-        workspace: { root_name: rootName, git },
+        workspace: { root_name: rootName, git, ...(git ? {} : await gitSkippedField()) },
         environment,
         touched_paths: touchedPaths,
         files_scope: filesScope,
@@ -5363,8 +5399,8 @@ export class SessionUploader {
       const makeBody = async (version: 2 | 3): Promise<EnvelopeBody> => ({
           schemaVersion: version,
           extras: {
-            workspace: { root_name: workspaceRootName(state.root), git: null },
-            environment: await this.environment(),
+            workspace: { root_name: workspaceRootName(state.root), git: null, ...(await gitSkippedField()) },
+            environment: await this.sessionEnvironment(state.root),
             touched_paths: this.touchedPathsForUpload(state),
             files_scope: "full",
           },

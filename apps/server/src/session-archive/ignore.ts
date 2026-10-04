@@ -31,6 +31,7 @@ import { mkdtemp, open, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 
+import { gitSkipReason } from "../command-guard.js";
 import { ignoredByRules, parseGitignoreRules, scopedIgnoreRules } from "../session-uploader.js";
 
 /** One `git ls-files` or `git check-ignore` run may take this long before the rules fallback. */
@@ -81,7 +82,13 @@ type NulRun = { status: "ok" | "failed" | "timeout" | "overflow"; code: number |
  * listing of a million ignored files is never one string). A trailing `/`
  * (an ignored directory) is dropped. At most MAX_IGNORED_PATHS are kept.
  */
-function gitNulSet(cwd: string, args: readonly string[], env: NodeJS.ProcessEnv, timeoutMs: number, input?: string, signal?: AbortSignal): Promise<NulRun> {
+async function gitNulSet(cwd: string, args: readonly string[], env: NodeJS.ProcessEnv, timeoutMs: number, input?: string, signal?: AbortSignal): Promise<NulRun> {
+  // macOS without the Command Line Tools: /usr/bin/git would open the install dialog.
+  if (await gitSkipReason()) return { status: "failed", code: null, paths: new Set() };
+  return gitNulSetNow(cwd, args, env, timeoutMs, input, signal);
+}
+
+function gitNulSetNow(cwd: string, args: readonly string[], env: NodeJS.ProcessEnv, timeoutMs: number, input?: string, signal?: AbortSignal): Promise<NulRun> {
   return new Promise((resolvePromise) => {
     const paths = new Set<string>();
     let pending: Buffer | null = null;
