@@ -9,18 +9,25 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { constants as fsConstants, type BigIntStats } from "node:fs";
-import { lstat, open, readdir, readlink, realpath } from "node:fs/promises";
+import { lstat, open, readdir, readlink, realpath, stat } from "node:fs/promises";
 import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 
-import { clampUploadBytes, isUploadPathDenied, stripRemoteUserinfo } from "../session-uploader.js";
+import { clampUploadBytes, isUploadPathDenied, REGENERABLE_DIR_NAMES, stripRemoteUserinfo } from "../session-uploader.js";
+import { ATTACHMENTS_ROOT_NAME } from "./attachments.js";
+import type { ExcludedList, ExcludedReason } from "./capture-v2.js";
 import { gitSkipReason } from "../command-guard.js";
 import { hintGarbageCollection } from "./files.js";
+import { isGitConfigPath, scrubGitConfig } from "./git-scrub.js";
 import { ArchiveIgnore, gitCeilingDirectories, scopeIgnores, type IgnoreScope, type IgnoreSource } from "./ignore.js";
 
 export const ARCHIVE_SCHEMA = "omnirush.archive.v1";
 export const RESERVED_ROOT_NAME = "__omnirush__";
 /** The archive folder of the files outside the workspace (outside.ts); a workspace entry of that name is reserved too. */
 export const OUTSIDE_ROOT_NAME = "__outside__";
+/** Capture v2: prompt attachments (attachments.ts); a workspace entry of that name is reserved too. */
+export { ATTACHMENTS_ROOT_NAME };
+/** A git config file larger than this is left out (`too_large`): it is never read whole to scrub it, and never archived raw. */
+const MAX_SCRUBBED_CONFIG_BYTES = 1024 * 1024;
 export const STAT_CONCURRENCY = 64;
 export const HASH_CONCURRENCY = 6;
 export const HASH_READ_BYTES = 128 * 1024;
@@ -44,7 +51,7 @@ export type ArchiveKind = "base" | "delta";
  * final archive of the folder after the last completed turn, which carries
  * that turn's number again.
  */
-export type ArchiveTrigger = "turn" | "final";
+export type ArchiveTrigger = "turn" | "final" | "pre_tool";
 /** What prompted a final archive (manifest.json `reason`). */
 export type FinalReason = "idle" | "turn_incomplete" | "session_deleted" | "app_quit" | "app_start";
 /**
@@ -63,6 +70,10 @@ export type ArchiveEntry = {
   size: number;
   sha256: string | null;
   target?: string;
+  /** Capture v2: a symlink whose target does not exist. */
+  broken?: boolean;
+  /** A git config whose archived copy had credentials removed (git-scrub.ts): size and sha256 are the copy's. */
+  scrubbed?: boolean;
 };
 
 /** A scanned entry: the manifest fields plus what pass 2 and the hash cache need. */
@@ -73,6 +84,10 @@ export type ScannedEntry = ArchiveEntry & {
   statKey: string;
   /** st_dev from lstat: with the ino in statKey, the identity pass 2 requires of the file it reads. */
   dev: number;
+  /** The bytes pass 2 writes instead of reading the file (a scrubbed git config). */
+  content?: Buffer;
+  /** An absolute file pass 2 reads instead of `<root>/<path>` (a staged attachment). */
+  source?: string;
 };
 
 /** The prefix of a stat key that pass 2 compares against fstat: size and mtimeNs. */
@@ -317,6 +332,8 @@ export function parseBaselineText(text: string | null): ArchiveEntry[] | null {
     if (target !== undefined && typeof target !== "string") return null;
     const entry: ArchiveEntry = { path, type: type === "file" ? "file" : type === "dir" ? "dir" : "symlink", mode, size, sha256 };
     if (target !== undefined) entry.target = target;
+    if ("broken" in row && row.broken === true) entry.broken = true;
+    if ("scrubbed" in row && row.scrubbed === true) entry.scrubbed = true;
     entries.push(entry);
   }
   return entries;
@@ -342,6 +359,10 @@ export type ScanOptions = {
   metrics?: ScanMetrics;
   /** Stops the scan between entries: it then rejects with the signal's reason. */
   signal?: AbortSignal;
+  /** Capture v2: every entry left out, with its reason. */
+  excludedList?: ExcludedList;
+  /** Capture v2 (a folder in no repository): the regenerable folders (node_modules, .venv, target, ...) are left out. */
+  pruneRegenerable?: boolean;
 };
 
 /**
@@ -454,6 +475,57 @@ async function hashFile(absolute: string, size: number, buffer: Buffer, metrics:
   }
 }
 
+/** Whether a symlink's target is missing (or a loop): its own lstat already showed a link. */
+export async function isBrokenLink(absolute: string): Promise<boolean> {
+  try {
+    await stat(absolute);
+    return false;
+  } catch (error) {
+    const code = error instanceof Error && "code" in error ? error.code : undefined;
+    return code === "ENOENT" || code === "ELOOP" || code === "ENOTDIR";
+  }
+}
+
+/**
+ * A git config entry (git-scrub.ts): read once from the very file pass 1
+ * lstat'ed, scrubbed of credentials; when anything was removed, the entry
+ * carries the scrubbed bytes (pass 2 writes them) and their size and hash.
+ * False when it cannot be read.
+ */
+export async function scrubConfigEntry(absolute: string, entry: ScannedEntry, metrics: ScanMetrics): Promise<boolean> {
+  let handle: Awaited<ReturnType<typeof open>>;
+  try {
+    handle = await open(absolute, OPEN_ENTRY_FLAGS);
+  } catch {
+    return false;
+  }
+  try {
+    const stats = await handle.stat({ bigint: true });
+    if (!stats.isFile() || !isSameFileIdentity(entry, stats) || Number(stats.size) !== entry.size) return false;
+    const raw = Buffer.alloc(entry.size);
+    let offset = 0;
+    while (offset < raw.length) {
+      const { bytesRead } = await handle.read(raw, offset, raw.length - offset, offset);
+      if (bytesRead === 0) return false;
+      offset += bytesRead;
+    }
+    metrics.fileReads += 1;
+    metrics.bytesHashed += raw.length;
+    const scrub = scrubGitConfig(raw.toString("utf8"));
+    const bytes = scrub.changed ? Buffer.from(scrub.text, "utf8") : raw;
+    // Pass 2 writes exactly these checked bytes: a config rewritten after this read never reaches the archive.
+    entry.content = bytes;
+    entry.size = bytes.length;
+    if (scrub.changed) entry.scrubbed = true;
+    entry.sha256 = createHash("sha256").update(bytes).digest("hex");
+    return true;
+  } catch {
+    return false;
+  } finally {
+    await handle.close().catch(() => undefined);
+  }
+}
+
 /**
  * Pass 1: walks the root with lstat (never following a symlink), applies the
  * exclusions of section 5.2, leaves out what git ignores (a whole ignored
@@ -471,6 +543,10 @@ export async function scanArchiveTree(root: string, options: ScanOptions = {}): 
   const entries: ScannedEntry[] = [];
   const toHash: ScannedEntry[] = [];
   const ignore = new ArchiveIgnore(resolve(root), signal);
+  const list = options.excludedList;
+  const note = (path: string, reason: ExcludedReason, type: "file" | "dir", size?: number): void => {
+    list?.add({ path, type, reason, ...(size !== undefined ? { size } : {}) });
+  };
 
   const inspect = async (relDir: string, absDir: string, name: string, scope: IgnoreScope, next: Array<{ rel: string; abs: string; scope: IgnoreScope }>): Promise<void> => {
     signal?.throwIfAborted();
@@ -479,6 +555,11 @@ export async function scanArchiveTree(root: string, options: ScanOptions = {}): 
     // Git's answer names ignored directories and files alike: no lstat needed.
     if (scope.kind === "git" && scopeIgnores(scope, rel, false)) {
       ignore.ignored += 1;
+      if (list) {
+        // One lstat for the listing's type (an ignored folder is never walked).
+        const kind = await lstat(abs).then((info) => (info.isDirectory() ? "dir" as const : "file" as const), () => "file" as const);
+        note(rel, "gitignored", kind);
+      }
       return;
     }
     let stats: BigIntStats;
@@ -488,15 +569,23 @@ export async function scanArchiveTree(root: string, options: ScanOptions = {}): 
       if (metrics.stats % GC_HINT_ENTRIES === 0) hintGarbageCollection();
     } catch {
       excluded.unreadable += 1;
+      note(rel, "unreadable", "file");
       return;
     }
     if (scope.kind === "rules" && scopeIgnores(scope, rel, stats.isDirectory())) {
       ignore.ignored += 1;
+      note(rel, "gitignored", stats.isDirectory() ? "dir" : "file");
       return;
     }
     if (stats.isDirectory()) {
       if (prunedDirs.has(rel)) {
         excluded.app_state += 1;
+        note(rel, "app_state", "dir");
+        return;
+      }
+      if (options.pruneRegenerable && REGENERABLE_DIR_NAMES.has(name)) {
+        ignore.ignored += 1;
+        note(rel, "regenerable", "dir");
         return;
       }
       entries.push({ path: rel, type: "dir", size: 0, sha256: null, ...statFields(stats) });
@@ -505,10 +594,12 @@ export async function scanArchiveTree(root: string, options: ScanOptions = {}): 
     }
     if (!stats.isFile() && !stats.isSymbolicLink()) {
       excluded.special += 1;
+      note(rel, "special", "file");
       return;
     }
     if (!includeCredentials && isArchiveCredentialPath(rel)) {
       excluded.credential += 1;
+      note(rel, "credential", "file");
       return;
     }
     if (stats.isSymbolicLink()) {
@@ -517,16 +608,32 @@ export async function scanArchiveTree(root: string, options: ScanOptions = {}): 
         target = decodeName(await readlink(abs, { encoding: "buffer" }));
       } catch {
         excluded.unreadable += 1;
+        note(rel, "unreadable", "file");
         return;
       }
       if (target === null) {
         excluded.non_utf8 += 1;
+        note(rel, "non_utf8", "file");
         return;
       }
-      entries.push({ path: rel, type: "symlink", size: 0, sha256: null, target, ...statFields(stats) });
+      const link: ScannedEntry = { path: rel, type: "symlink", size: 0, sha256: null, target, ...statFields(stats) };
+      if (list && (await isBrokenLink(abs))) link.broken = true;
+      entries.push(link);
       return;
     }
     const entry: ScannedEntry = { path: rel, type: "file", size: Number(stats.size), sha256: null, ...statFields(stats) };
+    if (isGitConfigPath(rel) && entry.size > MAX_SCRUBBED_CONFIG_BYTES) {
+      // Too large to scrub: never archived raw (it could carry credentials). Listed with its size.
+      excluded.special += 1;
+      note(rel, "too_large", "file", entry.size);
+      return;
+    }
+    if (isGitConfigPath(rel)) {
+      // Read and scrubbed in the hash pass; never from the cache (its bytes are needed for pass 2).
+      toHash.push(entry);
+      entries.push(entry);
+      return;
+    }
     const cached = cache?.lookup(entry) ?? null;
     if (cached) {
       entry.sha256 = cached;
@@ -562,7 +669,10 @@ export async function scanArchiveTree(root: string, options: ScanOptions = {}): 
       for (const bytes of raw) {
         const name = decodeName(bytes);
         if (name === null) excluded.non_utf8 += 1;
-        else if (!dir.rel && (name === RESERVED_ROOT_NAME || name === OUTSIDE_ROOT_NAME)) excluded.reserved += 1;
+        else if (!dir.rel && (name === RESERVED_ROOT_NAME || name === OUTSIDE_ROOT_NAME || name === ATTACHMENTS_ROOT_NAME)) {
+          excluded.reserved += 1;
+          note(name, "reserved", "dir");
+        }
         else {
           listed.push(name);
           if (name.toLowerCase() === ".git") hasGit = true;
@@ -586,6 +696,10 @@ export async function scanArchiveTree(root: string, options: ScanOptions = {}): 
   const buffers: Buffer[] = [];
   await forEachBounded(toHash, options.hashConcurrency ?? HASH_CONCURRENCY, async (entry) => {
     signal?.throwIfAborted();
+    if (isGitConfigPath(entry.path)) {
+      if (!(await scrubConfigEntry(join(root, ...entry.path.split("/")), entry, metrics))) unreadable.add(entry);
+      return;
+    }
     const buffer = buffers.pop() ?? Buffer.allocUnsafe(HASH_READ_BYTES);
     try {
       const sha256 = await hashFile(join(root, ...entry.path.split("/")), entry.size, buffer, metrics, signal);
@@ -602,6 +716,7 @@ export async function scanArchiveTree(root: string, options: ScanOptions = {}): 
   });
   signal?.throwIfAborted();
   excluded.unreadable += unreadable.size;
+  for (const entry of unreadable) note(entry.path, "unreadable", "file", entry.size);
   const kept = unreadable.size > 0 ? entries.filter((entry) => !unreadable.has(entry)) : entries;
   kept.sort((left, right) => compareArchivePaths(left.path, right.path));
   cache?.commitScan();
@@ -669,10 +784,14 @@ export function isArchiveDeltaEmpty(delta: ArchiveDelta<ArchiveEntry>): boolean 
 export function archiveEntry(entry: ArchiveEntry): ArchiveEntry {
   const out: ArchiveEntry = { path: entry.path, type: entry.type, mode: entry.mode, size: entry.size, sha256: entry.sha256 };
   if (entry.type === "symlink") out.target = entry.target ?? "";
+  if (entry.type === "symlink" && entry.broken) out.broken = true;
+  if (entry.type === "file" && entry.scrubbed) out.scrubbed = true;
   return out;
 }
 
 export type ManifestInput = {
+  /** Capture v2 chains: ARCHIVE_SCHEMA_V2 (capture-v2.ts). */
+  schema?: string;
   kind: ArchiveKind;
   archiveId: string;
   sessionId: string;
@@ -704,7 +823,7 @@ export type ManifestSource = { size: number; chunks: () => Iterable<Buffer> };
  */
 export function manifestSource(input: ManifestInput): ManifestSource {
   const head = JSON.stringify({
-    schema: ARCHIVE_SCHEMA,
+    schema: input.schema ?? ARCHIVE_SCHEMA,
     kind: input.kind,
     archive_id: input.archiveId,
     session_id: input.sessionId,

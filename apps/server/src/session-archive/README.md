@@ -303,6 +303,57 @@ not used: Electron's `net.fetch` collects a streamed body with one
 64 MiB part took 2.6 s against 0.1 s for one buffer (measured with Electron 43
 against a loopback sink).
 
+## Capture v2 (byte-exact project state)
+
+Offered by the server per user (`policy.capture_v2` from GET /archives/key;
+`OMNIRUSH_CAPTURE_V2=0/1` overrides it for tests). A chain is v2 from its
+base on (`v2` in its session record). The same modules run in the CLI; both
+check `__fixtures__/capture_v2_vectors.json`. The wire format is in the
+backend's `docs/omnirush-project-archive.md` ("Capture v2").
+
+- **States.** Every v2 archive carries `__omnirush__/state.json` right after
+  the manifest (`schema: omnirush.archive.v2`): `start` (the base), `pre_tool`
+  (a turn's first tool call, `trigger: "pre_tool"`, the wire turn repeating
+  the parent's like a final archive, only when something changed since the
+  last state), `after` (a turn's delta) and `final` (with its reason).
+- **Start gate.** `server.ts` awaits `CaptureService.archiveStartGate` before
+  a prompt dispatch reaches the engine: the lifecycle's `startGate` asks
+  `SessionArchiver.startManifest` for a stat-and-hash scan of the folder (the
+  root's hash cache: an unchanged tree reads no file), at most
+  `START_GATE_MS` (3 s; the main thread gives the worker 1 s more). The base
+  then packs at once (no quiet period) from exactly that scan, and pass 2
+  checks every file against the hash taken before the prompt, so a file the
+  agent changed meanwhile is listed in `unstable.json`.
+  `start_capture: "complete" | "partial"` says whether the scan beat the cap.
+- **Tool start.** `followToolStart` (session-upload-observer.ts) listens to the
+  engine's event stream from the prompt on and calls the lifecycle's
+  `toolStarted` at the session's first tool part (v1 `message.part.updated`,
+  v2 `session.tool.called` / `session.tool.input.started`), once per turn; the
+  capture runs in the background and never holds the tool.
+- **What is in it.** The whole folder for git roots and, with the all-folders
+  policy, plain folders (regenerable folders such as `node_modules`, `.venv`,
+  `target` left out with reason `regenerable`); every repository's `.git`
+  byte for byte, its config files (`git-scrub.ts`) without credentials in the
+  ARCHIVED copy only (URL userinfo, `extraheader`, `[credential]`, secret
+  keys; the entry says `scrubbed: true`); symlinks with their target and
+  `broken: true` when it is missing; modes; every lockfile (`findLockfiles`);
+  touched gitignored files, also in regenerable folders, up to 1 GiB (over it:
+  path, size and hash in `excluded`); binaries the session uploader found
+  (`onBinaryFile`, never sent as text); prompt attachments
+  (`attachments.ts`, from the turn's user messages) under
+  `__attachments__/<message id>/<n>-<name>`.
+- **state.json** also lists every repository (`repos.ts`: root, nested,
+  `above` with its relative path, unborn branches with their staged files;
+  HEAD, branch, remote without userinfo, tracked-file count, dirty and staged
+  files, stash count, or the reason git could not read it), every entry the
+  scan left out with its reason (`excluded`, at most 20,000), the scrubbed
+  configs and the attachments with their message ids.
+- **Git runner.** Capture git runs drop inherited `GIT_DIR`/`GIT_WORK_TREE`
+  and friends, and accept the session's own repository when another user
+  owns it (`safe.directory` for that path only, fsmonitor and hooks off):
+  both used to leave the git block empty while the agent's own git commands
+  worked.
+
 ## Behaviour notes
 
 - **Consent.** A 428, or a `503 archive_disabled`, from any route turns archiving off without error. Every queued archive is dropped (consent belongs to the user), sessions that lost a queued archive stop, and captures skip as `disabled` until a later `captureBase` finds the key route open again. A server without the routes (404 on `/archives/key`) counts as disabled.

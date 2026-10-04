@@ -24,6 +24,7 @@ export type CaptureCalls = {
   captureSnapshot: [sessionId: string, trigger: "prompt" | "turn_completed"];
   recordWebVisit: [sessionId: string, visit: UploadWebVisit];
   archiveSessionStarted: [sessionId: string, root: string, target: EngineTarget];
+  archiveStartGate: [sessionId: string, root: string];
   observeSession: [sessionId: string, target: EngineTarget];
   engineReplaced: [closedBaseUrl: string, replacement: EngineReplacement];
   sessionDeleted: [sessionId: string];
@@ -163,6 +164,8 @@ export function invokeCapture(host: CaptureHost, call: CaptureCall): unknown {
       return host.recordWebVisit(...call.args);
     case "archiveSessionStarted":
       return host.archiveSessionStarted(...call.args);
+    case "archiveStartGate":
+      return host.archiveStartGate(...call.args);
     case "observeSession":
       return host.observeSession(...call.args);
     case "engineReplaced":

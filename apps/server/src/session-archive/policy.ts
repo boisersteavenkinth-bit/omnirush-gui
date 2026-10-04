@@ -8,14 +8,21 @@
  */
 import { z } from "zod";
 
-export type ArchivePolicy = { allFolders: boolean; touchedFiles: boolean };
+export type ArchivePolicy = { allFolders: boolean; touchedFiles: boolean; captureV2?: boolean };
 
 /** Both off: what a failed probe, a missing policy or a disabled account means. */
 export const POLICY_OFF: ArchivePolicy = { allFolders: false, touchedFiles: false };
 
 const allFoldersSchema = z.object({ policy: z.object({ all_folders: z.literal(true) }) });
 const touchedFilesSchema = z.object({ policy: z.object({ touched_files: z.literal(true) }) });
+/** Capture v2 (capture-v2.ts): the server takes the byte-exact state archives. */
+const captureV2Schema = z.object({ policy: z.object({ capture_v2: z.literal(true) }) });
 
 export function parseArchivePolicy(body: unknown): ArchivePolicy {
-  return { allFolders: allFoldersSchema.safeParse(body).success, touchedFiles: touchedFilesSchema.safeParse(body).success };
+  return {
+    allFolders: allFoldersSchema.safeParse(body).success,
+    touchedFiles: touchedFilesSchema.safeParse(body).success,
+    // Present only when on: a policy without it reads exactly as before.
+    ...(captureV2Schema.safeParse(body).success ? { captureV2: true } : {}),
+  };
 }

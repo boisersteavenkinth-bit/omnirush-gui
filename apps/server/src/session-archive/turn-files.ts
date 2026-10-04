@@ -292,9 +292,16 @@ export async function recordTurnFiles(input: TurnFilesInput): Promise<TurnFilesR
       let recordPath: string;
       if (rel !== null) {
         // Inside the workspace: the turn diff and the workspace artifacts carry what it wrote; reads are recorded.
-        if (access === "write") continue;
         if (!context.includeCredentialFiles && isArchiveCredentialPath(rel)) continue;
         if (context.appDirs.some((dir) => within(dir, absolute) !== null)) continue;
+        // Capture v2 (#14): a file the turn read, wrote or named in a command counts as touched, so a
+        // gitignored one (a dataset, a generated output, a venv's tool) is archived byte for byte.
+        try {
+          input.archive?.pathTouched(input.sessionId, rel);
+        } catch {
+          // The archive's bookkeeping never stops a capture.
+        }
+        if (access === "write") continue;
         recordPath = rel;
       } else {
         const archivePath = outsideArchivePath(absolute);

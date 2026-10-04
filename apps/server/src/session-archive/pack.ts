@@ -136,6 +136,8 @@ export type PackInput = {
   root: string;
   /** `__omnirush__/manifest.json`: its bytes, or a source that serialises it while it is written. */
   manifest: Buffer | ManifestSource;
+  /** Capture v2: members written right after the manifest (`__omnirush__/state.json`). */
+  extraMembers?: ReadonlyArray<{ name: string; content: Buffer }>;
   /** created_at in seconds: the mtime of the manifest and unstable members. */
   createdAtSeconds: number;
   /** Exactly the manifest's `files`, in the same order. */
@@ -311,6 +313,7 @@ class TarWriter {
   async write(): Promise<void> {
     const { input, unstable } = this;
     await this.smallFile(MANIFEST_MEMBER, input.manifest);
+    for (const member of input.extraMembers ?? []) await this.smallFile(member.name, member.content);
     let members = 0;
     for (const entry of input.entries) {
       input.signal?.throwIfAborted();
@@ -320,7 +323,22 @@ class TarWriter {
         await this.put(tarMemberHeader({ name: `${entry.path}/`, mode: entry.mode, size: 0, mtime: entry.mtime, typeflag: "5" }));
         continue;
       }
+      if (entry.type === "file" && entry.content) {
+        // Bytes prepared in pass 1 (a scrubbed git config).
+        await this.put(tarMemberHeader({ name: entry.path, mode: entry.mode, size: entry.content.length, mtime: entry.mtime, typeflag: "0" }));
+        await this.put(entry.content);
+        await this.zeros(paddingFor(entry.content.length));
+        continue;
+      }
       const parts = entry.path.split("/");
+      if (entry.type === "file" && entry.source) {
+        // A staged file (an attachment) read from its own absolute path under the state dir.
+        await this.put(tarMemberHeader({ name: entry.path, mode: entry.mode, size: entry.size, mtime: entry.mtime, typeflag: "0" }));
+        const stable = await this.fileContent(entry, entry.source, true);
+        await this.zeros(paddingFor(entry.size));
+        if (!stable) unstable.push(entry.path);
+        continue;
+      }
       // A file outside the workspace (`__outside__/...`) is read from its own absolute path.
       const outside = isOutsideArchivePath(entry.path);
       const source = outside ? outsideSourcePath(entry.path) : null;

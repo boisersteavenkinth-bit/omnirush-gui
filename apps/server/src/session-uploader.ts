@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
 import { createReadStream, createWriteStream, watch, type FSWatcher, type WriteStream } from "node:fs";
-import { lstat, mkdir, open, readFile, readdir, rename, rm, stat } from "node:fs/promises";
+import { lstat, mkdir, open, readFile, readdir, readlink, rename, rm, stat } from "node:fs/promises";
 import { release as osRelease, tmpdir } from "node:os";
 import nodePath, { basename, dirname, extname, join, relative, resolve, sep, type PlatformPath } from "node:path";
 import { promisify } from "node:util";
@@ -20,6 +20,8 @@ import {
   removeLegacyUploadContent,
 } from "./session-upload-state.js";
 import { TurnBaseStore, TurnDiffBuilder, type TurnDiffInput } from "./turn-diff.js";
+import { binaryReason, isKnownBinaryPath } from "./session-archive/binary.js";
+import { captureGitEnv } from "./session-archive/repos.js";
 import { SUBAGENT_MODEL_FALLBACK_TRACE } from "./omnirush-swarm.js";
 import { writeFileAtomic } from "./atomic-write.js";
 import { XCODE_CLT_MISSING, gitSkipReason } from "./command-guard.js";
@@ -367,7 +369,26 @@ type HashCacheEntry = {
   /** Redaction changed nothing, so the raw bytes are the upload form (verified by digest on upload). */
   clean: boolean;
   uploadPath: string;
+  /** Capture v2: the file's permission bits (the executable bit included). */
+  mode?: number;
 };
+
+/**
+ * Capture v2: a manifest entry that carries no text: a binary file (its raw
+ * size and SHA-256; its bytes go to the byte-exact project archive) or a
+ * symlink (its target, also when broken; sha256 and size are those of the
+ * target string).
+ */
+type ExtraManifestEntry = {
+  uploadPath: string;
+  kind: "binary" | "symlink";
+  sha256: string;
+  size: number;
+  mode: number;
+  target?: string;
+  broken?: boolean;
+};
+
 
 type SpoolMeta = {
   id: string;
@@ -465,6 +486,8 @@ type SessionState = {
   lastSuccessAt?: string;
   ready: Promise<void>;
   tail: Promise<void>;
+  /** Capture v2: the binary files and symlinks of the workspace as last scanned (manifest entries without text). */
+  extras: Map<string, ExtraManifestEntry>;
 };
 
 type SessionUploaderOptions = {
@@ -516,6 +539,12 @@ type SessionUploaderOptions = {
    * touched-files mode keeps them; it applies its own exclusions.
    */
   onPathTouched?: (sessionId: string, path: string) => void;
+  /**
+   * Capture v2: a binary file of the workspace within the per-file cap
+   * (workspace-relative). It is never sent as text: the host hands it to the
+   * byte-exact project archive.
+   */
+  onBinaryFile?: (sessionId: string, path: string) => void;
 };
 
 export type TraceCapabilities = {
@@ -1775,39 +1804,6 @@ export function stripRemoteUserinfo(url: string): string {
   return trimmed;
 }
 
-/**
- * Whether `buffer` holds binary content: a NUL or many control bytes in its
- * first 8 KiB, or bytes that are not valid UTF-8 anywhere (a PDF, an image).
- * Text is uploaded as UTF-8, so a file that does not decode strictly would be
- * stored altered (each invalid byte becoming U+FFFD). `partial` is set for a
- * head cut from a longer file, which may end inside a character.
- */
-function isBinary(buffer: Buffer, partial = false): boolean {
-  const length = Math.min(buffer.length, 8_192);
-  let suspicious = 0;
-  // An indexed loop: iterating a Buffer is several times slower, once per file.
-  for (let index = 0; index < length; index += 1) {
-    const byte = buffer[index]!;
-    if (byte === 0) return true;
-    if (byte < 7 || (byte > 13 && byte < 32)) suspicious += 1;
-  }
-  if (length > 0 && suspicious / length > 0.1) return true;
-  return !isValidUtf8(buffer, partial);
-}
-
-/** Strict UTF-8 validation (native); with `partial`, an incomplete last character is allowed. */
-function isValidUtf8(buffer: Buffer, partial: boolean): boolean {
-  if (isUtf8(buffer)) return true;
-  if (!partial) return false;
-  for (let back = 1; back <= 3 && back <= buffer.length; back += 1) {
-    const byte = buffer[buffer.length - back]!;
-    if ((byte & 0xc0) === 0x80) continue;
-    const length = byte >= 0xf0 ? 4 : byte >= 0xe0 ? 3 : byte >= 0xc0 ? 2 : 1;
-    return length > back && isUtf8(buffer.subarray(0, buffer.length - back));
-  }
-  return false;
-}
-
 const PATH_FIELD_NAMES = new Set([
   "path",
   "file_path",
@@ -2314,7 +2310,8 @@ async function walkFallback(
         listing.denied += 1;
         if ((listing.deniedPaths ??= []).length < MAX_LISTED_EXCLUSIONS) listing.deniedPaths.push(`${path}/`);
       } else await walkFallback(root, fullPath, ignoreRules, listing, priorityPaths);
-    } else if (entry.isFile()) {
+    } else if (entry.isFile() || entry.isSymbolicLink()) {
+      // Capture v2: a symlink is listed too (never followed; the scan records its target).
       if (isUploadPathDenied(path)) {
         listing.denied += 1;
         if ((listing.deniedPaths ??= []).length < MAX_LISTED_EXCLUSIONS) listing.deniedPaths.push(path);
@@ -2390,10 +2387,13 @@ function runGitNow(root: string, args: string[], options: { maxBytes: number; ti
     }, options.timeoutMs);
     timer.unref?.();
     try {
-      child = spawn("git", ["-C", root, "-c", "core.quotePath=false", ...args], {
+      // Capture v2: no inherited GIT_DIR/GIT_WORK_TREE (a server started from a git hook), no fsmonitor, and
+      // the session's own root accepted when another user owns it (git's dubious-ownership refusal left
+      // the git block empty while the agent's own git commands worked). See session-archive/repos.ts.
+      child = spawn("git", ["-C", root, "-c", "core.quotePath=false", "-c", "core.fsmonitor=false", "-c", `safe.directory=${resolve(root)}`, ...args], {
         stdio: ["ignore", "pipe", "ignore"],
         windowsHide: true,
-        env: { ...process.env, GIT_TERMINAL_PROMPT: "0", GIT_OPTIONAL_LOCKS: "0", GIT_PAGER: "cat", PAGER: "cat" },
+        env: { ...captureGitEnv(), GIT_CEILING_DIRECTORIES: process.env.GIT_CEILING_DIRECTORIES ?? "", LC_ALL: process.env.LC_ALL ?? "" },
       });
     } catch {
       finish(false);
@@ -2551,6 +2551,9 @@ export function filterUploadDiff(raw: string, inputTruncated = false): { diff: s
     const path = diffHeaderPath(headerEnd === -1 ? section : section.slice(0, headerEnd));
     if (!path || isUploadPathDenied(path)) continue;
     if (/^(?:Binary files .* differ|GIT binary patch)/m.test(section)) continue;
+    // Capture v2: a binary type is never diffed as text (its bytes go to the byte-exact archive), and
+    // a section that was not valid UTF-8 (utf8DiffText) never reaches here.
+    if (isKnownBinaryPath(path)) continue;
     // A diff is text even when the file is JSON: hunks are not parseable documents.
     // Each file's section under the mode its path selects, as the file's snapshot.
     const redacted = redactUploadText(section, { context: path, mode: redactModeForPath(path) }).text;
@@ -2569,6 +2572,29 @@ export function filterUploadDiff(raw: string, inputTruncated = false): { diff: s
 }
 
 /**
+ * Capture v2: git's diff output as text, without the file sections that are
+ * not valid UTF-8. git diffs any file without a NUL in its first 8000 bytes
+ * as text (a PDF, a latin-1 file); decoding those would replace their bytes
+ * with U+FFFD, so they are dropped here (their bytes are in the byte-exact
+ * archive). A truncated last section may end inside a character.
+ */
+export function utf8DiffText(raw: Buffer): string {
+  if (isUtf8(raw)) return raw.toString("utf8");
+  const marker = Buffer.from("\ndiff --git ");
+  const sections: Buffer[] = [];
+  let start = 0;
+  for (;;) {
+    const next = raw.indexOf(marker, start);
+    const end = next === -1 ? raw.length : next + 1;
+    sections.push(raw.subarray(start, end));
+    if (next === -1) break;
+    start = end;
+  }
+  return sections.filter((section, index) => isUtf8(section) || (index === sections.length - 1 && binaryReason(null, section, true) === null))
+    .map((section) => section.toString("utf8")).join("");
+}
+
+/**
  * Combined staged + unstaged text diff of the workspace. `--relative` with the
  * `.` pathspec limits the diff to the workspace subtree and makes every header
  * path workspace-relative, so a workspace that is a subdirectory of a larger
@@ -2581,7 +2607,7 @@ async function gitDiff(root: string, hasHead: boolean): Promise<{ diff: string |
   const options = { maxBytes: GIT_DIFF_READ_BYTES, timeoutMs: 20_000 };
   if (hasHead) {
     const result = await runGit(root, ["diff", "HEAD", ...common, ...scope], options);
-    if (result.ok) return filterUploadDiff(result.stdout.toString("utf8"), result.truncated);
+    if (result.ok) return filterUploadDiff(utf8DiffText(result.stdout), result.truncated);
   }
   // An unborn branch has no HEAD to diff against: combine the index (against
   // the empty tree) with the working tree changes on top of it.
@@ -2590,7 +2616,7 @@ async function gitDiff(root: string, hasHead: boolean): Promise<{ diff: string |
     runGit(root, ["diff", ...common, ...scope], options),
   ]);
   if (!staged.ok && !unstaged.ok) return { diff: null, truncated: false };
-  const text = `${staged.ok ? staged.stdout.toString("utf8") : ""}${unstaged.ok ? unstaged.stdout.toString("utf8") : ""}`;
+  const text = `${staged.ok ? utf8DiffText(staged.stdout) : ""}${unstaged.ok ? utf8DiffText(unstaged.stdout) : ""}`;
   return filterUploadDiff(text, staged.truncated || unstaged.truncated);
 }
 
@@ -2602,13 +2628,14 @@ async function gitDiff(root: string, hasHead: boolean): Promise<{ diff: string |
  * (porcelain status and the combined text diff), all redacted.
  */
 export async function collectGitBlock(root: string): Promise<UploadGitBlock | null> {
-  const inside = await gitText(root, ["rev-parse", "--is-inside-work-tree"]);
+  // 20 s, not 5: under load (a full scan hashing the tree) rev-parse timed out and the block was dropped.
+  const inside = await gitText(root, ["rev-parse", "--is-inside-work-tree"], 64 * 1024, 20_000);
   if (inside !== "true") return null;
   // Where the workspace sits inside the repository ("" at the top level,
   // "packages/app/" for a nested workspace). Status, log and diff below are
   // scoped to that subtree; without a reliable answer the block is skipped
   // rather than risk describing files outside the workspace root.
-  const prefixResult = await runGit(root, ["rev-parse", "--show-prefix"], { maxBytes: 64 * 1024, timeoutMs: 5_000 });
+  const prefixResult = await runGit(root, ["rev-parse", "--show-prefix"], { maxBytes: 64 * 1024, timeoutMs: 20_000 });
   if (!prefixResult.ok || prefixResult.truncated) return null;
   const prefix = prefixResult.stdout.toString("utf8").trim().replaceAll("\\", "/");
   const scope = prefix ? ["--", "."] : [];
@@ -3094,6 +3121,8 @@ type ScanContext = {
   yielder: LoopYielder;
   pool: ReadPool;
   ancestors: AncestorCache;
+  /** Capture v2: the binary files and symlinks the scan met, by path. */
+  extras: Map<string, ExtraManifestEntry>;
 };
 
 /**
@@ -3125,6 +3154,7 @@ function scanContext(root: string, cache: Map<string, HashCacheEntry>, texts: Re
     yielder: new LoopYielder(),
     pool: new ReadPool(SCAN_CONCURRENCY),
     ancestors: new Map(),
+    extras: new Map(),
   };
 }
 
@@ -3147,10 +3177,19 @@ async function inspectFile(context: ScanContext, path: string): Promise<HashCach
     return null;
   }
   metrics.fileStats += 1;
-  if (!file.isFile() || file.isSymbolicLink() || file.size > MAX_UPLOAD_FILE_BYTES) return null;
+  if (file.isSymbolicLink()) {
+    // Capture v2: a symlink is listed with its target, also a broken one; never followed.
+    const link = await symlinkExtra(absolute, uploadPathFor(path, undefined), file.mode);
+    if (link) context.extras.set(path, link);
+    return null;
+  }
+  if (!file.isFile() || file.size > MAX_UPLOAD_FILE_BYTES) return null;
   const cached = cache.get(path);
   const signature = fileSignature(file);
-  if (cached && sameFileSignature(cached, signature)) return cached;
+  if (cached && sameFileSignature(cached, signature)) {
+    if (cached.binary) context.extras.set(path, binaryExtra(cached));
+    return cached;
+  }
   const scanKey = [
     resolve(context.root),
     path,
@@ -3168,23 +3207,57 @@ async function inspectFile(context: ScanContext, path: string): Promise<HashCach
     return entry;
   }
   const uploadPath = uploadPathFor(path, cached);
-  const inFlight = pool.read(absolute, file.size, (buffer) => {
+  const mode = file.mode & 0o7777;
+  const inFlight = pool.read(absolute, file.size, (buffer): HashCacheEntry => {
     metrics.fileReads += 1;
-    if (isBinary(buffer)) {
-      return { ...signature, binary: true, sha256: "", bytes: 0, json: 0, clean: false, uploadPath };
+    // Capture v2: a known binary type or signature is binary too (a PDF that is all ASCII); its raw digest is kept.
+    if (binaryReason(path, buffer) !== null) {
+      return { ...signature, binary: true, sha256: sha256Hex(buffer), bytes: buffer.length, json: 0, clean: false, uploadPath, mode };
     }
-    return redactedCacheEntry(path, buffer, signature, uploadPath, metrics, { cache: context.texts, absolute }).entry;
+    return { ...redactedCacheEntry(path, buffer, signature, uploadPath, metrics, { cache: context.texts, absolute }).entry, mode };
   }).catch(() => null);
   FILE_SCAN_IN_FLIGHT.set(scanKey, inFlight);
   try {
     const entry = await inFlight;
     if (entry) cache.set(path, entry);
+    if (entry?.binary) context.extras.set(path, binaryExtra(entry));
     await context.yielder.pause();
     return entry;
   } finally {
     if (FILE_SCAN_IN_FLIGHT.get(scanKey) === inFlight) FILE_SCAN_IN_FLIGHT.delete(scanKey);
   }
 }
+
+/** Capture v2: the manifest entry of a binary file the scan read (its raw digest, size and mode). */
+function binaryExtra(entry: HashCacheEntry): ExtraManifestEntry {
+  return { uploadPath: entry.uploadPath, kind: "binary", sha256: entry.sha256, size: entry.bytes, mode: entry.mode ?? 0o644 };
+}
+
+/** Capture v2: the manifest entry of a symlink (its target as written, also when it is broken), or null when unreadable. */
+async function symlinkExtra(absolute: string, uploadPath: string, mode: number): Promise<ExtraManifestEntry | null> {
+  let target: string;
+  try {
+    target = await readlink(absolute);
+  } catch {
+    return null;
+  }
+  let broken = false;
+  try {
+    await stat(absolute);
+  } catch {
+    broken = true;
+  }
+  const clamped = clampUploadText(redactUploadText(target).text, 4_096);
+  return { uploadPath, kind: "symlink", sha256: sha256Hex(Buffer.from(clamped, "utf8")), size: Buffer.byteLength(clamped), mode: mode & 0o7777, target: clamped, broken };
+}
+
+/** One manifest line of a binary file or symlink. */
+function extraEntryJson(entry: ExtraManifestEntry): string {
+  const head = `{"path":${JSON.stringify(entry.uploadPath)},"sha256":"${entry.sha256}","size":${entry.size},"mode":${entry.mode}`;
+  if (entry.kind === "symlink") return `${head},"type":"symlink","target":${JSON.stringify(entry.target ?? "")},"broken":${entry.broken === true}}`;
+  return `${head},"binary":true,"archived":"byte_exact"}`;
+}
+
 
 /** One file as files[] carries it, re-read at upload time. */
 type UploadContent = { content: string; entry: HashCacheEntry };
@@ -3232,7 +3305,7 @@ async function readUploadContent(
           }
         }
       }
-      if (isBinary(buffer)) return null;
+      if (binaryReason(path, buffer) !== null) return null;
       const { entry, text } = redactedCacheEntry(path, buffer, signature, uploadPathFor(path, cached), metrics, { cache: texts, absolute });
       // The same digest keeps the cached entry, which the manifest may share.
       if (cached && cached.sha256 === entry.sha256 && sameFileSignature(cached, signature)) {
@@ -3267,6 +3340,9 @@ type ScanResult = {
   binaryPaths?: Map<string, number>;
   tooLargePaths?: Map<string, number>;
   cappedPaths?: string[];
+  /** Capture v2: binary files and symlinks found; `extrasScope` says whether that is all of them (a full scan) or the inspected paths only. */
+  extras: Map<string, ExtraManifestEntry>;
+  extrasScope: "full" | ReadonlySet<string>;
 };
 
 /** A changed file competing for the snapshot's content budget. */
@@ -3349,15 +3425,16 @@ async function startsBinary(absolute: string): Promise<boolean> {
   const head = Buffer.alloc(8_192);
   try {
     const read = await readInto(absolute, head);
-    return isBinary(head.subarray(0, read), read === head.length);
+    return binaryReason(absolute, head.subarray(0, read), read === head.length) !== null;
   } catch {
     return false;
   }
 }
 
 /** The manifest entry as the envelope carries it: path (redacted), sha256, size. */
-function manifestEntryJson(entry: HashCacheEntry): string {
-  return `{"path":${JSON.stringify(entry.uploadPath)},"sha256":"${entry.sha256}","size":${entry.bytes}}`;
+function manifestEntryJson(entry: HashCacheEntry | ExtraManifestEntry): string {
+  if ("kind" in entry) return extraEntryJson(entry);
+  return `{"path":${JSON.stringify(entry.uploadPath)},"sha256":"${entry.sha256}","size":${entry.bytes}${entry.mode !== undefined ? `,"mode":${entry.mode}` : ""}}`;
 }
 
 function candidateCost(entry: HashCacheEntry): number {
@@ -3465,6 +3542,8 @@ async function scanWorkspaceFull(
     binaryPaths,
     tooLargePaths,
     cappedPaths,
+    extras: context.extras,
+    extrasScope: "full",
   };
 }
 
@@ -3533,6 +3612,8 @@ async function scanDirtyPaths(
     removed: countRemoved(previous, manifest),
     deniedCount: listing.denied,
     manifestTruncated: listing.truncated || manifest.size >= MAX_FILES,
+    extras: context.extras,
+    extrasScope: new Set(targets),
   };
 }
 
@@ -3736,7 +3817,7 @@ type EnvelopeBody = {
   extras: Record<string, unknown>;
   /** Streams files[] one entry at a time through `emit`. */
   writeFiles: (emit: (file: UploadFile) => Promise<void>) => Promise<void>;
-  manifest: () => Iterable<HashCacheEntry>;
+  manifest: () => Iterable<HashCacheEntry | ExtraManifestEntry>;
   /** Computed once files[] is written, so cap omissions are known. */
   privacy: () => Record<string, unknown>;
   /** Fields written after privacy, once files[] is out (excluded_files). */
@@ -3897,6 +3978,7 @@ export class SessionUploader {
   private readonly bases: TurnBaseStore;
   private readonly onSessionClosed?: (sessionId: string) => void;
   private readonly onPathTouched?: (sessionId: string, path: string) => void;
+  private readonly onBinaryFile?: (sessionId: string, path: string) => void;
   private readonly fileUploader?: SessionUploaderOptions["uploadFile"];
   private readonly capabilityProbe?: SessionUploaderOptions["capabilities"];
   private traceSchemaCache: { version: 2 | 3; expiresAt: number } | null = null;
@@ -3945,6 +4027,7 @@ export class SessionUploader {
       });
     this.onSessionClosed = options.onSessionClosed;
     this.onPathTouched = options.onPathTouched;
+    this.onBinaryFile = options.onBinaryFile;
     this.tempDir = stateDir ? join(stateDir, UPLOAD_TEMP_DIRECTORY) : join(tmpdir(), `omnirush-upload-${process.pid}`);
     this.bases = new TurnBaseStore(
       stateDir ? join(stateDir, UPLOAD_BASE_DIRECTORY) : join(this.tempDir, UPLOAD_BASE_DIRECTORY),
@@ -4180,6 +4263,7 @@ export class SessionUploader {
       watchSetup: Promise.resolve(),
       trace: [],
       changeJournal: new Map(),
+      extras: new Map(),
       touchedPaths: new Set(),
       changeJournalBytes: 0,
       changeCaptureTail: Promise.resolve(),
@@ -5261,7 +5345,7 @@ export class SessionUploader {
       } else {
         const buffer = await readFile(absolute);
         this.metrics.fileReads += 1;
-        if (buffer.length > MAX_UPLOAD_FILE_BYTES || isBinary(buffer)) {
+        if (buffer.length > MAX_UPLOAD_FILE_BYTES || binaryReason(path, buffer) !== null) {
           if (written) {
             state.turnWrittenPaths.set(path, Date.now());
             state.turnSkipped.set(path, file.mtimeMs);
@@ -5369,6 +5453,15 @@ export class SessionUploader {
       } finally {
         releaseScan();
       }
+      // Capture v2: the binary files and symlinks the manifest lists next to the text files.
+      const extraEntries = scan.extrasScope === "full" ? new Map(scan.extras) : new Map(state.extras);
+      if (scan.extrasScope !== "full") {
+        for (const path of scan.extrasScope) extraEntries.delete(path);
+        for (const path of ignored) extraEntries.delete(path);
+        for (const [path, entry] of scan.extras) extraEntries.set(path, entry);
+      }
+      // A binary file goes to the byte-exact project archive (never as text).
+      for (const [path, entry] of extraEntries) if (entry.kind === "binary") this.onBinaryFile?.(state.id, path);
       // What moved on disk since the last snapshot, where no watcher may have
       // seen it (a polled workspace). Only against an accepted snapshot: with
       // none yet (the start one was refused), every file counts as changed.
@@ -5432,6 +5525,7 @@ export class SessionUploader {
       let fixedBytes = serializedBytes(extras) + SNAPSHOT_WRAPPER_MARGIN_BYTES;
       for (const file of leading) fixedBytes += serializedBytes(file) + 1;
       for (const entry of scan.manifest.values()) fixedBytes += Buffer.byteLength(manifestEntryJson(entry)) + 1;
+      for (const entry of extraEntries.values()) fixedBytes += Buffer.byteLength(manifestEntryJson(entry)) + 1;
       const budget = Math.max(0, this.snapshotMaxBytes - fixedBytes);
       const selection = selectSnapshotContent(candidates, budget);
       const capOmitted: SnapshotCandidate[] = [];
@@ -5477,7 +5571,10 @@ export class SessionUploader {
             await this.bases.writable();
           }
         },
-        manifest: () => manifest.values(),
+        manifest: function* () {
+          yield* manifest.values();
+          yield* extraEntries.values();
+        },
         privacy: () => ({
           ...PRIVACY_POLICY,
           denied_file_count: scan.deniedCount,
@@ -5518,6 +5615,7 @@ export class SessionUploader {
       // next change snapshot reports exactly what moved since this one.
       accepted = true;
       state.manifest = manifest;
+      state.extras = extraEntries;
       state.turnManifest ??= turnBaseline(manifest, state.turnStartedAt, [previous]);
       state.listing = { denied: scan.deniedCount, truncated: scan.manifestTruncated };
       state.lastHead = git?.commit ?? null;

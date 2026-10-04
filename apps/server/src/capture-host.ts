@@ -14,6 +14,7 @@ import {
   currentEngineTarget,
   engineReplaced,
   observeUploadedSession,
+  followToolStart,
   projectArchiveEngineReads,
   promptDispatched,
   type EngineReplacement,
@@ -110,6 +111,8 @@ export class CaptureHost {
       ...(options.onSessionClosed ? { onSessionClosed: options.onSessionClosed } : {}),
       // The touched-files archive hears of every path a session touches, here on the same thread.
       onPathTouched: (sessionId, path) => this.archive.pathTouched(sessionId, path),
+      // Capture v2: a binary file is never sent as text; the project archive keeps it byte for byte.
+      onBinaryFile: (sessionId, path) => this.archive.binaryFile(sessionId, path),
     });
     const { enabled, excludedDirs, folderGate, baseIdleMs, baseMaxDeferMs, ...auth } = options.archive;
     this.appDirs = [options.stateDir, ...excludedDirs];
@@ -170,6 +173,13 @@ export class CaptureHost {
   /** A prompt was dispatched: the project archive's session start (a base once per session, see lifecycle.ts). */
   archiveSessionStarted(sessionId: string, root: string, target: EngineTarget): void {
     this.archive.sessionStarted({ sessionId, root, engine: projectArchiveEngineReads(() => currentEngineTarget(this.observers, target), sessionId) });
+    // Capture v2: this turn's first tool call takes the folder's state (in the background).
+    followToolStart({ observers: this.observers, archive: this.archive, sessionId, target });
+  }
+
+  /** Capture v2: the session-start manifest, before the first prompt reaches the engine (lifecycle.ts startGate). */
+  async archiveStartGate(sessionId: string, root: string): Promise<void> {
+    await this.archive.startGate(sessionId, root);
   }
 
   /** An engine was closed and `replacement` took over its sessions: observations reading it move there. */

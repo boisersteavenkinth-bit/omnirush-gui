@@ -13,7 +13,7 @@
  * lifecycle.ts; see README.md.
  */
 import { randomBytes, randomUUID } from "node:crypto";
-import { mkdir, readdir, readFile, rename, rm, stat, statfs } from "node:fs/promises";
+import { lstat, mkdir, readdir, readFile, realpath, rename, rm, stat, statfs } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 import { z } from "zod";
 
@@ -35,11 +35,13 @@ import {
   baselineChunks,
   compareArchivePaths,
   computeArchiveDelta,
+  emptyExcludedCounts,
   isArchiveDeltaEmpty,
   manifestSource,
   parseBaselineText,
   readArchiveGit,
   scanArchiveTree,
+  statFields,
   type ArchiveEntry,
   type ArchiveGit,
   type ArchiveKind,
@@ -53,7 +55,22 @@ import { POLICY_OFF, type ArchivePolicy } from "./policy.js";
 import { SEAL_CONTENT } from "./seal.js";
 import { findLockfiles, scanTouchedFiles, touchedChange, TouchedPathStore, type TouchedScanResult } from "./touched.js";
 import { isOutsideArchivePath, outsideSourcesOf, scanOutsideFiles } from "./outside.js";
-import { inRegenerableDir } from "../session-uploader.js";
+import { ATTACHMENTS_ROOT_NAME, AttachmentStore, type AttachmentRecord, type AttachmentSource } from "./attachments.js";
+import {
+  ARCHIVE_SCHEMA_V2,
+  captureV2Override,
+  ExcludedList,
+  START_GATE_MS,
+  STATE_MEMBER,
+  stateDocument,
+  type StartCapture,
+  type StateKind,
+} from "./capture-v2.js";
+import { discoverRepos } from "./repos.js";
+import { inRegenerableDir, isUploadPathDenied } from "../session-uploader.js";
+
+/** Capture v2 (#14): a touched file the folder scan did not hold larger than this is left out, with its path, size and hash. */
+const MAX_TOUCHED_FILE_BYTES = 1024 * 1024 * 1024;
 import {
   ARCHIVE_MARKER_NOT_ALLOWED,
   ArchiveUploader,
@@ -219,6 +236,8 @@ const sessionStateSchema = z.object({
    * updated_at, and keeps that time from then on.
    */
   last_activity_at: z.string().optional(),
+  /** Capture v2 (capture-v2.ts): this chain's archives are byte-exact states with a state.json. Set at the base. */
+  v2: z.boolean().optional(),
 }).transform((state) => ({ ...state, last_activity_at: state.last_activity_at ?? state.updated_at }));
 type SessionState = z.infer<typeof sessionStateSchema>;
 
@@ -243,7 +262,7 @@ const queueRecordSchema = z.object({
   request: createRequestSchema,
   sealed_file: z.string(),
   /** A delta's trigger (1.1.0 on): how a refused final is told from a broken chain. */
-  trigger: z.enum(["turn", "final"]).optional(),
+  trigger: z.enum(["turn", "final", "pre_tool"]).optional(),
   created_at: z.string(),
   attempts: z.number().int().nonnegative(),
   next_attempt_at: z.string().nullable(),
@@ -305,7 +324,44 @@ type CaptureOptions = {
   ended?: boolean;
   /** Cancels the capture until its commit. */
   signal?: AbortSignal;
+  /** Capture v2: the turn a pre_tool state belongs to (the turn in progress). */
+  stateTurn?: number;
 };
+
+/** Capture v2: the session-start scan taken before the first prompt reached the model (startManifest). */
+type Prescan = {
+  root: string;
+  startedAt: number;
+  /** Resolves with the scan, or null when there is nothing to take (not archivable, a base exists). */
+  work: Promise<PrescanResult | null>;
+  /** "complete" when the scan finished within the start gate's time cap. */
+  capture: StartCapture;
+  timer: ReturnType<typeof setTimeout> | null;
+};
+
+type PrescanResult = {
+  marker: string;
+  scan: { entries: ScannedEntry[]; excluded: ExcludedCounts; ignored: number };
+  cache: ArchiveHashCache;
+  excludedList: ExcludedList;
+  ms: number;
+};
+
+/** A prescan that no base takes is dropped after this long. */
+const PRESCAN_TTL_MS = 10 * 60_000;
+
+/** The `.git` markers of a full scan (the root's and nested repositories'), for repos.ts. */
+function repoMarkers(entries: readonly ArchiveEntry[]): Array<{ path: string; gitfile: boolean }> {
+  const markers: Array<{ path: string; gitfile: boolean }> = [];
+  for (const entry of entries) {
+    if (entry.type === "symlink") continue;
+    const parts = entry.path.split("/");
+    if (parts[parts.length - 1] !== ".git" || parts.slice(0, -1).includes(".git")) continue;
+    if (parts[0] === ATTACHMENTS_ROOT_NAME || isOutsideArchivePath(entry.path)) continue;
+    markers.push({ path: entry.path, gitfile: entry.type === "file" });
+  }
+  return markers;
+}
 
 export class SessionArchiver {
   private readonly dir: string;
@@ -348,6 +404,12 @@ export class SessionArchiver {
   private finalsRefused = false;
   /** The paths each touched-files session touched (touched.ts). */
   private readonly touched: TouchedPathStore;
+  /** Capture v2: staged prompt attachments (attachments.ts). */
+  private readonly attachments: AttachmentStore;
+  /** Capture v2: start scans waiting for their session's base. */
+  private readonly prescans = new Map<string, Prescan>();
+  /** Capture v2: the sessions whose chain is v2 (as last loaded or saved). */
+  private readonly v2Sessions = new Set<string>();
 
   constructor(options: SessionArchiverOptions) {
     const stateDir = resolve(options.stateDir);
@@ -388,6 +450,7 @@ export class SessionArchiver {
     this.folderGate = options.folderGate;
     this.appDirs = [stateDir, ...(options.excludedDirs ?? []).map((dir) => resolve(dir))];
     this.includeCredentials = options.archiveIncludeCredentialFiles === true;
+    this.attachments = new AttachmentStore(join(this.dir, "attachments"), (path) => !this.includeCredentials && isUploadPathDenied(path), { appDirs: this.appDirs, includeCredentialFiles: this.includeCredentials });
     this.touched = new TouchedPathStore(this.dirs.touched, {
       ready: () => this.start(),
       modeOf: async (sessionId) => {
@@ -557,6 +620,131 @@ export class SessionArchiver {
     this.touched.note(sessionId, typeof path === "string" && isAbsolute(path) ? resolve(path) : path);
   }
 
+  /**
+   * Capture v2, #8: the session-start manifest, before the first prompt
+   * reaches the model. Stats and hashes the folder as its base will hold it
+   * (with the root's hash cache: an unchanged tree reads no file), local work
+   * only: no key fetch, no upload. Resolves within `capMs` (START_GATE_MS):
+   * "complete" when the manifest was taken by then, "partial" when the cap
+   * ran out first (the scan goes on and the base still uses it, saying
+   * `start_capture: "partial"`), "skipped" when there is nothing to take (a
+   * base exists, the folder is refused, capture v2 is off). Never throws.
+   * The base archive packs these very entries, and pass 2 checks each file's
+   * bytes against the hash taken here (a file changed since is listed as
+   * unstable), so the base is the folder as it was before the prompt.
+   */
+  async startManifest(sessionId: string, root: string, capMs = START_GATE_MS): Promise<StartCapture | "skipped"> {
+    if (!SESSION_ID_PATTERN.test(sessionId) || this.disabled || !this.uploader.configured) return "skipped";
+    const override = captureV2Override();
+    if (override === false || (override === null && this.policy && !this.policy.value.captureV2)) return "skipped";
+    let prescan = this.prescans.get(sessionId);
+    if (!prescan) {
+      const startedAt = Date.now();
+      const created: Prescan = { root, startedAt, work: Promise.resolve(null), capture: "partial", timer: null };
+      created.work = this.prescanWork(sessionId, root, startedAt).catch((error: unknown) => {
+        this.log("warn", "OmniRush start manifest failed", { sessionId, error: errorSummary(error) });
+        return null;
+      });
+      created.timer = setTimeout(() => {
+        if (this.prescans.get(sessionId) === created) this.prescans.delete(sessionId);
+      }, PRESCAN_TTL_MS);
+      created.timer.unref?.();
+      this.prescans.set(sessionId, created);
+      prescan = created;
+    }
+    const current = prescan;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const outcome = await Promise.race([
+      current.work.then((result) => (result ? "complete" as const : "skipped" as const)),
+      new Promise<"partial">((resolvePromise) => {
+        timer = setTimeout(() => resolvePromise("partial"), Math.max(0, capMs - (Date.now() - current.startedAt)));
+        timer.unref?.();
+      }),
+    ]);
+    clearTimeout(timer);
+    if (outcome === "complete") current.capture = "complete";
+    if (outcome === "skipped" && this.prescans.get(sessionId) === current) this.dropPrescan(sessionId);
+    return outcome;
+  }
+
+  /** Whether a start manifest is waiting for this session's base (the lifecycle then packs the base at once). */
+  hasStartManifest(sessionId: string): boolean {
+    return this.prescans.has(sessionId);
+  }
+
+  private dropPrescan(sessionId: string): void {
+    const prescan = this.prescans.get(sessionId);
+    if (prescan?.timer) clearTimeout(prescan.timer);
+    this.prescans.delete(sessionId);
+  }
+
+  private async prescanWork(sessionId: string, root: string, startedAt: number): Promise<PrescanResult | null> {
+    await this.start();
+    const state = await this.loadSession(sessionId);
+    if (state && (state.next_sequence > 0 || state.stopped || state.marker === TOUCHED_MARKER)) return null;
+    const real = await realpath(root).catch(() => null);
+    if (!real) return null;
+    // The local part of the gate only: a git root, else a folder the folder refusals accept.
+    const gate = await isArchivableProject(real, this.detectors, { appDirs: this.appDirs });
+    let marker = gate.archivable && gate.marker ? gate.marker : null;
+    if (!marker) {
+      const plain = await isArchivableProject(real, [async (candidate) => ((await folderRootRefusal(candidate, this.folderGate)) ? null : { archivable: true, reason: FOLDER_MARKER, marker: FOLDER_MARKER })], { appDirs: this.appDirs });
+      if (!plain.archivable) return null;
+      marker = FOLDER_MARKER;
+    }
+    const cache = await this.loadHashCache(stateKey(real));
+    const excludedList = new ExcludedList();
+    const scan = await this.scanWholeFolder(real, marker, sessionId, cache, excludedList, true);
+    const prescan = this.prescans.get(sessionId);
+    if (prescan) prescan.root = real;
+    return { marker, scan, cache, excludedList, ms: Date.now() - startedAt };
+  }
+
+  /**
+   * Capture v2, #9: the folder at a turn's first tool call, when anything
+   * changed since the chain's last state (the user's edits between turns, a
+   * command run outside the agent). A delta numbered with the last archived
+   * turn (like a final archive), `trigger: "pre_tool"`; `stateTurn` is the
+   * turn in progress. Only for a v2 chain with a base.
+   */
+  captureState(sessionId: string, stateTurn: number): Promise<CaptureResult> {
+    return this.guard("delta", sessionId, stateTurn, async () => this.withSession(sessionId, async () => {
+      const generation = this.generation;
+      if (this.disabled || !this.uploader.configured) return { status: "skipped", reason: "disabled" };
+      const state = await this.loadSession(sessionId);
+      if (!state || state.next_sequence === 0 || state.last_turn === null) return { status: "skipped", reason: "no_base" };
+      if (!state.v2) return { status: "skipped", reason: "not_archivable" };
+      if (state.stopped || this.stoppedSessions.has(sessionId)) return { status: "skipped", reason: "stopped" };
+      if (!(await this.chainAllowed(state, generation))) return { status: "skipped", reason: "not_archivable" };
+      const key = await this.currentKey();
+      if (key === "disabled") return { status: "skipped", reason: "disabled" };
+      if (key === "unavailable") return { status: "skipped", reason: "unavailable" };
+      return this.captureArchive(state, "delta", state.last_turn, key, generation, { trigger: "pre_tool", stateTurn });
+    }));
+  }
+
+  /**
+   * Capture v2, #11: the attachments of a settled turn's user messages
+   * (attachments.ts), staged now and archived by the session's next capture
+   * under `__attachments__/`. Never throws.
+   */
+  async recordAttachments(sessionId: string, root: string, sources: readonly AttachmentSource[]): Promise<AttachmentRecord[]> {
+    if (sources.length === 0 || this.disabled || !SESSION_ID_PATTERN.test(sessionId) || this.stoppedSessions.has(sessionId)) return [];
+    await this.start();
+    const state = await this.loadSession(sessionId);
+    if (!state?.v2 || state.stopped) return [];
+    return this.attachments.add(sessionId, state.root || root, sources);
+  }
+
+  /**
+   * Capture v2: a binary file of the workspace the session uploader found
+   * (never sent as text). A v2 chain archives it byte for byte, also a
+   * touched-files chain (it is kept like a touched path); nothing otherwise.
+   */
+  recordBinary(sessionId: string, path: string): void {
+    if (this.v2Sessions.has(sessionId)) this.recordTouched(sessionId, path);
+  }
+
   /** The session is not archived (a child session): its reported paths go. */
   forgetTouched(sessionId: string): void {
     void this.touched.forget(sessionId).catch((error: unknown) => this.log("warn", "OmniRush touched-files paths could not be removed", { sessionId, error: errorSummary(error) }));
@@ -656,6 +844,8 @@ export class SessionArchiver {
     this.policyProbe = null;
     this.stoppedSessions.clear();
     this.resettingSessions.clear();
+    this.v2Sessions.clear();
+    for (const sessionId of [...this.prescans.keys()]) this.dropPrescan(sessionId);
     this.finalsAccepted = false;
     this.finalsRefused = false;
     this.uploader.setAccessToken(null);
@@ -750,6 +940,7 @@ export class SessionArchiver {
     const touched = gate.marker === TOUCHED_MARKER;
     // A session that is not archived keeps no touched paths; any other keeps them.
     if (!gate.archivable || !gate.marker) {
+      this.dropPrescan(sessionId);
       await this.touched.forget(sessionId);
       return { status: "skipped", reason: "not_archivable" };
     }
@@ -757,11 +948,13 @@ export class SessionArchiver {
     const fetched = probe.fetched ?? await this.uploader.fetchKey();
     if (!probe.fetched) this.rememberPolicy(fetched, generation, false);
     if (fetched.status === "disabled") {
+      this.dropPrescan(sessionId);
       await this.disable(fetched.code);
       return { status: "skipped", reason: "disabled" };
     }
     // The policy was turned off since the answer this folder was let in on.
     if (fetched.status === "ok" && !markerAllowed(gate.marker, fetched.policy)) {
+      this.dropPrescan(sessionId);
       await this.touched.forget(sessionId);
       return { status: "skipped", reason: "not_archivable" };
     }
@@ -778,7 +971,10 @@ export class SessionArchiver {
       updated_at: this.now().toISOString(),
       ...(touched ? { turn_seen: turn } : {}),
       last_activity_at: this.now().toISOString(),
+      // Capture v2 when the server offers it (or the override says so); the chain keeps it.
+      ...((captureV2Override() ?? (fetched.status === "ok" && fetched.policy.captureV2 === true)) ? { v2: true } : {}),
     };
+    if (touched) this.dropPrescan(sessionId);
     this.touched.track(sessionId);
     if (fetched.status === "unavailable") {
       // Remembered with next_sequence 0: the next captureDelta tries the base again (a folder passes the gate and the policy again).
@@ -958,8 +1154,13 @@ export class SessionArchiver {
     const sessionKey = stateKey(sessionId);
     const rootKey = stateKey(state.root);
     const { signal } = options;
-    const cache = await this.loadHashCache(rootKey);
+    // Capture v2: a base packs the start manifest taken before the first prompt (startManifest).
+    const prescan = kind === "base" && state.marker !== TOUCHED_MARKER ? await this.takePrescan(state.session_id, state.root, state.marker, state.v2 === true) : null;
+    const cache = prescan ? prescan.result.cache : await this.loadHashCache(rootKey);
     const touched = state.marker === TOUCHED_MARKER;
+    const v2 = state.v2 === true;
+    const excludedList = v2 ? (prescan?.result.excludedList ?? new ExcludedList()) : undefined;
+    let fullScan: readonly ArchiveEntry[] = [];
     let files: ScannedEntry[];
     let deleted: string[] | undefined;
     let excluded: ExcludedCounts;
@@ -977,11 +1178,16 @@ export class SessionArchiver {
       // Every path the session touched and every lockfile, outside the
       // regenerable folders, and every file the chain holds (to see it go).
       // Gitignored files the agent touched are archived too.
-      const paths = new Set([...(await this.touched.snapshot(sessionId)), ...(await findLockfiles(state.root, signal))].filter((path) => !inRegenerableDir(path)));
-      for (const entry of baseline) if (!isOutsideArchivePath(entry.path)) paths.add(entry.path);
+      const touchedPaths = [...(await this.touched.snapshot(sessionId))];
+      const lockfiles = await findLockfiles(state.root, signal);
+      // Capture v2 (#14): a touched file in a regenerable folder (a venv's tool, a cached dataset) is archived too, up to the per-file cap.
+      const paths = new Set([...touchedPaths.filter((path) => (v2 ? !path.split("/").slice(0, -1).includes(".git") : !inRegenerableDir(path))), ...lockfiles.filter((path) => !inRegenerableDir(path))]);
+      for (const entry of baseline) if (!isOutsideArchivePath(entry.path) && !entry.path.startsWith(`${ATTACHMENTS_ROOT_NAME}/`)) paths.add(entry.path);
       const scan = await scanTouchedFiles(state.root, paths, { excludedDirs: this.appDirs, includeCredentialFiles: this.includeCredentials, includeIgnored: true, hashCache: cache, ...(signal ? { signal } : {}) });
+      if (excludedList) this.capOversized(scan, new Set(), excludedList);
       // The files outside the workspace the session touched (outside.ts).
       mergeScans(scan, await this.scanOutside(state, baseline, signal));
+      if (v2) mergeScans(scan, await this.attachmentEntries(sessionId));
       const change = touchedChange(baseline, scan);
       if (change.files.length === 0 && change.deleted.length === 0) {
         if (cache.changed) await this.saveHashCache(rootKey, cache);
@@ -994,20 +1200,12 @@ export class SessionArchiver {
       ignored = scan.ignored;
       next = change.next;
     } else {
-      const scanning = scanArchiveTree(state.root, { excludedDirs: this.appDirs, includeCredentialFiles: this.includeCredentials, hashCache: cache, ...(signal ? { signal } : {}) });
       // A plain folder sends no git block (workspace.git null), even inside a larger repository.
       const withGit = state.marker !== FOLDER_MARKER;
       const gitReading = kind === "base" && withGit ? readArchiveGit(state.root) : null;
-      const scan = await scanning;
-      // What the ignore rules left out is still archived when the agent
-      // touched it or it is a lockfile, outside the regenerable folders.
-      const held = new Set(scan.entries.map((entry) => entry.path));
-      const keepers = [...(await this.touched.snapshot(sessionId)), ...(await findLockfiles(state.root, signal))]
-        .filter((path) => !held.has(path) && !inRegenerableDir(path));
-      if (keepers.length > 0) {
-        const kept = await scanTouchedFiles(state.root, keepers, { excludedDirs: this.appDirs, includeCredentialFiles: this.includeCredentials, includeIgnored: true, hashCache: cache, ...(signal ? { signal } : {}) });
-        if (kept.entries.length > 0) scan.entries = [...scan.entries, ...kept.entries].sort((left, right) => compareArchivePaths(left.path, right.path));
-      }
+      const scan = prescan
+        ? { entries: [...prescan.result.scan.entries], excluded: { ...prescan.result.scan.excluded }, ignored: prescan.result.scan.ignored }
+        : await this.scanWholeFolder(state.root, state.marker, sessionId, cache, excludedList, v2, signal);
       const baseline = kind === "delta" ? await this.readBaseline(state) : [];
       if (!baseline) {
         await this.markStopped(sessionId, "baseline_missing");
@@ -1015,6 +1213,8 @@ export class SessionArchiver {
       }
       // The files outside the workspace the session touched (outside.ts).
       mergeScans(scan, await this.scanOutside(state, baseline, signal));
+      if (v2) mergeScans(scan, await this.attachmentEntries(sessionId));
+      fullScan = scan.entries;
       files = scan.entries;
       excluded = scan.excluded;
       ignored = scan.ignored;
@@ -1034,7 +1234,30 @@ export class SessionArchiver {
     const archiveId = this.random.uuid();
     const sequence = state.next_sequence;
     const createdAt = this.now();
+    let extraMembers: Array<{ name: string; content: Buffer }> = [];
+    if (v2 && excludedList) {
+      const stateKind: StateKind = kind === "base" ? "start" : options.trigger === "pre_tool" ? "pre_tool" : options.trigger === "final" ? "final" : "after";
+      const held = new Set(files.map((entry) => entry.path));
+      const attachments = (await this.attachments.list(sessionId)).filter((record) => held.has(record.path));
+      const listed = touched ? next : fullScan;
+      extraMembers = [{
+        name: STATE_MEMBER,
+        content: stateDocument({
+          archiveId,
+          kind: stateKind,
+          turn: stateKind === "pre_tool" ? options.stateTurn ?? turn + 1 : turn,
+          ...(options.reason ? { reason: options.reason } : {}),
+          ...(kind === "base" ? { startCapture: prescan?.capture ?? "partial", startCaptureMs: prescan?.result.ms ?? 0 } : {}),
+          // Every repository of the session (repos.ts), whatever the chain's marker.
+          repos: await discoverRepos(state.root, repoMarkers(touched ? [] : fullScan)),
+          excluded: excludedList,
+          scrubbed: listed.filter((entry) => entry.scrubbed).map((entry) => entry.path),
+          attachments,
+        }),
+      }];
+    }
     const manifest = manifestSource({
+      ...(v2 ? { schema: ARCHIVE_SCHEMA_V2 } : {}),
       kind,
       archiveId,
       sessionId,
@@ -1079,6 +1302,7 @@ export class SessionArchiver {
           {
             root: state.root,
             manifest,
+            extraMembers,
             createdAtSeconds: Math.floor(createdAt.getTime() / 1000),
             entries: files,
             ...(signal ? { signal } : {}),
@@ -1193,6 +1417,92 @@ export class SessionArchiver {
     } finally {
       reservation.release();
     }
+  }
+
+  /**
+   * The start manifest of the session (startManifest), once its scan is done,
+   * when it was taken of this root for this marker; it is consumed. A v1
+   * chain of a plain folder scans again (a v2 scan leaves the regenerable
+   * folders out).
+   */
+  private async takePrescan(sessionId: string, root: string, marker: string, v2: boolean): Promise<{ result: PrescanResult; capture: StartCapture } | null> {
+    const prescan = this.prescans.get(sessionId);
+    if (!prescan) return null;
+    this.dropPrescan(sessionId);
+    const result = await prescan.work;
+    if (!result || result.marker !== marker || resolve(prescan.root) !== resolve(root)) return null;
+    if (!v2 && marker === FOLDER_MARKER) return null;
+    return { result, capture: prescan.capture };
+  }
+
+  /**
+   * The whole-folder scan of a chain (git or plain folder): pass 1 with the
+   * exclusions, then what the ignore rules left out that is still archived:
+   * the files the agent touched and every lockfile. A capture v2 scan also leaves the regenerable folders of a plain
+   * folder out (with their reason), keeps a touched file in a regenerable
+   * folder up to the per-file cap, and lists every left-out entry.
+   */
+  private async scanWholeFolder(
+    root: string,
+    marker: string,
+    sessionId: string,
+    cache: ArchiveHashCache,
+    excludedList: ExcludedList | undefined,
+    v2: boolean,
+    signal?: AbortSignal,
+  ): Promise<{ entries: ScannedEntry[]; excluded: ExcludedCounts; ignored: number }> {
+    const scan = await scanArchiveTree(root, {
+      excludedDirs: this.appDirs,
+      includeCredentialFiles: this.includeCredentials,
+      hashCache: cache,
+      ...(excludedList ? { excludedList } : {}),
+      ...(v2 && marker === FOLDER_MARKER ? { pruneRegenerable: true } : {}),
+      ...(signal ? { signal } : {}),
+    });
+    // What the ignore rules left out is still archived when the agent
+    // touched it or it is a lockfile, outside the regenerable folders.
+    const held = new Set(scan.entries.map((entry) => entry.path));
+    const touchedPaths = [...(await this.touched.snapshot(sessionId))];
+    const keepers = [
+      ...touchedPaths.filter((path) => (v2 ? !path.split("/").slice(0, -1).includes(".git") : !inRegenerableDir(path))),
+      ...(await findLockfiles(root, signal)).filter((path) => !inRegenerableDir(path)),
+    ].filter((path) => !held.has(path));
+    if (keepers.length > 0) {
+      const kept = await scanTouchedFiles(root, keepers, { excludedDirs: this.appDirs, includeCredentialFiles: this.includeCredentials, includeIgnored: true, hashCache: cache, ...(signal ? { signal } : {}) });
+      if (excludedList) this.capOversized(kept, held, excludedList);
+      for (const entry of kept.entries) excludedList?.delete(entry.path);
+      if (kept.entries.length > 0) scan.entries = [...scan.entries, ...kept.entries].sort((left, right) => compareArchivePaths(left.path, right.path));
+    }
+    return scan;
+  }
+
+  /**
+   * Capture v2 (#14): a touched file the folder scan did not hold (gitignored,
+   * in a regenerable folder) larger than the per-file cap is left out with
+   * its path, size and hash.
+   */
+  private capOversized(scan: { entries: ScannedEntry[] }, held: ReadonlySet<string>, excludedList: ExcludedList): void {
+    scan.entries = scan.entries.filter((entry) => {
+      if (held.has(entry.path) || entry.size <= MAX_TOUCHED_FILE_BYTES) return true;
+      excludedList.add({ path: entry.path, type: "file", reason: "too_large", size: entry.size, ...(entry.sha256 ? { sha256: entry.sha256 } : {}) });
+      return false;
+    });
+  }
+
+  /** Capture v2 (#11): the session's staged attachments as archive entries read from their staged copies. */
+  private async attachmentEntries(sessionId: string): Promise<TouchedScanResult> {
+    const entries: ScannedEntry[] = [];
+    for (const record of await this.attachments.list(sessionId)) {
+      try {
+        const stats = await lstat(record.blob, { bigint: true });
+        if (!stats.isFile() || Number(stats.size) !== record.size) continue;
+        entries.push({ path: record.path, type: "file", size: record.size, sha256: record.sha256, source: record.blob, ...statFields(stats), mode: 0o644 });
+      } catch {
+        // Gone (signed out meanwhile): not archived.
+      }
+    }
+    entries.sort((left, right) => compareArchivePaths(left.path, right.path));
+    return { entries, gone: new Set(), excluded: emptyExcludedCounts(), ignored: 0 };
   }
 
   /**
@@ -1540,11 +1850,15 @@ export class SessionArchiver {
 
   private async loadSession(sessionId: string): Promise<SessionState | null> {
     const parsed = sessionStateSchema.safeParse(await readJsonFile(this.sessionPath(sessionId)));
-    return parsed.success && parsed.data.session_id === sessionId ? parsed.data : null;
+    const state = parsed.success && parsed.data.session_id === sessionId ? parsed.data : null;
+    if (state?.v2 && !state.stopped) this.v2Sessions.add(sessionId);
+    return state;
   }
 
   private async saveSession(state: SessionState): Promise<void> {
     await writeJsonAtomic(this.sessionPath(state.session_id), state);
+    if (state.v2 && !state.stopped && !state.ended) this.v2Sessions.add(state.session_id);
+    else this.v2Sessions.delete(state.session_id);
   }
 
   private async loadHashCache(rootKey: string): Promise<ArchiveHashCache> {

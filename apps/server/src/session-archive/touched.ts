@@ -132,10 +132,13 @@ const LOCKFILE_NAMES = new Set([
   "Cargo.lock", "poetry.lock", "Pipfile.lock", "uv.lock", "pdm.lock", "pixi.lock", "conda-lock.yml",
   "Gemfile.lock", "composer.lock", "go.sum", "go.work.sum", "mix.lock", "pubspec.lock", "Package.resolved",
   "packages.lock.json", "gradle.lockfile", "flake.lock", "Podfile.lock", "Cartfile.resolved",
+  // Capture v2 (#4): more ecosystems' pins.
+  "renv.lock", "Manifest.toml", "paket.lock", "stack.yaml.lock", "cabal.project.freeze", "shard.lock",
+  "requirements.lock", "requirements-dev.lock", "vcpkg-lock.json", "MODULE.bazel.lock",
 ]);
-const LOCKFILE_MAX_DEPTH = 6;
-const LOCKFILE_MAX_DIRS = 5_000;
-const LOCKFILE_MAX_FOUND = 200;
+const LOCKFILE_MAX_DEPTH = 8;
+const LOCKFILE_MAX_DIRS = 20_000;
+const LOCKFILE_MAX_FOUND = 1_000;
 
 /**
  * The lockfiles under `root`, workspace-relative and portable: a bounded walk

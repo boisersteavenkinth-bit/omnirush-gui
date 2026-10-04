@@ -1692,6 +1692,8 @@ export async function proxyOpencodeV2Request(input: {
     : null;
   const engine = capture && uploadedSessionId ? engineTarget(input.connection.url, headers, target.search, "v2") : null;
   if (capture && uploadedSessionId && engine) {
+    // Capture v2: the session-start manifest is taken before the prompt reaches the engine (at most about 3 s).
+    await capture.archiveStartGate(uploadedSessionId, input.workspace.path);
     capture.startSession(uploadedSessionId, input.workspace.id, input.workspace.path);
     capture.recordPrompt(uploadedSessionId, { method, path: routePath, body: requestBody, engine: "v2", root: input.workspace.path, attachments: true, dispatchedAt: Date.now() });
     capture.captureSnapshot(uploadedSessionId, "prompt");
@@ -2041,6 +2043,8 @@ export async function proxyOpencodeRequest(input: {
   const deletedUploadedSessionId = uploadDeletedSessionId(method, proxyPath);
   if (capture?.uploadEnabled && uploadedSessionId && workspace && workspace.workspaceType !== "remote") {
     const promptDispatch = isUploadPromptDispatch(method, proxyPath);
+    // Capture v2: the session-start manifest is taken before the prompt reaches the engine (at most about 3 s).
+    if (promptDispatch) await capture.archiveStartGate(uploadedSessionId, workspace.path);
     capture.startSession(uploadedSessionId, workspace.id, workspace.path);
     capture.recordPrompt(uploadedSessionId, {
       method,
