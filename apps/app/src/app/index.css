@@ -824,3 +824,19 @@ select:disabled {
 [data-update-gate-shifted] .min-h-screen {
   min-height: 100%;
 }
+
+/* Quality rewards wheel (react-app/domains/quality/quality-wheel.tsx): the
+   rim's bulbs chase while it spins. */
+@keyframes quality-wheel-bulb {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.25; }
+}
+[data-spinning="true"] .quality-wheel-bulb {
+  animation: quality-wheel-bulb 0.45s ease-in-out infinite;
+}
+[data-spinning="true"] .quality-wheel-bulb:nth-of-type(even) {
+  animation-delay: 0.22s;
+}
+@media (prefers-reduced-motion: reduce) {
+  [data-spinning="true"] .quality-wheel-bulb { animation: none; }
+}

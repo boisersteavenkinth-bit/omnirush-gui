@@ -2150,6 +2150,20 @@ const desktopCommandHandlers = {
   "omnirushAccountStatus": async (event, ...args) => {
       return omnirushAccountStore.status();
   },
+  // Quality rewards: the wheel's segments and recent sessions, spin totals, and one spin with the device
+  // credential (X-OmniRush-Client like every account request). A refusal
+  // (409 no_spins / wheel_resting / quality_rewards_off) comes back as a
+  // value, not a thrown error, so the dialog can say which one it was.
+  "omnirushQualityDetails": async () => {
+      return omnirushAccountStore.qualityDetails();
+  },
+  "omnirushQualitySpins": async () => {
+      return omnirushAccountStore.qualitySpinTotals();
+  },
+  "omnirushQualitySpin": async (event, ...args) => {
+      const input = args[0] && typeof args[0] === "object" ? args[0] : {};
+      return omnirushAccountStore.spinQuality({ idempotencyKey: typeof input.idempotencyKey === "string" ? input.idempotencyKey : undefined });
+  },
   "omnirushAccountConnect": async (event, ...args) => {
       const input = args[0] ?? {};
       const result = await omnirushAccountStore.authorize({

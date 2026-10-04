@@ -201,6 +201,100 @@ export type OmniRushUpdateGateState = {
   source: "profile" | "header" | "rejection" | null;
 };
 
+export type OmniRushQualityTier = "new" | "standard" | "gold" | "coaching" | "limited";
+
+/**
+ * Quality rewards (/device/me `quality`). Absent or null: the feature is
+ * off and the app shows nothing. `preview`: spins pay 0 tokens.
+ */
+export type OmniRushAccountQuality = {
+  tier: OmniRushQualityTier;
+  /** 0..1 */
+  score: number;
+  /** Below 1 while "limited" and the cut is in force. */
+  tokensMultiplier: number;
+  spinsAvailable: number;
+  /** Of `spinsAvailable`, those earned by reproducible sessions (always payable). */
+  reproSpinsAvailable: number;
+  /** UTC ISO 8601, the soonest expiry. */
+  spinsExpireAt: string | null;
+  nextTierHint: string | null;
+  tips: string[];
+  /** Shown once per `id`; the same as `notices[0]`. */
+  notice: OmniRushQualityNotice | null;
+  /** Newest first, up to 5. */
+  notices: OmniRushQualityNotice[];
+  mode: "shadow" | "enforce";
+  /** The daily budget is spent: only reproducible spins can be spun until tomorrow. */
+  resting: boolean;
+  preview: boolean;
+  /** Consecutive UTC days with a reproducible session. */
+  streakDays: number;
+  /** Extra spins per reproducible good session right now. */
+  streakMultiplier: number;
+  streakNext: { days: number; bonusSpins: number } | null;
+  /** How close the latest session is to earning a spin (progress 0..1). */
+  nextSpinHint: { progress: number; text: string; sessionId: string | null } | null;
+  /** Anonymised, across all accounts. */
+  biggestWinToday: { tokens: number; at: string | null } | null;
+  /** Shown once per `id`, only when the server sends one. */
+  nudge: { id: string; text: string } | null;
+};
+
+export type OmniRushQualityNotice = { id: string; kind: string | null; title: string; body: string };
+
+/** One session in GET /me/quality: why it earned (or did not earn) spins. */
+export type OmniRushQualitySession = {
+  sessionId: string;
+  at: string | null;
+  verdict: string | null;
+  why: string | null;
+  fails: string[];
+  workspace: string | null;
+  spins: number;
+  counted: boolean;
+};
+
+export type OmniRushQualityDetails = {
+  segments: OmniRushWheelSegment[];
+  expectedTokens: number | null;
+  sessions: OmniRushQualitySession[];
+};
+
+/** GET /me/quality/spins totals. */
+export type OmniRushQualitySpinTotals = { spun: number; paidTokens: number };
+
+export type OmniRushWheelSegment = { tokens: number; weight: number };
+
+/** A 200 from POST /me/quality/spin. The server picks `segmentIndex`; the app only animates to it. */
+export type OmniRushQualitySpin = {
+  /** Paid into the pot: 0 in preview or past the pot cap. */
+  tokens: number;
+  /** The segment the wheel landed on. */
+  prizeTokens: number;
+  segmentIndex: number;
+  segments: OmniRushWheelSegment[];
+  preview: boolean;
+  capped: boolean;
+  reproducible: boolean;
+  alreadySpun: boolean;
+  spunAt: string | null;
+  spinsAvailable: number;
+  potBalance: number | null;
+  /** big: prize >= 2M; jackpot: the top segment. */
+  celebrate: "none" | "big" | "jackpot";
+  /** Landed next to the jackpot. */
+  nearMiss: boolean;
+  jackpotTokens: number | null;
+  streakDays: number | null;
+};
+
+export type OmniRushQualitySpinRefusal = "no_spins" | "wheel_resting" | "quality_rewards_off";
+
+export type OmniRushQualitySpinOutcome =
+  | { ok: true; spin: OmniRushQualitySpin }
+  | { ok: false; reason: OmniRushQualitySpinRefusal | "signed_out" | "unreachable" | "failed"; status: number | null };
+
 export type OmniRushAccountStatus = {
   connected: boolean;
   gatewayConfigured: boolean;
@@ -226,6 +320,8 @@ export type OmniRushAccountStatus = {
   keyringUnavailable?: boolean;
   /** /device/me `client_update` for this app; absent from an older desktop bridge. */
   clientUpdate?: OmniRushClientUpdate | null;
+  /** Quality rewards; null (or absent from an older bridge) while the feature is off. */
+  quality?: OmniRushAccountQuality | null;
 };
 
 export type EngineDoctorResult = {
@@ -640,6 +736,12 @@ export type DesktopCommandMap = {
   omnirushAccountStatus: {
     args: [];
     result: OmniRushAccountStatus;
+  };
+  omnirushQualityDetails: { args: []; result: OmniRushQualityDetails | null };
+  omnirushQualitySpins: { args: []; result: OmniRushQualitySpinTotals | null };
+  omnirushQualitySpin: {
+    args: [input: { idempotencyKey: string }];
+    result: OmniRushQualitySpinOutcome;
   };
   omnirushAccountConnect: {
     args: [options?: { gatewayUrl?: string; deviceName?: string }];
