@@ -10,8 +10,14 @@ import {
   SUBAGENT_FALLBACK_MODEL_HEADER,
   SUBAGENT_ROOT_SESSION_HEADER,
 } from "./omnirush-swarm.js";
+import { builtinOmniRushModelCatalog, omnirushModelWantsReasoningSummary } from "./omnirush-model-catalog.js";
 
 const TRACE_CAPABILITY_TTL_MS = 5 * 60_000;
+
+/** Without the account's catalog (a standalone broker): the built-in catalog decides. */
+function defaultReasoningSummaryFor(model: string): boolean {
+  return omnirushModelWantsReasoningSummary(builtinOmniRushModelCatalog(), model);
+}
 
 /** A sub-agent request the gateway refused on the picked model and that was sent again on the main model. */
 export type SubagentModelFallbackEvent = {
@@ -53,6 +59,11 @@ type BrokerOptions = {
   subagentRetryDelayMs?: number;
   /** Whether a picked sub-agent model is in its refusal cooldown (sent straight to the main model). */
   subagentModelRefused?: (model: string) => boolean;
+  /**
+   * Whether a Responses request for this model asks for reasoning summaries
+   * (the account's catalog decides; the built-in catalog when unset).
+   */
+  reasoningSummaryFor?: (model: string) => boolean | Promise<boolean>;
   /** Hears the gateway's mandatory-update signals (see GatewayUpdateSignal). */
   onUpdateSignal?: (signal: GatewayUpdateSignal) => void;
   /**
@@ -717,18 +728,30 @@ function withReasoningEffort(body: ArrayBuffer, effort: string): ArrayBuffer | s
 
 /**
  * OpenCode currently opts into OpenAI summaries only for GPT-5 model IDs.
- * Ask for the summaries the transcript displays for our GPT-6 models too,
- * preserving any explicit summary option. Apply this at the final forwarding
- * boundary so sub-agent fallbacks use the destination model's options.
+ * Ask for the summaries the transcript displays for every catalog model that
+ * wants them (`wantsSummary`: the account's catalog decides, see
+ * omnirushModelWantsReasoningSummary), preserving any explicit summary
+ * option. Apply this at the final forwarding boundary so sub-agent fallbacks
+ * use the destination model's options.
  */
-function withReasoningSummary(body: ArrayBuffer | string): ArrayBuffer | string {
+async function withReasoningSummary(
+  body: ArrayBuffer | string,
+  wantsSummary: (model: string) => boolean | Promise<boolean>,
+): Promise<ArrayBuffer | string> {
   let parsed: unknown;
   try {
     parsed = JSON.parse(typeof body === "string" ? body : new TextDecoder().decode(body));
   } catch {
     return body;
   }
-  if (!isRecord(parsed) || (parsed.model !== "gpt-6-astra" && parsed.model !== "gpt-6-sol")) return body;
+  if (!isRecord(parsed) || typeof parsed.model !== "string") return body;
+  let wanted = false;
+  try {
+    wanted = await wantsSummary(parsed.model);
+  } catch {
+    wanted = false;
+  }
+  if (!wanted) return body;
   if (parsed.reasoning != null && !isRecord(parsed.reasoning)) return body;
   const reasoning = isRecord(parsed.reasoning) ? parsed.reasoning : {};
   if ("summary" in reasoning) return body;
@@ -901,6 +924,7 @@ export class OmniRushGatewayBroker {
   private readonly subagentRetryDelayMs: number;
   private readonly subagentModelRefused?: (model: string) => boolean;
   private readonly onUpdateSignal?: (signal: GatewayUpdateSignal) => void;
+  private readonly reasoningSummaryFor: (model: string) => boolean | Promise<boolean>;
   private readonly clientHeader: string | null;
   private refreshInFlight: Promise<boolean> | null = null;
   /** Whether the last failed refresh left the session as it was (unreachable, 5xx, contended). */
@@ -933,6 +957,7 @@ export class OmniRushGatewayBroker {
     this.subagentRetryDelayMs = options.subagentRetryDelayMs ?? SUBAGENT_RETRY_DELAY_MS;
     this.subagentModelRefused = options.subagentModelRefused;
     this.onUpdateSignal = options.onUpdateSignal;
+    this.reasoningSummaryFor = options.reasoningSummaryFor ?? defaultReasoningSummaryFor;
   }
 
   /**
@@ -1357,7 +1382,9 @@ export class OmniRushGatewayBroker {
     body: ArrayBuffer | string | undefined,
     accessToken?: string,
   ): Promise<Response> {
-    const forwardedBody = path === "responses" && body !== undefined ? withReasoningSummary(body) : body;
+    const forwardedBody = path === "responses" && body !== undefined
+      ? await withReasoningSummary(body, this.reasoningSummaryFor)
+      : body;
     let failure: ReturnType<typeof fetchFailure> | null = null;
     for (let attempt = 0; attempt <= UNREACHABLE_RETRY_DELAYS_MS.length; attempt += 1) {
       if (attempt > 0) {

@@ -28,8 +28,9 @@ describe("sub-agent model setting (app)", () => {
   test("defaults new sessions to GPT-5.6 Sol", () => {
     expect(DEFAULT_SUBAGENT_SETTING).toEqual({ model: "gpt-5.6-sol", effort: null });
   });
-  test("GPT 6 Sol is built in between Astra and GPT-5.6 Sol, with its display name", () => {
-    expect([...BUILTIN_OMNIRUSH_MODEL_IDS]).toEqual(["gpt-6-astra", "gpt-6-sol", "gpt-5.6-sol"]);
+  test("the built-in fallback is the backend's list (GPT 6.1 Sol included), with display names", () => {
+    expect([...BUILTIN_OMNIRUSH_MODEL_IDS]).toEqual(["gpt-6-astra", "gpt-6.1-sol", "gpt-6-sol"]);
+    expect(resolveModelDisplayName("gpt-6.1-sol")).toBe("GPT 6.1 Sol");
     expect(resolveModelDisplayName("gpt-6-sol")).toBe("GPT 6 Sol");
     expect(resolveModelDisplayName("gpt-6-astra")).toBe("GPT 6 Astra");
     expect(resolveModelDisplayName("gpt-5.6-sol")).toBe("GPT-5.6 Sol");

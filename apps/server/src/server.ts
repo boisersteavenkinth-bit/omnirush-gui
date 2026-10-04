@@ -174,7 +174,7 @@ import {
   writeOmniRushWorkspaceConfig,
 } from "./omnirush-workspace-config-store.js";
 import { buildOmniRushRuntimeConfigObject, omnirushGatewayConfigured, omnirushRuntimeConfigFilePath, writeOmniRushRuntimeConfigFile } from "./omnirush-runtime-config.js";
-import { readOmniRushModelCatalog } from "./omnirush-model-catalog.js";
+import { omnirushModelWantsReasoningSummary, readOmniRushModelCatalog } from "./omnirush-model-catalog.js";
 import {
   SUBAGENT_MODEL_FALLBACK_TRACE,
   readSubagentModelSetting,
@@ -988,6 +988,9 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
     // the refused model for a while, and the session uploader records the model the
     // sub-agent's messages really ran on.
     subagentModelRefused: (model) => subagentModelRefusals(config).isRefused(model),
+    // Reasoning summaries for every reasoning model the account's catalog
+    // lists on the Codex route (not a hardcoded pair of ids).
+    reasoningSummaryFor: async (model) => omnirushModelWantsReasoningSummary(await readOmniRushModelCatalog(config), model),
     // The desktop's update gate (banner, blocked view); session uploads and
     // project archives go on whatever it says.
     ...(config.omnirushGatewayCredentials?.onUpdateSignal ? { onUpdateSignal: config.omnirushGatewayCredentials.onUpdateSignal } : {}),

@@ -165,6 +165,16 @@ describe("model behavior options", () => {
     expect(resolveModelProviderDisplayName("omnirush", "muse-spark-1.3", "omnirush.ai")).toBe("omnirush.ai");
   });
 
+  test("names a catalog model the app has never heard of by the catalog's display name", () => {
+    expect(resolveModelDisplayName("gpt-6.1-sol", "GPT 6.1 Sol")).toBe("GPT 6.1 Sol");
+    // A new id that contains a known one keeps its own catalog name.
+    expect(resolveModelDisplayName("gpt-6-sol-mini", "GPT 6 Sol Mini")).toBe("GPT 6 Sol Mini");
+    expect(resolveModelDisplayName("nova-9.0.1-preview", "Nova 9.0.1 Preview")).toBe("Nova 9.0.1 Preview");
+    // A reported name that is only the raw id is humanized as before.
+    expect(resolveModelDisplayName("nova-9.0.1-preview", "nova-9.0.1-preview")).toBe("nova-9.0.1-preview");
+    expect(resolveModelDisplayName("nova-9.0.1-preview")).toBe("Nova 9.0.1 Preview");
+  });
+
   test("shows both omnirush.ai models under the omnirush.ai provider with their display names", () => {
     expect(OMNIRUSH_MODELS.map((internal) => resolveModelDisplayName(internal.id, internal.name)))
       .toEqual(["GPT 6 Astra", "GPT-5.6 Sol"]);
