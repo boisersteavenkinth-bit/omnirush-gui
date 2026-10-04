@@ -1489,15 +1489,17 @@ function redactUploadContentCounted(path: string, text: string): { text: string;
 // --- file-aware trace scrub --------------------------------------------------
 // The trace is scrubbed in CONFIG mode, except for the strings that carry a
 // workspace file's text: the content a file tool writes or replaces, the
-// diffs and patches it reports, a read tool's output and a "turn.diff"
-// event's hunks. Those are scrubbed with the mode the target file's path
-// selects (redactModeForPath), exactly as a snapshot of that file is, so
-// `f(token:string){...}` in a .ts file survives a write tool call the way it
-// survives the file upload. A diff or patch naming several files is scrubbed
-// file by file. Everything else (shell commands and output, chat text, other
-// tools' input and output, a file tool call with no path) stays CONFIG. The
-// backend's _file_aware_* helpers apply the identical rule; a change here
-// must land there too.
+// diffs and patches it reports, a read tool's output, and every file diff
+// entry wherever it sits (an opencode message's `summary.diffs`, a
+// `session.diff` item, a "turn.diff" event's hunks). Those are scrubbed
+// with the mode the target file's path selects (redactModeForPath), exactly
+// as a snapshot of that file is, so `f(token:string){...}` in a .ts file
+// survives a write tool call the way it survives the file upload. A diff or
+// patch naming several files is scrubbed file by file. Everything else
+// (shell commands and output, chat text, other tools' input and output, a
+// file tool call or diff with no path) stays CONFIG. The backend's
+// _file_aware_* helpers apply the identical rule, at collection and in its
+// export-time pass; a change here must land there too.
 
 /** A string the file-aware pass already scrubbed: the JSON walker keeps it as it is. */
 class Prescrubbed {
@@ -1517,6 +1519,8 @@ const FILE_TOOL_FRAGMENT_KEYS = ["oldString", "newString", "oldText", "newText",
 const FILE_TOOL_PATCH_KEYS = ["patchText", "patch", "input"];
 /** A file entry's path in tool metadata (apply_patch `files`, edit `filediff`). */
 const FILE_ENTRY_PATH_KEYS = ["filePath", "file", "relativePath", "path"];
+/** A file diff entry's path outside a tool part (summary.diffs[], session.diff, turn.diff files[]). */
+const FILE_DIFF_PATH_KEYS = ["filePath", "file", "path", "file_path", "filename", "relativePath"];
 // A diff or patch starts a new file at a git header, a jsdiff `Index:` line
 // (opencode's edit and apply_patch metadata) or an apply_patch file marker.
 const FILE_SEGMENT_START = /(?:^|(?<=\n))(?=diff --git |Index: |\*\*\* (?:Add|Update|Delete) File: )/;
@@ -1676,31 +1680,30 @@ function fileToolName(part: Record<string, unknown>): string | null {
 }
 
 /**
- * The record with the strings that carry file text prescrubbed under their
- * file's mode, or the record itself when it is neither a file tool part
- * (`{type: "tool", tool|name, state}`) nor a "turn.diff" event. The
- * backend's _file_aware_record.
+ * The path of a file diff entry found anywhere in the trace, or null: a
+ * record naming a file (`filePath`, `file`, `path`, `file_path`,
+ * `filename`, `relativePath`) next to a `patch` or `diff` string, or next to
+ * whole-file `before`/`after` texts with `additions`/`deletions` counts.
+ * That is an opencode message's `summary.diffs[]` item and a `session.diff`
+ * event's item (`{file, patch|before|after, additions, deletions, status}`)
+ * and a "turn.diff" event's `files[]` item (`{path, diff}`).
  */
-function fileAwareRecord(record: Record<string, unknown>, tally: { count: number }): Record<string, unknown> {
-  if (record.type === "turn.diff" && isRecord(record.data) && Array.isArray(record.data.files)) {
-    const files = record.data.files.map((entry) => {
-      if (!isRecord(entry)) return entry;
-      const copy: Record<string, unknown> = { ...entry };
-      prescrub(copy, "diff", (text) => redactDiffByFile(text, fileToolPath(entry.path), tally));
-      return copy;
-    });
-    return { ...record, data: { ...record.data, files } };
-  }
-  if (record.type !== "tool" || !isRecord(record.state)) return record;
-  const name = fileToolName(record);
-  if (name === null) return record;
-  const state: Record<string, unknown> = { ...record.state };
+function fileDiffEntryPath(record: Record<string, unknown>): string | null {
+  const hasDiff = typeof record.patch === "string" || typeof record.diff === "string";
+  const hasTexts = (typeof record.before === "string" || typeof record.after === "string")
+    && (typeof record.additions === "number" || typeof record.deletions === "number");
+  return hasDiff || hasTexts ? firstFilePath([record], FILE_DIFF_PATH_KEYS) : null;
+}
+
+/** A tool's state (an engine tool part's `state`) with the file text it carries prescrubbed. */
+function fileAwareToolState(source: Record<string, unknown>, name: string, tally: { count: number }): Record<string, unknown> {
+  const state: Record<string, unknown> = { ...source };
   const v2 = isRecord(state.v2) ? { ...state.v2 } : null;
   const inputs = [state.input, v2?.input].filter(isRecord);
   const path = firstFilePath(inputs, FILE_TOOL_PATH_KEYS);
   if (FILE_READ_TOOLS.has(name)) {
     if (path !== null) fileAwareReadState(state, path, tally);
-    return { ...record, state };
+    return state;
   }
   if (isRecord(state.input)) state.input = fileAwareToolInput(state.input, name, path, tally);
   if (isRecord(state.metadata)) state.metadata = fileAwareToolMetadata(state.metadata, path, tally);
@@ -1708,7 +1711,42 @@ function fileAwareRecord(record: Record<string, unknown>, tally: { count: number
     if (isRecord(v2.input)) v2.input = fileAwareToolInput(v2.input, name, path, tally);
     state.v2 = v2;
   }
-  return { ...record, state };
+  return state;
+}
+
+/**
+ * The record with the strings that carry file text prescrubbed under their
+ * file's mode, or the record itself when it carries none. The walker calls
+ * it on every object of the trace, at any depth, so a shape is handled
+ * wherever it sits (a "turn.completed" or "turn.messages" event's
+ * `data.messages[].parts[]`, a "session.child" event's messages, an
+ * envelope's events):
+ *
+ * - an engine tool part of a file tool, `{type: "tool", tool|name, state}`
+ *   (opencode, pi, 2.x natives under `state.v2`);
+ * - a pi tool call, `{type: "toolCall", name, arguments}`;
+ * - a file diff entry (fileDiffEntryPath): message `summary.diffs[]`,
+ *   `session.diff` items, "turn.diff" `files[]`.
+ *
+ * The backend's _file_aware_record.
+ */
+function fileAwareRecord(record: Record<string, unknown>, tally: { count: number }): Record<string, unknown> {
+  if (record.type === "tool" && isRecord(record.state)) {
+    const name = fileToolName(record);
+    return name === null ? record : { ...record, state: fileAwareToolState(record.state, name, tally) };
+  }
+  if (record.type === "toolCall" && isRecord(record.arguments)) {
+    const name = fileToolName(record);
+    if (name === null || FILE_READ_TOOLS.has(name)) return record;
+    const path = firstFilePath([record.arguments], FILE_TOOL_PATH_KEYS);
+    return { ...record, arguments: fileAwareToolInput(record.arguments, name, path, tally) };
+  }
+  const path = fileDiffEntryPath(record);
+  if (path === null) return record;
+  const copy: Record<string, unknown> = { ...record };
+  for (const key of ["patch", "diff"]) prescrub(copy, key, (text) => redactDiffByFile(text, path, tally));
+  for (const key of ["before", "after"]) prescrub(copy, key, (text) => redactFileContent(text, path, tally));
+  return copy;
 }
 
 /**
