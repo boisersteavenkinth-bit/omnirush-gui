@@ -22,6 +22,9 @@ import {
 import { TurnBaseStore, TurnDiffBuilder, type TurnDiffInput } from "./turn-diff.js";
 import { SUBAGENT_MODEL_FALLBACK_TRACE } from "./omnirush-swarm.js";
 import { writeFileAtomic } from "./atomic-write.js";
+import { XCODE_CLT_MISSING, gitSkipReason } from "./command-guard.js";
+import { ExcludedFiles, listGitIgnored, type HashCache } from "./excluded-files.js";
+import { ToolchainCache, type CollectOptions as ToolchainOptions, type UploadToolchain } from "./toolchain.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -191,6 +194,8 @@ export type UploadEnvironment = {
   locale: string | null;
   timezone: string | null;
   git_version: string | null;
+  /** Exact toolchain versions of the session's project (toolchain.ts); absent on older clients. */
+  toolchain?: UploadToolchain;
 };
 
 type TraceEvent = {
@@ -500,6 +505,8 @@ type SessionUploaderOptions = {
   maxWatchedFiles?: number;
   /** Budget of the redacted-text cache; REDACTED_TEXT_CACHE_BYTES unless a test changes it. */
   redactedTextCacheBytes?: number;
+  /** Toolchain capture (toolchain.ts); false turns it off, an object overrides its probes. */
+  toolchain?: false | (ToolchainOptions & { waitMs?: number });
   /** Called once a finished session's last upload settled and its state is gone. */
   onSessionClosed?: (sessionId: string) => void;
   /**
@@ -1986,7 +1993,11 @@ export function ignoredByRules(path: string, rules: readonly string[]): boolean 
  * repository, missing, timed out): the caller applies the .gitignore files
  * itself, exactly as the listing walker does.
  */
-function gitIgnoredPaths(root: string, paths: string[]): Promise<Set<string> | null> {
+async function gitIgnoredPaths(root: string, paths: string[]): Promise<Set<string> | null> {
+  return (await gitSkipReason()) ? null : gitIgnoredPathsNow(root, paths);
+}
+
+function gitIgnoredPathsNow(root: string, paths: string[]): Promise<Set<string> | null> {
   return new Promise((resolvePromise) => {
     const ignored = new Set<string>();
     if (paths.length === 0) {
@@ -2256,7 +2267,15 @@ function boundedTraceBatches(
 }
 
 /** Eligible files plus the number of non-ignored paths the denylist dropped. */
-type WorkspaceListing = { paths: string[]; denied: number; truncated: boolean };
+type WorkspaceListing = {
+  paths: string[];
+  denied: number;
+  truncated: boolean;
+  /** excluded-files.ts: the denied paths (a denied folder as `dir/`) and those past the listing cap, up to MAX_LISTED_EXCLUSIONS each. */
+  deniedPaths?: string[];
+  overflowPaths?: string[];
+};
+const MAX_LISTED_EXCLUSIONS = 5_000;
 const MAX_RAW_LISTING_FILES = MAX_FILES * 4;
 
 async function walkFallback(
@@ -2287,11 +2306,15 @@ async function walkFallback(
     if (entry.isDirectory()) {
       // Only the unconditional rules apply to a directory name: "src/token/"
       // is walked so its source files can be kept and scrubbed.
-      if (hasDeniedComponent(pathComponents(path))) listing.denied += 1;
-      else await walkFallback(root, fullPath, ignoreRules, listing, priorityPaths);
+      if (hasDeniedComponent(pathComponents(path))) {
+        listing.denied += 1;
+        if ((listing.deniedPaths ??= []).length < MAX_LISTED_EXCLUSIONS) listing.deniedPaths.push(`${path}/`);
+      } else await walkFallback(root, fullPath, ignoreRules, listing, priorityPaths);
     } else if (entry.isFile()) {
-      if (isUploadPathDenied(path)) listing.denied += 1;
-      else listing.paths.push(path);
+      if (isUploadPathDenied(path)) {
+        listing.denied += 1;
+        if ((listing.deniedPaths ??= []).length < MAX_LISTED_EXCLUSIONS) listing.deniedPaths.push(path);
+      } else listing.paths.push(path);
     }
   }
   return listing;
@@ -2299,20 +2322,26 @@ async function walkFallback(
 
 function filterListing(candidates: string[], priorityPaths: ReadonlySet<string> = new Set(), limit = MAX_RAW_LISTING_FILES): WorkspaceListing {
   const eligible: string[] = [];
+  const deniedPaths: string[] = [];
   let denied = 0;
   for (const path of candidates) {
     if (!path) continue;
-    if (isUploadPathDenied(path)) denied += 1;
-    else eligible.push(path);
+    if (isUploadPathDenied(path)) {
+      denied += 1;
+      if (deniedPaths.length < MAX_LISTED_EXCLUSIONS) deniedPaths.push(path);
+    } else eligible.push(path);
   }
   const prioritized = eligible.filter((path) => priorityPaths.has(portablePathForUpload(path)));
   const ordinary = eligible.filter((path) => !priorityPaths.has(portablePathForUpload(path)));
-  const paths = [...prioritized, ...ordinary.slice(0, Math.max(0, limit - prioritized.length))];
-  return { paths, denied, truncated: eligible.length > paths.length };
+  const kept = Math.max(0, limit - prioritized.length);
+  const paths = [...prioritized, ...ordinary.slice(0, kept)];
+  const overflowPaths = ordinary.slice(kept, kept + MAX_LISTED_EXCLUSIONS);
+  return { paths, denied, truncated: eligible.length > paths.length, deniedPaths, overflowPaths };
 }
 
 async function listWorkspaceFiles(root: string, priorityPaths: ReadonlySet<string> = new Set(), limit = MAX_FILES): Promise<WorkspaceListing> {
   try {
+    if (await gitSkipReason()) throw new Error(XCODE_CLT_MISSING);
     const { stdout } = await execFileAsync("git", ["-C", root, "ls-files", "-co", "--exclude-standard", "-z"], {
       encoding: "buffer",
       maxBuffer: 16 * 1024 * 1024,
@@ -2322,7 +2351,7 @@ async function listWorkspaceFiles(root: string, priorityPaths: ReadonlySet<strin
   } catch {
     const raw = await walkFallback(root, root, [], { paths: [], denied: 0, truncated: false }, priorityPaths);
     const limited = filterListing(raw.paths, priorityPaths, limit);
-    return { paths: limited.paths, denied: raw.denied, truncated: raw.truncated || limited.truncated };
+    return { paths: limited.paths, denied: raw.denied, truncated: raw.truncated || limited.truncated, deniedPaths: raw.deniedPaths, overflowPaths: limited.overflowPaths };
   }
 }
 
@@ -2333,7 +2362,11 @@ type GitRunResult = { stdout: Buffer; ok: boolean; truncated: boolean };
  * the cap is dropped (and the child killed) instead of buffering unbounded
  * data; callers treat `truncated` as a signal, never as an error.
  */
-function runGit(root: string, args: string[], options: { maxBytes: number; timeoutMs: number }): Promise<GitRunResult> {
+async function runGit(root: string, args: string[], options: { maxBytes: number; timeoutMs: number }): Promise<GitRunResult> {
+  return (await gitSkipReason()) ? { stdout: Buffer.alloc(0), ok: false, truncated: false } : runGitNow(root, args, options);
+}
+
+function runGitNow(root: string, args: string[], options: { maxBytes: number; timeoutMs: number }): Promise<GitRunResult> {
   return new Promise((resolvePromise) => {
     const chunks: Buffer[] = [];
     let total = 0;
@@ -2649,6 +2682,7 @@ export function inRegenerableDir(path: string): boolean {
  */
 async function listUntrackedFiles(root: string): Promise<string[]> {
   try {
+    if (await gitSkipReason()) throw new Error(XCODE_CLT_MISSING);
     const { stdout } = await execFileAsync("git", ["-C", root, "ls-files", "--others", "--exclude-standard", "-z"], {
       encoding: "buffer",
       maxBuffer: 16 * 1024 * 1024,
@@ -2671,6 +2705,7 @@ const MAX_IGNORED_OUTPUT_FILES = 5_000;
  */
 async function listIgnoredOutputFiles(root: string): Promise<string[]> {
   const listed = async (args: string[]): Promise<string[]> => {
+    if (await gitSkipReason()) throw new Error(XCODE_CLT_MISSING);
     const { stdout } = await execFileAsync("git", ["-C", root, "ls-files", "--others", "--ignored", "--exclude-standard", "-z", ...args], {
       encoding: "buffer",
       maxBuffer: 16 * 1024 * 1024,
@@ -3223,6 +3258,11 @@ type ScanResult = {
   removed: number;
   deniedCount: number;
   manifestTruncated: boolean;
+  /** excluded-files.ts (full scans): denied, binary, oversized and capped paths (sizes by path). */
+  deniedPaths?: string[];
+  binaryPaths?: Map<string, number>;
+  tooLargePaths?: Map<string, number>;
+  cappedPaths?: string[];
 };
 
 /** A changed file competing for the snapshot's content budget. */
@@ -3384,13 +3424,32 @@ async function scanWorkspaceFull(
   const entries = await mapBounded(listing.paths, SCAN_CONCURRENCY, (path) => inspectFile(context, path));
   const manifest: Manifest = new Map();
   const changed = includeAll ? null : new Set<string>();
+  const binaryPaths = new Map<string, number>();
+  const unreadPaths: string[] = [];
+  const cappedPaths = [...(listing.overflowPaths ?? [])];
   listing.paths.forEach((path, index) => {
     const entry = entries[index];
-    if (!entry) return;
+    if (!entry) {
+      if (unreadPaths.length < MAX_LISTED_EXCLUSIONS) unreadPaths.push(path);
+      return;
+    }
     cache.set(path, entry);
-    if (entry.binary || manifest.size >= MAX_FILES) return;
+    if (entry.binary) {
+      binaryPaths.set(path, entry.size);
+      return;
+    }
+    if (manifest.size >= MAX_FILES) {
+      if (cappedPaths.length < MAX_LISTED_EXCLUSIONS) cappedPaths.push(path);
+      return;
+    }
     manifest.set(path, entry);
     if (changed && previous?.get(path)?.sha256 !== entry.sha256) changed.add(path);
+  });
+  // A listed file the scan did not read: over the per-file cap, or gone.
+  const tooLargePaths = new Map<string, number>();
+  await mapBounded(unreadPaths, SCAN_CONCURRENCY, async (path) => {
+    const file = await lstat(resolve(root, path)).catch(() => null);
+    if (file?.isFile() && file.size > MAX_UPLOAD_FILE_BYTES) tooLargePaths.set(path, file.size);
   });
   return {
     manifest,
@@ -3398,6 +3457,10 @@ async function scanWorkspaceFull(
     removed: countRemoved(previous, manifest),
     deniedCount: listing.denied,
     manifestTruncated: listing.truncated || listing.paths.length >= MAX_FILES,
+    deniedPaths: listing.deniedPaths,
+    binaryPaths,
+    tooLargePaths,
+    cappedPaths,
   };
 }
 
@@ -3672,9 +3735,23 @@ type EnvelopeBody = {
   manifest: () => Iterable<HashCacheEntry>;
   /** Computed once files[] is written, so cap omissions are known. */
   privacy: () => Record<string, unknown>;
+  /** Fields written after privacy, once files[] is out (excluded_files). */
+  trailer?: () => Promise<Record<string, unknown>>;
   trace?: readonly unknown[];
   schemaVersion?: 2 | 3;
 };
+
+/** The part of SNAPSHOT_WRAPPER_MARGIN_BYTES excluded_files may use beyond the content budget's leftover. */
+const EXCLUDED_FILES_MARGIN_BYTES = 256 * 1024;
+
+/** How long a session's last snapshot waits for a toolchain collection still running. */
+const FINAL_TOOLCHAIN_WAIT_MS = 3_000;
+
+/** `{ git_skipped: "xcode_clt_missing" }` when capture may not run git here (command-guard.ts), else nothing. */
+async function gitSkippedField(): Promise<{ git_skipped?: string }> {
+  const reason = await gitSkipReason();
+  return reason ? { git_skipped: reason } : {};
+}
 
 function uploadEnvironment(appVersion: string | undefined, engineVersion: string | undefined, gitVersion: string | null): UploadEnvironment {
   let locale: string | null = null;
@@ -3778,6 +3855,8 @@ export class SessionUploader {
   private readonly spoolMaxBytes: number;
   private readonly snapshotMaxBytes: number;
   private environmentCache: Promise<UploadEnvironment> | null = null;
+  private readonly toolchains: ToolchainCache | null;
+  private readonly excludedHashes: HashCache = new Map();
   private spoolCounter = 0;
   private spoolTail: Promise<void> = Promise.resolve();
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -3853,6 +3932,13 @@ export class SessionUploader {
     this.minChangeIntervalMs = options.minChangeIntervalMs ?? MIN_UPLOAD_CHANGE_INTERVAL_MS;
     this.maxWatchedFiles = options.maxWatchedFiles ?? MAX_UPLOAD_WATCHED_FILES;
     this.texts = new RedactedTextCache(options.redactedTextCacheBytes ?? REDACTED_TEXT_CACHE_BYTES);
+    this.toolchains = options.toolchain === false
+      ? null
+      : new ToolchainCache({
+        checks: { isSecretName: isSecretAssignmentKey, scrubText: (text) => redactUploadText(text).text, isDenied: isUploadPathDenied },
+        ...(options.toolchain ?? {}),
+        scrub: (toolchain) => redactUploadJson(toolchain).value as UploadToolchain,
+      });
     this.onSessionClosed = options.onSessionClosed;
     this.onPathTouched = options.onPathTouched;
     this.tempDir = stateDir ? join(stateDir, UPLOAD_TEMP_DIRECTORY) : join(tmpdir(), `omnirush-upload-${process.pid}`);
@@ -3999,6 +4085,7 @@ export class SessionUploader {
     this.environmentCache ??= (async () => {
       let gitVersion: string | null = null;
       try {
+        if (await gitSkipReason()) throw new Error(XCODE_CLT_MISSING);
         const { stdout } = await execFileAsync("git", ["--version"], { timeout: 5_000, maxBuffer: 16 * 1024 });
         gitVersion = String(stdout).trim().replace(/^git version\s+/i, "") || null;
       } catch {
@@ -4007,6 +4094,31 @@ export class SessionUploader {
       return uploadEnvironment(this.appVersion, this.engineVersion, gitVersion);
     })();
     return this.environmentCache;
+  }
+
+  /**
+   * excluded-files.ts: what this snapshot left out. A full scan names the
+   * denied, binary, oversized, gitignored and capped files; a targeted one
+   * only what it inspected.
+   */
+  private async excludedFiles(root: string, scan: ScanResult, omitted: readonly SnapshotCandidate[], full: boolean, maxBytes: number): Promise<unknown> {
+    const excluded = new ExcludedFiles(root, { uploadPath: portablePathForUpload, hashes: this.excludedHashes });
+    for (const path of scan.deniedPaths ?? []) excluded.add(path, "privacy");
+    for (const [path, size] of scan.tooLargePaths ?? []) excluded.add(path, "too_large", { size });
+    for (const [path, size] of scan.binaryPaths ?? []) excluded.add(path, "binary", { size });
+    if (full) {
+      for (const path of await listGitIgnored(root)) excluded.add(path, isUploadPathDenied(path.replace(/\/$/, "")) ? "privacy" : "gitignored");
+    }
+    for (const path of scan.cappedPaths ?? []) excluded.add(path, "snapshot_cap");
+    for (const candidate of omitted) excluded.add(candidate.path, "snapshot_cap", { size: candidate.bytes, sha256: scan.manifest.get(candidate.path)?.sha256 ?? null });
+    return excluded.finish(maxBytes);
+  }
+
+  /** The environment block plus the toolchain of the session's project root, when one was captured. */
+  private async sessionEnvironment(root: string, waitMs?: number): Promise<UploadEnvironment> {
+    const environment = await this.environment();
+    const toolchain = this.toolchains ? await this.toolchains.get(root, waitMs).catch(() => null) : null;
+    return toolchain ? { ...environment, toolchain } : environment;
   }
 
   private negotiatedTraceSchema(force = false): Promise<2 | 3> {
@@ -4042,6 +4154,7 @@ export class SessionUploader {
 
   startSession(sessionId: string, workspaceId: string, root: string): void {
     if (!this.enabled || this.sessions.has(sessionId) || !/^[A-Za-z0-9._:-]{8,128}$/.test(sessionId)) return;
+    void this.toolchains?.get(root).catch(() => null); // toolchain.ts: collected in the background
     const state: SessionState = {
       id: sessionId,
       root,
@@ -4466,7 +4579,13 @@ export class SessionUploader {
     }
     const raw = await inFlight;
     const limited = filterListing(raw.paths, priorityPaths, MAX_FILES);
-    return { paths: limited.paths, denied: raw.denied, truncated: raw.truncated || limited.truncated };
+    return {
+      paths: limited.paths,
+      denied: raw.denied,
+      truncated: raw.truncated || limited.truncated,
+      deniedPaths: raw.deniedPaths,
+      overflowPaths: [...(raw.overflowPaths ?? []), ...(limited.overflowPaths ?? [])].slice(0, MAX_LISTED_EXCLUSIONS),
+    };
   }
 
   private releaseCache(state: SessionState): void {
@@ -5270,7 +5389,8 @@ export class SessionUploader {
         ...snapshotPriorityPaths([], git),
       ]);
       const candidates = candidatesFor(scan, state.relevance, gitPaths);
-      const environment = await this.environment();
+      // The last snapshot waits briefly for a collection still running (toolchain.ts).
+      const environment = await this.sessionEnvironment(state.root, type === "end" ? FINAL_TOOLCHAIN_WAIT_MS : undefined);
       const rootName = workspaceRootName(state.root);
       const touchedPaths = this.touchedPathsForUpload(state);
       const metadata = JSON.stringify({
@@ -5297,7 +5417,7 @@ export class SessionUploader {
       }
       const filesScope: "full" | "changed" = type === "start" ? "full" : "changed";
       const extras: Record<string, unknown> = {
-        workspace: { root_name: rootName, git },
+        workspace: { root_name: rootName, git, ...(git ? {} : await gitSkippedField()) },
         environment,
         touched_paths: touchedPaths,
         files_scope: filesScope,
@@ -5310,6 +5430,10 @@ export class SessionUploader {
       for (const entry of scan.manifest.values()) fixedBytes += Buffer.byteLength(manifestEntryJson(entry)) + 1;
       const budget = Math.max(0, this.snapshotMaxBytes - fixedBytes);
       const selection = selectSnapshotContent(candidates, budget);
+      const capOmitted: SnapshotCandidate[] = [];
+      // excluded_files gets what the content budget left plus a slice of the
+      // wrapper margin (EXCLUDED_FILES_MARGIN_BYTES), so a full snapshot still lists some.
+      let contentUsed = 0;
       let omittedCount = selection.omittedCount;
       let omittedBytes = selection.omittedBytes;
       const manifest = scan.manifest;
@@ -5336,6 +5460,7 @@ export class SessionUploader {
             if (used + cost + reserved > budget) {
               omittedCount += 1;
               omittedBytes += read.entry.bytes;
+              capOmitted.push(candidate);
               continue;
             }
             // files[] and the manifest describe the same bytes even if the
@@ -5343,6 +5468,7 @@ export class SessionUploader {
             if (read.entry.sha256 !== manifest.get(candidate.path)?.sha256) manifest.set(candidate.path, read.entry);
             await emit({ path: candidate.uploadPath, content: read.content, sha256: read.entry.sha256 });
             used += cost;
+            contentUsed = used;
             this.bases.put(read.entry.sha256, read.content, read.entry.bytes);
             await this.bases.writable();
           }
@@ -5356,6 +5482,14 @@ export class SessionUploader {
           diff_truncated: git?.diff_truncated ?? false,
           snapshot_cap_omitted_count: omittedCount,
           snapshot_cap_omitted_bytes: omittedBytes,
+          binary_file_count: scan.binaryPaths?.size ?? 0,
+          too_large_file_count: scan.tooLargePaths?.size ?? 0,
+        }),
+        trailer: async () => ({
+          excluded_files: await this.excludedFiles(state.root, scan, [
+            ...candidates.filter((candidate) => !selection.selected.has(candidate.path)),
+            ...capOmitted,
+          ], !(targeted && previous !== null), budget - contentUsed + EXCLUDED_FILES_MARGIN_BYTES),
         }),
       });
       if (omittedCount > 0) {
@@ -5401,8 +5535,8 @@ export class SessionUploader {
       const makeBody = async (version: 2 | 3): Promise<EnvelopeBody> => ({
           schemaVersion: version,
           extras: {
-            workspace: { root_name: workspaceRootName(state.root), git: null },
-            environment: await this.environment(),
+            workspace: { root_name: workspaceRootName(state.root), git: null, ...(await gitSkippedField()) },
+            environment: await this.sessionEnvironment(state.root),
             touched_paths: this.touchedPathsForUpload(state),
             files_scope: "full",
           },
@@ -5635,6 +5769,9 @@ export class SessionUploader {
         first = false;
       }
       await writer.write(`],"privacy":${JSON.stringify(body.privacy())}`);
+      for (const [key, value] of Object.entries(body.trailer ? await body.trailer() : {})) {
+        await writer.write(`,${JSON.stringify(key)}:${JSON.stringify(value)}`);
+      }
       if (body.trace) {
         await writer.write(',"trace":[');
         for (let index = 0; index < body.trace.length; index += 1) {
