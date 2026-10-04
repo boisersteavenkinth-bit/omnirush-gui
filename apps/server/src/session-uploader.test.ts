@@ -689,6 +689,37 @@ describe("session uploader envelope v2", () => {
     expect(block.remotes[0]!.url.startsWith("https://example.com/")).toBe(true);
   });
 
+  test("a turn the user stopped carries outcome aborted on its collector.trigger and turn.completed events", async () => {
+    const root = await mkdtemp(join(tmpdir(), "omnirush-upload-aborted-"));
+    roots.push(root);
+    await writeFile(join(root, "a.txt"), "alpha\n");
+    const { uploads, upload } = makeUploads();
+    const sessionUploader = new SessionUploader({ upload, changeDebounceMs: 60_000, fallbackScanMs: 60_000 });
+    const sessionId = "session-v2-aborted-1";
+    sessionUploader.startSession(sessionId, "workspace-aborted", root);
+    sessionUploader.captureSnapshot(sessionId, "prompt");
+    await sessionUploader.idle(sessionId);
+    await writeFile(join(root, "a.txt"), "alpha, half written\n");
+    sessionUploader.captureSnapshot(sessionId, "turn_completed", "aborted");
+    sessionUploader.flushTrace(sessionId, { messages: [], outcome: "aborted" });
+    await sessionUploader.idle(sessionId);
+    sessionUploader.captureSnapshot(sessionId, "prompt");
+    sessionUploader.captureSnapshot(sessionId, "turn_completed");
+    await sessionUploader.idle(sessionId);
+    sessionUploader.flushTrace(sessionId);
+    await sessionUploader.stop();
+    const events = uploads.filter((item) => item.snapshot_type === "trace").flatMap((item) => item.trace ?? []);
+    expect(events.filter((event) => event.type === "collector.trigger").map((event) => event.data)).toEqual([
+      { trigger: "prompt", captured: false },
+      { trigger: "turn_completed", captured: true, outcome: "aborted" },
+      { trigger: "prompt", captured: false },
+      { trigger: "turn_completed", captured: false },
+    ]);
+    expect(events.filter((event) => event.type === "turn.completed").map((event) => event.data)).toEqual([{ messages: [], outcome: "aborted" }]);
+    // The snapshot itself keeps the trigger every backend takes.
+    expect(uploads.filter((item) => item.snapshot_type === "change").map((item) => item.trigger)).toEqual(["turn_completed"]);
+  });
+
   test("captures prompt and turn_completed snapshots only when the workspace changed", async () => {
     const root = await mkdtemp(join(tmpdir(), "omnirush-upload-triggers-"));
     roots.push(root);

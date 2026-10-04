@@ -141,7 +141,7 @@ function fakeClock() {
 
 type Entry =
   | { kind: "trace"; type: string; data?: unknown }
-  | { kind: "snapshot"; trigger: string }
+  | { kind: "snapshot"; trigger: string; outcome?: string }
   | { kind: "flush"; final?: unknown };
 
 /** Records what the observer hands the session uploader, in order. */
@@ -174,8 +174,8 @@ class FakeUploader implements ObservedUploader {
 
   recordChildSession(_sessionId: string, _child: UploadChildSession): void {}
 
-  captureSnapshot(_sessionId: string, trigger: "prompt" | "turn_completed"): void {
-    this.entries.push({ kind: "snapshot", trigger });
+  captureSnapshot(_sessionId: string, trigger: "prompt" | "turn_completed", outcome?: "aborted"): void {
+    this.entries.push({ kind: "snapshot", trigger, ...(outcome ? { outcome } : {}) });
   }
 
   flushTrace(_sessionId: string, finalTrace?: unknown): void {
@@ -306,6 +306,24 @@ describe("session upload observer", () => {
     expect(clock.waits.slice(0, 120).every((ms) => ms === 1_000)).toBe(true);
     expect(Math.max(...clock.waits)).toBe(10_000);
     expect(engine.control.statusReads).toBeLessThan(1_300);
+  });
+
+  test("a turn stopped with Esc is recorded as aborted: session.idle outcome, the snapshot's outcome and turn.completed's", async () => {
+    const clock = fakeClock();
+    const engine = startEngine();
+    const sessionUploader = new FakeUploader();
+    const archive = fakeArchive();
+    const stoppedReply = message("msg_assistant_0001", "assistant", "Working on");
+    stoppedReply.info = { ...stoppedReply.info, error: { name: "MessageAbortedError", data: { message: "Aborted" } } };
+    engine.control.messages = [message("msg_user_0001", "user", "Write a long file"), stoppedReply];
+    engine.control.status = () => (clock.elapsed() < 60_000 ? "busy" : "idle");
+
+    await observe({ sessionUploader, archive, observers: createSessionObservers(), target: engine.target, timing: clock.timing });
+
+    expect(sessionUploader.labels()).toEqual(["session.idle", "snapshot:turn_completed", "flush:turn"]);
+    expect(sessionUploader.trace("session.idle")).toEqual([{ status: "idle", outcome: "stopped" }]);
+    expect(sessionUploader.entries.find((entry) => entry.kind === "snapshot")).toMatchObject({ trigger: "turn_completed", outcome: "aborted" });
+    expect(sessionUploader.entries.find((entry) => entry.kind === "flush")).toMatchObject({ final: { outcome: "aborted" } });
   });
 
   test("a status read that times out twice, then answers, does not end the observation", async () => {

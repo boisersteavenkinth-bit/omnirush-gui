@@ -804,12 +804,13 @@ export function observeUploadedSession(input: {
   // followed turn's own (a prompt dispatched before it settled takes it).
   let turnArchived = false;
   const turnState = (): FollowedTurn => (session.turn ??= { snapshotTaken: false, cutAt: null });
-  /** The followed turn's turn_completed snapshot, unless it was taken already. */
-  const captureTurnSnapshot = (): void => {
+  /** The followed turn's turn_completed snapshot, unless it was taken already ("aborted": the user stopped it). */
+  const captureTurnSnapshot = (outcome?: "aborted"): void => {
     const turn = turnState();
     if (turn.snapshotTaken) return;
     turn.snapshotTaken = true;
-    sessionUploader.captureSnapshot(sessionId, "turn_completed");
+    if (outcome) sessionUploader.captureSnapshot(sessionId, "turn_completed", outcome);
+    else sessionUploader.captureSnapshot(sessionId, "turn_completed");
   };
 
   /** The session's status ("idle" when the engine does not list it); throws when the engine does not answer. */
@@ -917,8 +918,10 @@ export function observeUploadedSession(input: {
     if (history && input.turnFiles) await recordTurnFiles({ ...input.turnFiles, sessionId, messages: history.delta, collector: sessionUploader });
     // The turn snapshot runs first so the artifacts it discovers are part of
     // the trace flushed right behind it.
-    captureTurnSnapshot();
-    sessionUploader.flushTrace(sessionId, { messages: history ? newest.messages : unavailable });
+    // A turn the user stopped (Esc, Stop) says so on its trigger and its turn.completed event too.
+    const aborted = outcome === "stopped" ? ("aborted" as const) : undefined;
+    captureTurnSnapshot(aborted);
+    sessionUploader.flushTrace(sessionId, { messages: history ? newest.messages : unavailable, ...(aborted ? { outcome: aborted } : {}) });
     // The delta's turn number is the engine's completed-turn count, which
     // survives app restarts; without the messages the archiver numbers it
     // right after the last archived turn. It also arms the idle final archive.

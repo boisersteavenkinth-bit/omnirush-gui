@@ -190,6 +190,8 @@ export type UploadTrigger =
   | "session_end"
   | "trace_flush";
 
+/** How a turn ended, when not as answered: "aborted" is a turn the user stopped (Esc, Stop). */
+export type TurnEndOutcome = "aborted";
 type ChangeTrigger = Extract<UploadTrigger, "prompt" | "turn_completed" | "fs_change" | "periodic">;
 
 type UploadFile = {
@@ -592,7 +594,7 @@ export type TraceCapabilities = {
 
 type TransmitOutcome =
   | { ok: true }
-  | { ok: false; retryable: boolean; reason: string; unsupportedSchema?: boolean };
+  | { ok: false; retryable: boolean; reason: string; unsupportedSchema?: boolean; retryAfterMs?: number };
 
 type CompressedArtifact = { path: string; size: number };
 
@@ -5023,9 +5025,12 @@ export class SessionUploader {
    * Captures a change snapshot for an engine milestone: right as a prompt is
    * dispatched, or once a turn completes. When nothing changed since the last
    * snapshot only the trigger is recorded in the trace, so the backend still
-   * sees the milestone without a redundant upload.
+   * sees the milestone without a redundant upload. `outcome: "aborted"`: the
+   * turn was stopped by the user (Esc, Stop; the engine's
+   * MessageAbortedError), recorded on its collector.trigger event (the
+   * snapshot's own trigger stays turn_completed, which every backend takes).
    */
-  captureSnapshot(sessionId: string, trigger: "prompt" | "turn_completed"): void {
+  captureSnapshot(sessionId: string, trigger: "prompt" | "turn_completed", outcome?: TurnEndOutcome): void {
     const state = this.sessions.get(sessionId);
     if (!state || state.finished) return;
     if (trigger === "prompt") {
@@ -5055,7 +5060,7 @@ export class SessionUploader {
     }
     this.enqueue(state, async () => {
       const previous = state.manifest;
-      await this.captureChange(state, trigger);
+      await this.captureChange(state, trigger, false, trigger === "turn_completed" && outcome === "aborted" ? outcome : undefined);
       const current = state.manifest;
       if (trigger === "turn_completed") {
         // A prompt sent since the turn ended (this job waited behind an
@@ -5289,7 +5294,7 @@ export class SessionUploader {
    * interval since the last change snapshot is deferred and merged with
    * whatever else arrives before the interval elapses.
    */
-  private async captureChange(state: SessionState, trigger: ChangeTrigger, deferred = false): Promise<void> {
+  private async captureChange(state: SessionState, trigger: ChangeTrigger, deferred = false, outcome?: TurnEndOutcome): Promise<void> {
     await state.ready;
     const milestone = trigger === "prompt" || trigger === "turn_completed";
     if (milestone && state.watchMode === "watching") await new Promise((resolvePromise) => setTimeout(resolvePromise, MILESTONE_SETTLE_MS));
@@ -5313,7 +5318,7 @@ export class SessionUploader {
     }
     if (!(await this.hasPendingChanges(state))) {
       this.metrics.capturesSkipped += 1;
-      if (milestone) this.appendTrace(state, "collector.trigger", { trigger, captured: false });
+      if (milestone) this.appendTrace(state, "collector.trigger", { trigger, captured: false, ...(outcome ? { outcome } : {}) });
       return;
     }
     const wait = !milestone && !deferred && state.lastChangeAt > 0 ? this.minChangeIntervalMs - (Date.now() - state.lastChangeAt) : 0;
@@ -5322,7 +5327,7 @@ export class SessionUploader {
       return;
     }
     const captured = await this.uploadWorkspace(state, "change", trigger);
-    if (milestone) this.appendTrace(state, "collector.trigger", { trigger, captured });
+    if (milestone) this.appendTrace(state, "collector.trigger", { trigger, captured, ...(outcome ? { outcome } : {}) });
   }
 
   /** Whether another live session on `state`'s root has a turn in progress. */
@@ -6078,7 +6083,7 @@ export class SessionUploader {
           await this.recordLedgerOutcome(state.id, "failure").catch(() => undefined);
           throw new Error(outcome.reason);
         }
-        return await spoolArtifact(outcome.reason);
+        return await spoolArtifact(outcome.reason, outcome.retryAfterMs);
       }
       state.sentBytes += bytes;
       state.sequence = sequence;
@@ -6319,7 +6324,13 @@ export class SessionUploader {
         continue;
       }
       failures += 1;
-      const attempted: SpoolMeta = { ...entry, attempts: entry.attempts + 1, last_attempt_at: new Date().toISOString() };
+      const { not_before: _previous, ...rest } = entry;
+      const attempted: SpoolMeta = {
+        ...rest,
+        attempts: entry.attempts + 1,
+        last_attempt_at: new Date().toISOString(),
+        ...(outcome.retryAfterMs !== undefined ? { not_before: new Date(Date.now() + outcome.retryAfterMs).toISOString() } : {}),
+      };
       await this.spoolLocked(async () => {
         // The spool bound may have dropped the entry during the upload.
         await lstat(join(spoolDir, `${entry.id}.zst`));
