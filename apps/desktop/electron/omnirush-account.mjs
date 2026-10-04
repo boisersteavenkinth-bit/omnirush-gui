@@ -13,6 +13,7 @@ import {
   writePlaintextCredentialFile,
 } from "./plaintext-credential-file.mjs";
 import { CLIENT_HEADER, guiClientHeaderValue, parseClientUpdate } from "./update-gate.mjs";
+import { parseAccountQuality, parseFailLabels, parseQualitySessions, parseSpinHistory, profileSessionId, parseSpinResult, parseWheelSegments, spinIdempotencyKey, spinRefusal } from "./quality.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -238,6 +239,8 @@ function accountProfile(value) {
     status: normalizeCredential(value.status),
     usage,
     clientUpdate: parseClientUpdate(value.client_update),
+    // Quality rewards (quality.mjs); null while the feature is off.
+    quality: parseAccountQuality(value.quality),
   };
 }
 
@@ -930,9 +933,11 @@ export function createDesktopOmniRushAccountStore({
    * expired while the app was idle, so a second one is allowed before the
    * session counts as gone.
    */
-  async function fetchProfile(credentials, refreshesLeft = 2) {
+  async function fetchProfile(credentials, refreshesLeft = 2, sessionId = null) {
     const profileUrl = controlPlaneBase(credentials.gatewayUrl);
     profileUrl.pathname += "/device/me";
+    // The open session: next_spin_hint and nudge then speak about it.
+    if (sessionId) profileUrl.searchParams.set("session_id", sessionId);
     const response = await send(profileUrl, {
       headers: { Authorization: `Bearer ${credentials.accessToken}` },
       signal: AbortSignal.timeout(20_000),
@@ -940,7 +945,7 @@ export function createDesktopOmniRushAccountStore({
     if (response.status === 401 && refreshesLeft > 0) {
       const refreshed = await refresh(credentials.accessToken);
       if (!refreshed) throw new InvalidAccountCredentialsError("Device session expired");
-      return fetchProfile(refreshed, refreshesLeft - 1);
+      return fetchProfile(refreshed, refreshesLeft - 1, sessionId);
     }
     if (response.status === 401 || response.status === 403) {
       throw new InvalidAccountCredentialsError("Device session expired");
@@ -1024,7 +1029,8 @@ export function createDesktopOmniRushAccountStore({
   }
 
   /** @returns {Promise<AccountStatus>} */
-  async function status() {
+  async function status(input = {}) {
+    const sessionId = profileSessionId(input?.sessionId);
     const credentials = await load();
     const configured = await configuredGatewayUrl();
     const gatewayConfigured = Boolean(configured);
@@ -1043,7 +1049,7 @@ export function createDesktopOmniRushAccountStore({
       return { connected: false, gatewayConfigured, ...server, ...storage };
     }
     try {
-      const profile = await fetchProfile(credentials);
+      const profile = await fetchProfile(credentials, 2, sessionId);
       return {
         connected: true,
         gatewayConfigured,
@@ -1054,6 +1060,7 @@ export function createDesktopOmniRushAccountStore({
         accountStatus: profile?.status ?? null,
         usage: profile?.usage ?? null,
         clientUpdate: profile?.clientUpdate ?? null,
+        quality: profile?.quality ?? null,
       };
     } catch (error) {
       if (error instanceof InvalidAccountCredentialsError) {
@@ -1068,6 +1075,7 @@ export function createDesktopOmniRushAccountStore({
           displayName: null,
           accountStatus: null,
           usage: null,
+          quality: null,
         };
       }
       // Offline profile lookup must not make a securely stored account look
@@ -1081,8 +1089,93 @@ export function createDesktopOmniRushAccountStore({
         displayName: null,
         accountStatus: null,
         usage: null,
+        quality: null,
       };
     }
+  }
+
+  /**
+   * A request to the account server with the device credential, refreshed
+   * once on a 401 (as the profile check does). Null while signed out.
+   */
+  async function sendAuthorized(pathname, init = {}, refreshesLeft = 1, credentials = undefined) {
+    const current = credentials === undefined ? await load() : credentials;
+    if (!current) return null;
+    const url = controlPlaneBase(current.gatewayUrl);
+    url.pathname += pathname;
+    const headers = new Headers(init.headers);
+    headers.set("Authorization", `Bearer ${current.accessToken}`);
+    const response = await send(url, { ...init, headers, signal: AbortSignal.timeout(20_000) });
+    if (response.status === 401 && refreshesLeft > 0) {
+      const refreshed = await refresh(current.accessToken);
+      if (!refreshed) return response;
+      return sendAuthorized(pathname, init, refreshesLeft - 1, refreshed);
+    }
+    return response;
+  }
+
+  /**
+   * The wheel's segments, the expected payout and the recent sessions with
+   * why each did or did not earn spins (GET /me/quality), for the spin
+   * dialog and the coaching card. Null while signed out, offline or off.
+   */
+  async function qualityDetails() {
+    try {
+      const response = await sendAuthorized("/me/quality", { method: "GET" });
+      if (!response?.ok) return null;
+      const payload = await response.json();
+      if (!payload || typeof payload !== "object" || !payload.quality) return null;
+      const expected = Number(payload.expected_tokens);
+      const jackpot = Number(payload.jackpot_tokens);
+      return {
+        segments: parseWheelSegments(payload.segments),
+        clientSegments: parseWheelSegments(payload.client_segments),
+        expectedTokens: Number.isFinite(expected) ? expected : null,
+        jackpotTokens: Number.isFinite(jackpot) && jackpot > 0 ? jackpot : null,
+        sessions: parseQualitySessions(payload.sessions),
+        failLabels: parseFailLabels(payload.fail_labels),
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  /** GET /me/quality/spins: totals and the last 10 spins; null when unavailable. */
+  async function qualitySpinTotals() {
+    try {
+      const response = await sendAuthorized("/me/quality/spins", { method: "GET" });
+      if (!response?.ok) return null;
+      return parseSpinHistory(await response.json());
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * One spin of the quality wheel (POST /me/quality/spin). The key comes from
+   * the click, so a retry of the same click is answered with the same result.
+   * @param {{ idempotencyKey?: string }} [input]
+   * @returns {Promise<import("./quality.mjs").QualitySpinOutcome>}
+   */
+  async function spinQuality(input = {}) {
+    const idempotencyKey = spinIdempotencyKey(input.idempotencyKey);
+    let response;
+    try {
+      response = await sendAuthorized("/me/quality/spin", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ idempotency_key: idempotencyKey }),
+      });
+    } catch {
+      return { ok: false, reason: "unreachable", status: null };
+    }
+    if (!response) return { ok: false, reason: "signed_out", status: null };
+    const payload = await response.json().catch(() => null);
+    if (response.status === 401 || response.status === 403) return { ok: false, reason: "signed_out", status: response.status };
+    if (response.status === 409) return { ok: false, reason: spinRefusal(payload) ?? "failed", status: 409 };
+    if (!response.ok) return { ok: false, reason: "failed", status: response.status };
+    const spin = parseSpinResult(payload);
+    return spin ? { ok: true, spin } : { ok: false, reason: "failed", status: response.status };
   }
 
   /**
@@ -1124,5 +1217,5 @@ export function createDesktopOmniRushAccountStore({
     }
   }
 
-  return { load, save, refresh, authorize, status, clear };
+  return { load, save, refresh, authorize, status, clear, qualityDetails, qualitySpinTotals, spinQuality };
 }

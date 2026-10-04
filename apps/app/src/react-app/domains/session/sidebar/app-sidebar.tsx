@@ -40,6 +40,8 @@ import { getDisplaySessionTitle } from "../../../../app/lib/session-title";
 import { omnirushAccountStatus, type WorkspaceInfo } from "../../../../app/lib/desktop";
 import { omnirushUsageSummary } from "../../../../app/lib/omnirush-usage";
 import { isDesktopRuntime } from "../../../../app/lib/runtime-env";
+import { refreshAccountStatus, setQualitySessionId, useAccountStatusStore, useQualityUiStore, type AccountQuality } from "../../../../app/lib/quality";
+import { ProgressRing, QualityTierBadge, SpinButton } from "../../quality/quality-parts";
 import { OmniRushDenHelpLink } from "../../workspace/omnirush-den-help-link";
 import { NotificationBell } from "../../../shell/notification-center";
 import { useUiStateStore } from "../../../shell/ui-state-store";
@@ -976,22 +978,47 @@ function OmniRushWordmark({ className }: { className?: string }) {
   );
 }
 
+/**
+ * Quality rewards under the account: the spin button with the count of
+ * ready spins, and the ring filling toward the next spin. Opens the quality
+ * panel (tips, streak, coaching) or the spin dialog. Nothing while `quality`
+ * is null.
+ */
+function QualityFooterStrip({ quality }: { quality: AccountQuality }) {
+  const openPanel = useQualityUiStore((store) => store.openPanel);
+  const openSpin = useQualityUiStore((store) => store.openSpin);
+  const hint = quality.nextSpinHint;
+  return (
+    <div
+      className="flex items-center gap-1.5 px-2 pb-1 pt-0.5 group-data-[collapsible=icon]:hidden"
+      data-testid="quality-footer-strip"
+    >
+      <SpinButton quality={quality} onClick={quality.spinsAvailable > 0 ? openSpin : openPanel} />
+      <button
+        type="button"
+        onClick={openPanel}
+        className="flex min-w-0 flex-1 items-center gap-1.5 rounded-md px-1 py-0.5 text-left text-[10.5px] text-muted-foreground transition hover:bg-sidebar-accent hover:text-foreground"
+        title={hint?.text ?? quality.nextTierHint ?? "Quality rewards"}
+        data-testid="quality-footer-next"
+      >
+        {hint ? <ProgressRing progress={hint.progress} size={16} stroke={2.25} /> : null}
+        <span className="truncate">
+          {hint ? `${Math.round(hint.progress * 100)}%` : quality.streakDays > 0 ? `${quality.streakDays}-day streak` : "How to earn spins"}
+        </span>
+      </button>
+    </div>
+  );
+}
+
 function NativeAccountFooter({ onOpenAccountSettings }: { onOpenAccountSettings: () => void }) {
-  const [status, setStatus] = React.useState<NativeAccountStatus | null>(null);
+  // Shared with the quality popup (QualityRewards): one /device/me read for both.
+  const status: NativeAccountStatus | null = useAccountStatusStore((store) => store.status);
 
   React.useEffect(() => {
-    let active = true;
-    const refresh = () => {
-      void omnirushAccountStatus()
-        .then((next) => { if (active) setStatus(next); })
-        .catch(() => { if (active) setStatus({ connected: false, gatewayConfigured: false }); });
-    };
+    const refresh = () => void refreshAccountStatus(omnirushAccountStatus);
     refresh();
     window.addEventListener("focus", refresh);
-    return () => {
-      active = false;
-      window.removeEventListener("focus", refresh);
-    };
+    return () => window.removeEventListener("focus", refresh);
   }, []);
 
   const connected = status?.connected === true;
@@ -999,6 +1026,7 @@ function NativeAccountFooter({ onOpenAccountSettings }: { onOpenAccountSettings:
     ? status?.displayName?.trim() || status?.email?.trim() || "Your account"
     : "sign in to omnirush.ai";
   const usage = connected && status?.usage ? omnirushUsageSummary(status.usage) : null;
+  const quality = connected ? status?.quality ?? null : null;
   // The account server label ("omnirush.ai", "localhost:8090 (local API)")
   // only matters while connected; a signed-out footer keeps the sign-in hint.
   const serverHost = connected ? status?.gatewayHost?.trim() || null : null;
@@ -1040,8 +1068,11 @@ function NativeAccountFooter({ onOpenAccountSettings }: { onOpenAccountSettings:
               />
             </span>
             <span className="min-w-0 flex-1 text-left">
-              <span className="block truncate text-xs font-medium">{accountLabel}</span>
-              <span className="block truncate text-[10.5px] text-muted-foreground">
+              <span className="flex min-w-0 items-center gap-1.5">
+                <span className="truncate text-xs font-medium">{accountLabel}</span>
+                {quality ? <QualityTierBadge quality={quality} /> : null}
+              </span>
+              <span className="block truncate text-[10.5px] text-muted-foreground" data-testid="native-account-detail">
                 {accountDetail}
               </span>
               {usage ? (
@@ -1052,6 +1083,11 @@ function NativeAccountFooter({ onOpenAccountSettings }: { onOpenAccountSettings:
             </span>
           </SidebarMenuButton>
         </SidebarMenuItem>
+        {quality ? (
+          <SidebarMenuItem>
+            <QualityFooterStrip quality={quality} />
+          </SidebarMenuItem>
+        ) : null}
         <SidebarMenuItem>
           <SidebarMenuButton
             type="button"
@@ -1102,6 +1138,11 @@ export function AppSidebar(props: AppSidebarProps) {
     ])),
     [props.sessionNumberShortcuts.targets],
   );
+
+  // Profile reads name the open session, so the quality hint and nudge are about it.
+  React.useEffect(() => {
+    setQualitySessionId(props.selectedSessionId ?? null);
+  }, [props.selectedSessionId]);
 
   // Green unread dots: agent finished while the user was on another session.
   React.useEffect(() => {
