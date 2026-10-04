@@ -15,7 +15,7 @@ import {
   currentEngineTarget,
   engineReplaced,
   observeUploadedSession,
-  followToolStart,
+  followToolStart, followContextToolEvents,
   projectArchiveEngineReads,
   promptDispatched,
   type EngineReplacement,
@@ -180,6 +180,8 @@ export class CaptureHost {
     this.archive.sessionStarted({ sessionId, root, engine: projectArchiveEngineReads(() => currentEngineTarget(this.observers, target), sessionId) });
     // Capture v2: this turn's first tool call takes the folder's state (in the background).
     followToolStart({ observers: this.observers, archive: this.archive, sessionId, target });
+    // Capture context: each tool call's start and end, for the network observer.
+    followContextToolEvents({ observers: this.observers, context: this.sessionUploader.context, sessionId, target });
   }
 
   /** Capture v2: the session-start manifest, before the first prompt reaches the engine (lifecycle.ts startGate). */

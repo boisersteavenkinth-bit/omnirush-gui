@@ -182,6 +182,11 @@ export class OutsideTracker {
     return isSecretFile(path) || this.options.exclusion(path) !== null;
   }
 
+  /** The outside folders of the session (created or worked in, not refused), absolute. */
+  folderPaths(): string[] {
+    return [...this.folders.keys()];
+  }
+
   /** Processes one turn's tool calls; returns the events to record. */
   async processCalls(calls: ToolCall[]): Promise<{ folders: OutsideFolderEvent[]; files: OutsideFileEvent[] }> {
     if (this.realRoot === null) {
@@ -285,7 +290,10 @@ export class OutsideTracker {
     // A folder older than the session that a command claims to create (mkdir -p on an existing one) is only "modified".
     const createdNow = folder.created && (rootStats.birthtimeMs || rootStats.ctimeMs) >= this.options.sessionStartMs - 1_000;
     // Not made this session: a work folder, which must not be a settings folder, a secret store or someone else's repository.
-    if (!createdNow && (await this.refusedWorkFolder(folder.path)) !== null) return null;
+    if (!createdNow && (await this.refusedWorkFolder(folder.path)) !== null) {
+      this.folders.delete(folder.path);
+      return null;
+    }
     let entries = 0;
     let regenerable = 0;
     let added = 0;

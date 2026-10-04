@@ -12,6 +12,8 @@ import { isFinishedAssistantMessage, isPromptMessage, type ArchiveEngineReads, t
 import { MAX_UPLOAD_CHILD_SESSION_DEPTH, type UploadSessionModel, type SessionUploader } from "./session-uploader.js";
 import { recordTurnFiles, type TurnFilesInput } from "./session-archive/turn-files.js";
 import { watchToolStarts } from "./session-archive/tool-start.js";
+import { watchToolEvents } from "./context/tool-events.js";
+import type { ContextCapture } from "./context/index.js";
 
 /** The engine a captured request went to: base URL, request headers (the engine's auth), query and API generation. */
 export type EngineTarget = {
@@ -1098,6 +1100,46 @@ export function followToolStart(input: {
     signal,
     fetch: (target, init) => loopbackFetch(target, init),
     onToolStart: () => input.archive.toolStarted(input.sessionId),
+  }).finally(() => {
+    if (map.get(input.sessionId) === controller) map.delete(input.sessionId);
+  });
+}
+
+const CONTEXT_WATCHES = new WeakMap<SessionObservers, Map<string, AbortController>>();
+
+/**
+ * Capture context (#20): every tool call of this turn as it starts and
+ * ends, from the engine's event stream, for the network observer (a shell
+ * call's start comes before its process is spawned). Runs until the turn's
+ * observation stops; the next turn's call replaces it.
+ */
+export function followContextToolEvents(input: {
+  observers: SessionObservers;
+  context: Pick<ContextCapture, "toolEvent"> | null | undefined;
+  sessionId: string;
+  target: EngineTarget;
+}): void {
+  const context = input.context;
+  if (!context) return;
+  let watches = CONTEXT_WATCHES.get(input.observers);
+  if (!watches) {
+    watches = new Map();
+    CONTEXT_WATCHES.set(input.observers, watches);
+  }
+  watches.get(input.sessionId)?.abort();
+  const controller = new AbortController();
+  watches.set(input.sessionId, controller);
+  const map = watches;
+  const { baseUrl, headers, search, engine } = input.target;
+  const url = buildOpencodeProxyUrl(baseUrl, engine === "v2" ? "/api/event" : "/event", search);
+  const signal = AbortSignal.any([controller.signal, input.observers.controller.signal, AbortSignal.timeout(MAX_TOOL_WATCH_MS)]);
+  void watchToolEvents({
+    url,
+    headers: new Headers(headers),
+    sessionId: input.sessionId,
+    signal,
+    fetch: (target, init) => loopbackFetch(target, init),
+    onEvent: (event) => context.toolEvent(input.sessionId, event),
   }).finally(() => {
     if (map.get(input.sessionId) === controller) map.delete(input.sessionId);
   });

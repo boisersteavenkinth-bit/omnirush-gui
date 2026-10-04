@@ -322,15 +322,29 @@ export async function listeningPorts(processes: ProcessInfo[], options: ProcessT
   return { ports: out, method };
 }
 
+/** A listening port of a process outside the session: its port and the process's base name, nothing else. */
+export type ForeignListeningPort = { proto: "tcp"; port: number; process: string | null };
+
 export type ProcessSnapshot = {
   phase: "session_start" | "turn_start";
   turn: number;
   collected_at: string;
-  listening: ListeningPort[];
-  processes: Array<{ pid: number; name: string; command: string }>;
+  /** Ports of the session's processes (address class, pid, name) and of any other process (port and base name only). */
+  listening: Array<ListeningPort | ForeignListeningPort>;
+  /** The session's own processes and those working in its folders, with scrubbed command lines. */
+  processes: Array<{ pid: number; name: string; command: string; scope: "session" | "folder" }>;
+  /** How many processes the machine runs (none of the others is named). */
   total_processes: number;
   truncated: boolean;
   method: string;
+};
+
+/** Which processes belong to the session: the app's process tree, and processes working in the session's folders. */
+export type SnapshotScope = {
+  /** The app's process (the CLI, or the desktop server): the session's tree is its descendants. */
+  rootPid: number;
+  /** The project and the outside folders the agent created or worked in (absolute). */
+  folders: () => readonly string[];
 };
 
 export type SnapshotOptions = ProcessTableOptions & {
@@ -340,27 +354,109 @@ export type SnapshotOptions = ProcessTableOptions & {
   now?: () => Date;
   /** A process table and port list already taken (session start shares them with services). */
   precomputed?: { processes: ProcessInfo[]; listening: ListeningPort[]; method?: string };
+  scope?: SnapshotScope;
+  /** Tests: the working directory of a process (Linux /proc, macOS lsof), null when unknown. */
+  cwdOf?: (pids: number[]) => Promise<Map<number, string>>;
 };
 
-/** One #19 snapshot: listening ports and the dev-relevant processes, scrubbed and capped. */
+/** The descendants of `rootPid` in a process table. */
+export function descendantsOf(rootPid: number, processes: readonly ProcessInfo[]): Set<number> {
+  const children = new Map<number, number[]>();
+  for (const info of processes) {
+    const list = children.get(info.ppid) ?? [];
+    list.push(info.pid);
+    children.set(info.ppid, list);
+  }
+  const out = new Set<number>();
+  const queue = [...(children.get(rootPid) ?? [])];
+  while (queue.length > 0 && out.size < 100_000) {
+    const pid = queue.shift()!;
+    if (out.has(pid)) continue;
+    out.add(pid);
+    queue.push(...(children.get(pid) ?? []));
+  }
+  return out;
+}
+
+/** The working directories of `pids`: /proc/<pid>/cwd on Linux, `lsof -d cwd` on macOS, none on Windows. */
+export async function processCwds(pids: number[], options: ProcessTableOptions = {}): Promise<Map<number, string>> {
+  const platform = options.platform ?? process.platform;
+  const out = new Map<number, string>();
+  if (pids.length === 0) return out;
+  if (platform === "linux") {
+    await Promise.all(pids.map(async (pid) => {
+      try {
+        out.set(pid, await readlink(`/proc/${pid}/cwd`));
+      } catch {
+        // Another account's process, or gone.
+      }
+    }));
+    return out;
+  }
+  if (platform === "darwin") {
+    const result = await runTool("lsof", ["-a", "-d", "cwd", "-Fpn", "-p", pids.slice(0, 500).join(",")], { timeoutMs: 4_000, maxBytes: 1024 * 1024, ...(options.run ? { run: options.run } : {}) });
+    let pid = 0;
+    for (const line of result?.stdout.split(/\r?\n/) ?? []) {
+      if (line.startsWith("p")) pid = Number(line.slice(1));
+      else if (line.startsWith("n") && pid) out.set(pid, line.slice(1));
+    }
+  }
+  return out;
+}
+
+function insideAny(path: string, folders: readonly string[]): boolean {
+  const portable = path.replaceAll("\\", "/").replace(/\/+$/, "");
+  return folders.some((folder) => {
+    const base = folder.replaceAll("\\", "/").replace(/\/+$/, "");
+    return base.length > 1 && (portable === base || portable.startsWith(`${base}/`));
+  });
+}
+
+function baseNameOnly(name: string | null): string | null {
+  if (!name) return null;
+  const base = name.trim().split(/\s+/)[0]!.split(/[\\/]/).at(-1) ?? "";
+  return base.replace(/[^\w.+-]/g, "").slice(0, 64) || null;
+}
+
+/**
+ * One #19 snapshot. Only the session's own processes (descendants of the
+ * app's process) and processes working inside the project or an outside
+ * folder of the session are listed, with their scrubbed command lines. Any
+ * other process on the machine is never named, except as the owner of a
+ * listening port, shown as the port and the process's base name only.
+ */
 export async function processSnapshot(phase: ProcessSnapshot["phase"], turn: number, options: SnapshotOptions): Promise<ProcessSnapshot> {
   const { processes, method } = options.precomputed ? { processes: options.precomputed.processes, method: options.precomputed.method ?? "shared" } : await processTable(options);
   const { ports, method: portMethod } = options.precomputed ? { ports: options.precomputed.listening, method: "shared" } : await listeningPorts(processes, options);
   const self = options.selfPid ?? process.pid;
-  const dev = processes.filter((info) => !isOwnProcess(info, self) && isDevProcess(info.name, info.command));
-  const kept = dev.slice(0, MAX_PROCESSES).map((info) => ({
+  const scope = options.scope ?? { rootPid: self, folders: () => [] };
+  const tree = descendantsOf(scope.rootPid, processes);
+  const folders = scope.folders();
+  const others = processes.filter((info) => !tree.has(info.pid) && info.pid !== scope.rootPid);
+  const cwds = folders.length > 0 ? await (options.cwdOf ?? ((pids) => processCwds(pids, options)))(others.map((info) => info.pid)).catch(() => new Map<number, string>()) : new Map<number, string>();
+  const inFolders = new Set(others.filter((info) => {
+    const cwd = cwds.get(info.pid);
+    return cwd !== undefined && insideAny(cwd, folders);
+  }).map((info) => info.pid));
+  const ours = processes.filter((info) => (tree.has(info.pid) || inFolders.has(info.pid)) && !isOwnProcess(info, self));
+  const kept = ours.slice(0, MAX_PROCESSES).map((info) => ({
     pid: info.pid,
-    name: cleanText(info.name, options.privacy, options.scrub),
+    name: cleanText(baseNameOnly(info.name) ?? info.name, options.privacy, options.scrub),
     command: cleanCommand(info.command, options.privacy, options.scrub),
+    scope: tree.has(info.pid) ? ("session" as const) : ("folder" as const),
   }));
+  const owned = (pid: number | null) => pid !== null && (tree.has(pid) || inFolders.has(pid) || pid === scope.rootPid);
+  const listening = ports.slice(0, MAX_LISTENING).map((port): ListeningPort | ForeignListeningPort => (owned(port.pid)
+    ? { ...port, address: addressClass(port.address), process: port.process ? cleanText(baseNameOnly(port.process) ?? port.process, options.privacy, options.scrub) : null }
+    : { proto: "tcp", port: port.port, process: baseNameOnly(port.process) }));
   return {
     phase,
     turn,
     collected_at: (options.now ?? (() => new Date()))().toISOString(),
-    listening: ports.slice(0, MAX_LISTENING).map((port) => ({ ...port, address: addressClass(port.address), process: port.process ? cleanText(port.process, options.privacy, options.scrub) : null })),
+    listening,
     processes: kept,
     total_processes: processes.length,
-    truncated: dev.length > MAX_PROCESSES || ports.length > MAX_LISTENING,
+    truncated: ours.length > MAX_PROCESSES || ports.length > MAX_LISTENING,
     method: options.precomputed ? method : `${method}+${portMethod}`,
   };
 }
