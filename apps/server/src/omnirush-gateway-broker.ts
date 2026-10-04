@@ -11,6 +11,11 @@ import {
   SUBAGENT_ROOT_SESSION_HEADER,
 } from "./omnirush-swarm.js";
 import { builtinOmniRushModelCatalog, omnirushModelWantsReasoningSummary } from "./omnirush-model-catalog.js";
+import { RejectedAttachments, isRejectedAttachmentError, type Attachment } from "./rejected-attachments.js";
+
+/** A refused attachment is left out and the model request sent again, at most this often per request. */
+const MAX_ATTACHMENT_RETRIES = 2;
+const MAX_ATTACHMENT_ERROR_BYTES = 256 * 1024;
 
 const TRACE_CAPABILITY_TTL_MS = 5 * 60_000;
 
@@ -929,6 +934,12 @@ export class OmniRushGatewayBroker {
   private refreshInFlight: Promise<boolean> | null = null;
   /** Whether the last failed refresh left the session as it was (unreachable, 5xx, contended). */
   private lastRefreshTransient = false;
+  /**
+   * Attachments the model refused (a corrupt PDF the read tool returned, an
+   * image that is not one): replaced by "[file could not be read: <name>]" in
+   * every later request, so one bad file cannot fail the rest of a session.
+   */
+  private readonly rejectedAttachments = new RejectedAttachments();
   private capabilityCache: { gatewayUrl: string; accountKey: string; version: 2 | 3; expiresAt: number } | null = null;
   private capabilityProbe: { key: string; promise: Promise<2 | 3> } | null = null;
 
@@ -1021,7 +1032,9 @@ export class OmniRushGatewayBroker {
     // A picked sub-agent model the gateway refused moments ago is not tried
     // again for every step of a running sub-agent: it goes to the main model.
     const skipped = requestBody === undefined ? null : this.skipRefusedSubagentModel(request, normalizedPath, requestBody);
-    const body = skipped?.body ?? requestBody;
+    let body = skipped?.body ?? requestBody;
+    const attachments = this.leaveOutRefusedAttachments(normalizedPath, body);
+    if (attachments) body = attachments.body;
     let spent = this.state.accessToken;
     let response = await this.forwardModelRequest(request, normalizedPath, body, spent);
     // Two rounds at most: the first may only adopt a pair the desktop rotated,
@@ -1057,6 +1070,11 @@ export class OmniRushGatewayBroker {
         },
       }, { status: 401 });
     }
+    if (attachments) {
+      const retried = await this.retryWithoutRefusedAttachments(request, normalizedPath, attachments, response);
+      response = retried.response;
+      body = retried.body;
+    }
     if (skipped) {
       this.reportSubagentFallback(request, { ...skipped.event, status: response.status, ok: response.ok });
     } else if (!response.ok && response.status !== 401 && body !== undefined) {
@@ -1080,6 +1098,58 @@ export class OmniRushGatewayBroker {
       statusText: response.statusText,
       headers: responseHeaders(response.headers),
     });
+  }
+
+  /**
+   * A model request's attachments, with the ones the model refused earlier
+   * replaced; null for a request that is not JSON or carries none.
+   */
+  private leaveOutRefusedAttachments(path: string, body: ArrayBuffer | string | undefined): { parsed: unknown; attachments: Attachment[]; body: ArrayBuffer | string } | null {
+    if (body === undefined || (path !== "responses" && path !== "responses/compact")) return null;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(typeof body === "string" ? body : new TextDecoder().decode(body));
+    } catch {
+      return null;
+    }
+    if (!parsed || typeof parsed !== "object") return null;
+    const prepared = this.rejectedAttachments.prepare(parsed);
+    if (prepared.attachments.length === 0) return null;
+    if (prepared.replaced.length > 0) {
+      this.log?.("info", "omnirush.ai: left out attachments the model refused earlier", { count: prepared.replaced.length });
+      return { parsed, attachments: prepared.attachments, body: JSON.stringify(prepared.body) };
+    }
+    return { parsed, attachments: prepared.attachments, body };
+  }
+
+  /**
+   * The model refused an attachment (400 "The file you uploaded is badly
+   * formatted or corrupted"): the suspects are left out and the request sent
+   * again, so the turn goes on with a "[file could not be read: x]" note. An
+   * answer the model accepted marks its attachments as good.
+   */
+  private async retryWithoutRefusedAttachments(
+    request: Request,
+    path: string,
+    state: { parsed: unknown; attachments: Attachment[]; body: ArrayBuffer | string },
+    first: Response,
+  ): Promise<{ response: Response; body: ArrayBuffer | string }> {
+    let response = first;
+    let { attachments, body } = state;
+    for (let round = 0; response.status === 400 && round < MAX_ATTACHMENT_RETRIES && this.state; round += 1) {
+      const raw = new Uint8Array(await response.arrayBuffer().catch(() => new ArrayBuffer(0)));
+      const kept = new Response(raw.byteLength ? raw : null, { status: response.status, statusText: response.statusText, headers: response.headers });
+      const message = new TextDecoder().decode(raw.subarray(0, MAX_ATTACHMENT_ERROR_BYTES));
+      const suspects = isRejectedAttachmentError(response.status, message) ? this.rejectedAttachments.reject(attachments, message) : [];
+      if (suspects.length === 0) return { response: kept, body };
+      const prepared = this.rejectedAttachments.prepare(state.parsed);
+      attachments = prepared.attachments;
+      body = JSON.stringify(prepared.body);
+      this.log?.("warn", "omnirush.ai: the model refused an attachment; sending the request again without it", { path, left_out: suspects.length });
+      response = await this.forwardModelRequest(request, path, body, this.state.accessToken);
+    }
+    if (response.ok) this.rejectedAttachments.accept(attachments.filter((item) => !this.rejectedAttachments.isBad(item.fingerprint)));
+    return { response, body };
   }
 
   /**
