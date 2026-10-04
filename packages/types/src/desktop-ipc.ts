@@ -170,6 +170,37 @@ export type OmniRushAccountUsage = {
   pot?: number;
 };
 
+/**
+ * The account server's word on this app's version (/device/me
+ * `client_update`, product "gui"). Required: update before `deadline`;
+ * blocked: model requests are refused until the app is updated.
+ */
+export type OmniRushClientUpdate = {
+  required: boolean;
+  blocked: boolean;
+  current: string | null;
+  minimum: string | null;
+  /** UTC ISO 8601. */
+  deadline: string | null;
+  message: string | null;
+  downloadUrl: string | null;
+};
+
+/**
+ * What the app shows for a mandatory update, derived in the Electron main
+ * process from `client_update`, the gateway's `x-omnirush-update-required`
+ * header and HTTP 426 `update_required` refusals.
+ */
+export type OmniRushUpdateGateState = {
+  status: "none" | "required" | "blocked";
+  current: string;
+  minimum: string | null;
+  deadline: string | null;
+  message: string | null;
+  downloadUrl: string;
+  source: "profile" | "header" | "rejection" | null;
+};
+
 export type OmniRushAccountStatus = {
   connected: boolean;
   gatewayConfigured: boolean;
@@ -193,6 +224,8 @@ export type OmniRushAccountStatus = {
    * session the server ended (reauthorizationRequired alone).
    */
   keyringUnavailable?: boolean;
+  /** /device/me `client_update` for this app; absent from an older desktop bridge. */
+  clientUpdate?: OmniRushClientUpdate | null;
 };
 
 export type EngineDoctorResult = {

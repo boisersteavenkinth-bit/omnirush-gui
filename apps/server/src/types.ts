@@ -121,6 +121,12 @@ export type OmniRushGatewayCredentials = OmniRushGatewayCredentialBundle & {
   latest?: () => Promise<OmniRushGatewayCredentialBundle | null>;
   /** Connected account's profile (name and email for the git commit identity default); null when signed out or offline. */
   profile?: () => Promise<{ email: string | null; displayName: string | null } | null>;
+  /**
+   * Hears the gateway's mandatory-update signals: the
+   * `x-omnirush-update-required` header and 426 `update_required` refusals
+   * of model requests (the desktop shows its update banner or blocked view).
+   */
+  onUpdateSignal?: (signal: { kind: "header"; value: string } | { kind: "rejection"; message: string | null }) => void;
 };
 
 export interface ServerConfig {

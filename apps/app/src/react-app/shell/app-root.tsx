@@ -45,6 +45,7 @@ import {
 import { OmniRushContextPublisher } from "./omnirush-context-publisher";
 import { SessionRoute } from "./session-route";
 import { DesktopUpdaterProvider } from "../domains/settings/state/desktop-updater-provider";
+import { UpdateGate } from "./update-gate";
 import { SettingsRoute } from "./settings-route";
 import { ShellConfigProvider } from "./shell-config";
 import { WelcomeRoute } from "./welcome-route";
@@ -380,6 +381,7 @@ export function AppRoot() {
     <>
       <DevProfiler id="AppRoot">
         <DesktopUpdaterProvider>
+        <UpdateGate>
         <ShellConfigProvider>
         <AppMenuProvider>
         <OmniRushControlProvider>
@@ -515,6 +517,7 @@ export function AppRoot() {
         </OmniRushControlProvider>
         </AppMenuProvider>
         </ShellConfigProvider>
+        </UpdateGate>
         </DesktopUpdaterProvider>
       </DevProfiler>
       {/*

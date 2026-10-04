@@ -7,6 +7,7 @@ import { Check, CirclePause, LoaderCircle, Minimize2 } from "lucide-react";
 import { toast } from "@/components/ui/sonner";
 
 import { captureAnalyticsEvent } from "@/app/lib/analytics";
+import { useUpdateGateBlocked } from "@/app/lib/update-gate";
 import { interruptSessionTurn, sessionNeedsStop, submitAfterInterruption, subscribeSessionInterruption } from "@/app/lib/opencode-interruption";
 import { createClient, createPromptMessageID, hasAcceptedPromptMessage, isPromptAdmissionUnknown, unwrap } from "@/app/lib/opencode";
 import { compactSession } from "@/app/lib/opencode-session";
@@ -1161,6 +1162,8 @@ export function SessionSurface(props: SessionSurfaceProps) {
   // global default must not disable a conversation that remembers a valid
   // model, and a pending catalog (loading or superseded by a workspace
   // switch) never renders "Model no longer available".
+  // Model requests are refused for this app version until it is updated.
+  const updateBlocked = useUpdateGateBlocked();
   const sessionModelUnavailable = props.resolveModelAvailability
     ? props.resolveModelAvailability(sessionModel.selectedModel).status === "unavailable"
     : Boolean(props.modelUnavailable);
@@ -3310,7 +3313,7 @@ export function SessionSurface(props: SessionSurfaceProps) {
         steering={steering}
         submissionPreparing={preparingCloudTools || sending || autoSending}
         queuedCount={queuedItems.length}
-        disabled={model.transitionState !== "idle" || sessionModelUnavailable || queuedDrainState.phase.kind === "admission_unknown"}
+        disabled={model.transitionState !== "idle" || sessionModelUnavailable || queuedDrainState.phase.kind === "admission_unknown" || updateBlocked}
         modelUnavailable={sessionModelUnavailable}
         modelUnavailableMessage={sessionModelUnavailable ? props.modelUnavailableMessage : null}
         organizationModelsEmpty={props.organizationModelsEmpty}

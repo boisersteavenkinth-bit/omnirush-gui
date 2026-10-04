@@ -811,3 +811,16 @@ select:disabled {
     min-height: 100dvh;
   }
 }
+
+/* The required-update banner (react-app/shell/update-gate.tsx) shifts the app
+   down by its height: viewport-sized boxes inside it take the shifted box. */
+[data-update-gate-shifted] .h-dvh,
+[data-update-gate-shifted] .h-svh,
+[data-update-gate-shifted] .h-screen {
+  height: 100%;
+}
+[data-update-gate-shifted] .min-h-dvh,
+[data-update-gate-shifted] .min-h-svh,
+[data-update-gate-shifted] .min-h-screen {
+  min-height: 100%;
+}

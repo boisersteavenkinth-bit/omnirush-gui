@@ -1295,3 +1295,43 @@ test("a session the server ended in file mode is not reported as a missing keyri
   assert.equal(status.reauthorizationRequired, true);
   assert.equal(status.keyringUnavailable, undefined);
 });
+
+test("client_update on /device/me reaches the update gate and the account status", async () => {
+  const heard = [];
+  let clientUpdate = {
+    required: true,
+    product: "gui",
+    current: "3.0.2",
+    minimum: "3.1.0",
+    deadline: "2026-10-04T17:12:00Z",
+    blocked: false,
+    message: "Update to 3.1.0",
+    download_url: "https://omnirush.ai/download",
+  };
+  const options = await storeOptions({
+    env: LEGACY_ENV,
+    onClientUpdate: (value) => heard.push(value),
+    fetchImpl: async () => Response.json({ email: "person@example.com", status: "active", ...(clientUpdate ? { client_update: clientUpdate } : {}) }),
+  });
+  const store = createDesktopOmniRushAccountStore(options);
+  const status = await store.status();
+  assert.equal(status.connected, true);
+  assert.deepEqual(status.clientUpdate, {
+    required: true,
+    blocked: false,
+    current: "3.0.2",
+    minimum: "3.1.0",
+    deadline: "2026-10-04T17:12:00.000Z",
+    message: "Update to 3.1.0",
+    downloadUrl: "https://omnirush.ai/download",
+  });
+  assert.equal(heard.length, 1);
+  assert.equal(heard[0].minimum, "3.1.0");
+  // A profile without client_update is heard as null: the server lifted it.
+  clientUpdate = null;
+  assert.equal((await store.status()).clientUpdate, null);
+  assert.deepEqual(heard.slice(1), [null]);
+  // A listener that throws never breaks the account status.
+  const throwing = createDesktopOmniRushAccountStore({ ...options, onClientUpdate: () => { throw new Error("listener"); } });
+  assert.equal((await throwing.status()).connected, true);
+});

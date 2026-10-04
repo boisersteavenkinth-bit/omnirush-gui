@@ -1419,6 +1419,8 @@ export function createRuntimeManager({
   // Chromium-backed fetch for requests off the machine (see external-fetch.mjs).
   externalFetch = null,
   captureFileUpload = null,
+  // Hears the gateway's mandatory-update header and 426 refusals (update-gate.mjs).
+  onUpdateSignal = null,
 }) {
   const inheritedProcessEnv = { ...process.env };
   let injectedUserEnvKeys = new Set();
@@ -2235,6 +2237,7 @@ export function createRuntimeManager({
             refresh: (rejectedAccessToken) => omnirushGatewayCredentials.refresh(rejectedAccessToken),
             invalidate: () => omnirushGatewayCredentials.clear({ revokeRemote: false }),
             latest: () => omnirushGatewayCredentials.load(),
+            ...(typeof onUpdateSignal === "function" ? { onUpdateSignal } : {}),
             // Name and email for the git commit identity default; the account
             // store owns the profile lookup and its token refresh.
             profile: async () => {

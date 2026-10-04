@@ -85,6 +85,7 @@ import { readSkillFolder } from "./skill-folder.mjs";
 import { createDesktopVaultKeyProvider } from "./secure-vault-key.mjs";
 import { applyLinuxPasswordStore, recordLinuxPasswordStore } from "./linux-password-store.mjs";
 import { createDesktopOmniRushAccountStore, legacyKeychainAllowed } from "./omnirush-account.mjs";
+import { UPDATE_GATE_CHANNEL, createUpdateGate } from "./update-gate.mjs";
 import { createExternalFetch, createExternalFileUpload } from "./external-fetch.mjs";
 import {
   clearOmniRushSentrySession,
@@ -1332,6 +1333,21 @@ function validateSkillName(raw) {
   return trimmed;
 }
 
+// Mandatory client update (update-gate.mjs): the banner and the blocked view
+// in the renderer follow this state. It never stops the capture service, so
+// session uploads keep flushing while the app waits to be updated.
+const updateGate = createUpdateGate({
+  appVersion: app.getVersion(),
+  log: (message) => console.info(message),
+  onChange: (state) => {
+    try {
+      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(UPDATE_GATE_CHANNEL, state);
+    } catch {
+      // The window may be closing; the renderer reads the state again on load.
+    }
+  },
+});
+
 const omnirushAccountStore = createDesktopOmniRushAccountStore({
   filePath: path.join(app.getPath("userData"), "omnirush-account.bin"),
   // Sign-in, device code, token refresh, profile and sign-out.
@@ -1340,6 +1356,7 @@ const omnirushAccountStore = createDesktopOmniRushAccountStore({
   // Linux without a usable keyring only; unencrypted at rest, owner-only.
   fallbackFilePath: path.join(app.getPath("userData"), "private-credentials", "omnirush-account.json"),
   onKeyringSealed: recordKeyringSealed("omnirush-account.bin"),
+  onClientUpdate: (clientUpdate) => updateGate.signal({ kind: "profile", clientUpdate }),
   legacyKeychain: legacyKeychainAllowed({
     appIdentifier: APP_IDENTIFIER,
     productionAppIdentifier: TAURI_APP_IDENTIFIER,
@@ -1385,6 +1402,8 @@ const runtimeManager = createRuntimeManager({
         onKeyringSealed: recordKeyringSealed("local-managed-mcp-vault-key.bin"),
       }),
   omnirushGatewayCredentials: omnirushAccountStore,
+  // The gateway's x-omnirush-update-required header and 426 refusals.
+  onUpdateSignal: (signal) => updateGate.signal(signal),
   // Session upload envelopes report environment.app_version from the desktop build, not the server package.
   appVersion: app.getVersion(),
 });
@@ -2774,6 +2793,21 @@ ipcMain.handle("omnirush:shell:openExternal", async (_event, url) => {
   }
   return openExternalUrl(url.trim());
 });
+ipcMain.handle("omnirush:update-gate:get", async () => updateGate.state());
+// Asks /device/me again (the renderer does on focus too): client_update there
+// is authoritative, so an update the server stopped requiring clears the gate.
+ipcMain.handle("omnirush:update-gate:refresh", async () => {
+  await omnirushAccountStore.status().catch(() => null);
+  return updateGate.state();
+});
+{
+  // The profile is read at launch and every 30 minutes even when no
+  // account view is open, so a required update is known before the
+  // deadline, not only from the first refused model request.
+  const readProfile = () => { void omnirushAccountStore.status().catch(() => null); };
+  setTimeout(readProfile, 15_000).unref?.();
+  setInterval(readProfile, 30 * 60_000).unref?.();
+}
 ipcMain.handle("omnirush:shell:relaunch", async () => {
   app.relaunch();
   app.quit();
