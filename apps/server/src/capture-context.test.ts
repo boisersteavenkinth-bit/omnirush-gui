@@ -60,8 +60,8 @@ function write(root, files) {
 const ok = (stdout, stderr = "") => ({ code: 0, stdout, stderr, truncated: false, timedOut: false });
 
 function fakeRun(outputs, calls = []) {
-  return async (file, args) => {
-    calls.push({ file, args });
+  return async (file, args, options = {}) => {
+    calls.push({ file, args, env: options.env });
     const output = outputs[path.basename(file)];
     if (output === undefined) return null;
     return typeof output === "function" ? output(args) : output;
@@ -315,6 +315,7 @@ test("#16 setup: skills/plugins with scrubbed texts, MCP servers with names only
 // --- #17 package-manager config -------------------------------------------------------------
 
 test("#17 package-manager config: keys and safe values kept, every credential key dropped, URLs stripped, scrub on top", async () => {
+  const goCalls = [];
   const home = tmp("pmhome");
   write(home, {
     ".npmrc": `registry=https://registry.npmjs.org/\n@acme:registry=https://npm.acme.dev/\n//npm.acme.dev/:_authToken=${NPM_TOKEN}\n//registry.npmjs.org/:_auth=${Buffer.from(`u:${PASSWORD}`).toString("base64")}\n_password=${PASSWORD}\nemail=dev@acme.dev\nstrict-ssl=true\nproxy=http://proxyuser:${PASSWORD}@proxy.acme.dev:8080\n`,
@@ -332,8 +333,9 @@ test("#17 package-manager config: keys and safe values kept, every credential ke
     platform: "linux",
     env: {},
     resolve: (command) => (command === "go" ? "/usr/local/go/bin/go" : null),
-    run: fakeRun({ go: ok(JSON.stringify({ GOPROXY: `https://gouser:${PASSWORD}@goproxy.acme.dev,direct`, GOPRIVATE: "github.com/acme/*", GOFLAGS: "-mod=mod" })) }),
+    run: fakeRun({ go: ok(JSON.stringify({ GOPROXY: `https://gouser:${PASSWORD}@goproxy.acme.dev,direct`, GOPRIVATE: "github.com/acme/*", GOFLAGS: "-mod=mod" })) }, goCalls),
   });
+  assert.equal(goCalls[0].env.GOTOOLCHAIN, "local", "go env never downloads a toolchain");
   const byTool = Object.fromEntries(result.files.map((file) => [`${file.tool}:${file.path}`, file]));
   const npm = byTool["npm:~/.npmrc"];
   assert.deepEqual(npm.entries, { registry: "https://registry.npmjs.org/", "@acme:registry": "https://npm.acme.dev/", "strict-ssl": "true", proxy: "http://proxy.acme.dev:8080" });
@@ -434,7 +436,7 @@ function tracker(root, temp, extra = {}) {
   const t = new outside.OutsideTracker({
     root,
     sessionStartMs: Date.now() - 1_000,
-    privacy: privacy.currentPrivacy(),
+    privacy: extra.privacy ?? privacy.currentPrivacy(),
     scrub: SCRUB,
     exclusion: (abs) => (uploader.isUploadPathDenied(abs.replace(/^\/+/, "")) ? "credential" : null),
     reportPath: (abs) => reported.push(abs),
@@ -678,4 +680,70 @@ test("CLI/desktop parity: the context modules match PARITY.sha256 (the same list
   const files = fs.readdirSync(contextDir).filter((name) => name.endsWith(".ts")).sort();
   assert.deepEqual([...listed.keys()].sort(), files);
   for (const name of files) assert.equal(createHash("sha256").update(fs.readFileSync(path.join(contextDir, name))).digest("hex"), listed.get(name), `${name} changed: port it to the CLI and update PARITY.sha256 in both`);
+});
+
+// --- review fixes: settings folders, secret stores, credential files -----------------------
+
+test("credential files are never captured outside the project, wherever they are", async () => {
+  for (const file of [
+    "/h/Library/Application Support/Google/Chrome/Default/Cookies", "/h/.config/google-chrome/Default/Login Data", "/x/Web Data", "/x/Local State",
+    "/h/.mozilla/firefox/p.default/key4.db", "/x/logins.json", "/x/cookies.sqlite", "/h/Library/Keychains/login.keychain-db", "/h/.config/gh/hosts.yml",
+    "/h/.netrc", "/h/.pgpass", "/h/.npmrc", "/h/.pypirc", "/h/.aws/credentials", "/x/credentials.json", "/x/server.pem", "/x/tls.key", "/h/.ssh/id_ed25519",
+    "/h/.docker/config.json", "/h/.kube/config", "/x/dev.kubeconfig", "/h/.git-credentials", "C:\\Users\\a\\AppData\\Local\\Google\\Chrome\\User Data\\Default\\Cookies",
+  ]) assert.equal(privacy.isSecretFile(file), true, file);
+  for (const file of ["/x/index.js", "/x/config.json", "/x/README.md", "/x/keys.ts", "/x/hosts.yml", "/x/kube/deploy.yaml"]) assert.equal(privacy.isSecretFile(file), false, file);
+  const archiveOutside = await import("./session-archive/outside.js");
+  for (const file of ["/srv/app/Cookies", "/srv/app/.npmrc", "/srv/app/id_rsa", "/srv/app/cert.pem", "/srv/gh/hosts.yml"]) {
+    assert.equal(archiveOutside.outsideExclusion(file, { appDirs: [], home: "/h", includeCredentialFiles: true }), "credential", file);
+  }
+});
+
+test("a folder the agent only worked in is refused when it is a settings folder, a secret store or another account's repository", async () => {
+  const home = tmp("home-refuse");
+  const root = tmp("proj-refuse");
+  const later = { "fresh.txt": "changed this session\n" };
+  const dirs = {
+    chrome: write(path.join(home, "Library/Application Support/Google/Chrome/Default"), { Cookies: "c", "Login Data": "l", "Preferences": "{}" }),
+    config: write(path.join(home, ".config/gh"), { "hosts.yml": `oauth_token: ${GH_TOKEN}\n`, "config.yml": "git_protocol: ssh\n" }),
+    local: write(path.join(home, ".local/share/app"), later),
+    appdata: write(path.join(home, "AppData/Roaming/Code/User"), later),
+    snap: write(path.join(home, "snap/firefox/common"), later),
+    pass: write(path.join(tmp("pm"), "Bitwarden"), later),
+  };
+  const { t, reported } = tracker(root, tmp("temp-refuse"), { privacy: { home, user: null }, sessionStartMs: Date.now() - 60_000 });
+  const calls = Object.values(dirs).map((dir, i) => shellCall(`c${i}`, `cd ${JSON.stringify(dir)} && ls`, root, i));
+  calls.push({ callId: "w", tool: "bash", input: { command: "ls" }, status: "completed", start: 9, end: 10, command: "ls", cwd: path.join(home, ".config") });
+  const result = await t.processCalls(calls);
+  assert.deepEqual(result.folders, []);
+  assert.deepEqual(reported, []);
+  for (const dir of Object.values(dirs)) assert.ok((await t.refusedWorkFolder(dir)) !== null, dir);
+  // Another account's git work tree, even outside home.
+  const foreign = write(tmp("foreign"), { ".git/HEAD": "ref: refs/heads/main\n", "src/a.js": "1\n" });
+  const other = tracker(root, tmp("temp-foreign"), { uid: (process.getuid?.() ?? 0) + 1, sessionStartMs: Date.now() - 60_000 });
+  assert.equal(await other.t.refusedWorkFolder(path.join(foreign, "src")), "foreign_git");
+  const foreignResult = await other.t.processCalls([shellCall("f", `cd ${foreign}/src && ls`, root, 1)]);
+  assert.deepEqual(foreignResult.folders, []);
+  assert.deepEqual(other.reported, []);
+  // The same repository is fine for its owner.
+  const own = tracker(root, tmp("temp-own"), { sessionStartMs: Date.now() - 60_000 });
+  assert.equal(await own.t.refusedWorkFolder(path.join(foreign, "src")), null);
+});
+
+test("a folder the agent created stays allowed, even under ~/.config, minus credential files and secret stores", async () => {
+  const home = tmp("home-created");
+  const root = tmp("proj-created");
+  const made = path.join(home, ".config", "newtool");
+  const { t, reported } = tracker(root, tmp("temp-created"), { privacy: { home, user: null } });
+  write(made, {
+    "settings.json": "{}", "src/main.js": "1\n", Cookies: "c", "Login Data": "l", ".npmrc": `//r/:_authToken=${NPM_TOKEN}\n`, "id_rsa": "k", "tls.key": "k", "cert.pem": "p",
+    ".docker/config.json": "{}", "gh/hosts.yml": "x", "credentials.json": "{}", "Chrome/Default/Preferences": "{}", "1Password/data.sqlite": "x",
+  });
+  const result = await t.processCalls([shellCall("mk", `mkdir -p ${made} && cd ${made} && echo ok`, root, 1)]);
+  assert.equal(result.folders.length, 1);
+  assert.equal(result.folders[0].reason, "created");
+  assert.deepEqual(reported.map((p) => path.relative(made, p)).sort(), ["settings.json", "src/main.js"]);
+});
+
+test("Windows: a timed-out command's whole process tree is ended (taskkill /T /F)", () => {
+  assert.deepEqual(exec.windowsTreeKillArgs(4242), ["/PID", "4242", "/T", "/F"]);
 });

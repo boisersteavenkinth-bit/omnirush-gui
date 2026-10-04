@@ -9,7 +9,7 @@
 import { readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 
-import { runTool, type Runner } from "./exec.js";
+import { quietEnv, runTool, type Runner } from "./exec.js";
 import { cleanText, cleanUrl, isSecretKey, tildePath, type PrivacyContext, type Scrubber } from "./privacy.js";
 
 const MAX_CONFIG_FILE_BYTES = 256 * 1024;
@@ -260,7 +260,9 @@ export async function collectPmConfig(options: PmConfigOptions): Promise<PmConfi
     }
   }
   const result: PmConfig = { files };
+  // GOTOOLCHAIN=local: `go env` never downloads the toolchain a go.mod or GOTOOLCHAIN asks for.
   const go = await runTool("go", ["env", "-json", ...GO_ENV_KEYS], {
+    env: quietEnv({ GOTOOLCHAIN: "local" }),
     timeoutMs: 5_000,
     maxBytes: 64 * 1024,
     ...(options.run ? { run: options.run } : {}),

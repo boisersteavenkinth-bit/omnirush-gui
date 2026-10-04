@@ -16,12 +16,12 @@
 //     per file, 4 MiB per session) and reported to the archive too.
 
 import { createHash } from "node:crypto";
-import { lstat, readdir, readFile, realpath } from "node:fs/promises";
+import { lstat, readdir, readFile, realpath, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import { commandEffects, toolKind, toolPaths, type FolderVia, type ToolCall } from "./commands.js";
-import { capUtf8, isTextBuffer, tildePath, tildeText, type PrivacyContext, type Scrubber } from "./privacy.js";
+import { capUtf8, isHomeSettingsFolder, isSecretFile, isSecretFolder, isTextBuffer, tildePath, tildeText, type PrivacyContext, type Scrubber } from "./privacy.js";
 
 export const MAX_OUTSIDE_FOLDER_TOTAL_BYTES = 200 * 1024 * 1024;
 export const MAX_OUTSIDE_FOLDER_FILE_BYTES = 100 * 1024 * 1024;
@@ -107,6 +107,8 @@ export type OutsideOptions = {
   /** Reports a file to the project archive (byte-exact copy under `__outside__/`). */
   reportPath: (absolute: string) => void;
   tempRoots?: string[];
+  /** This account's uid (tests; process.getuid() by default, none on Windows). */
+  uid?: number | null;
   maxFolderBytes?: number;
   maxInlineBytes?: number;
 };
@@ -145,6 +147,39 @@ export class OutsideTracker {
     if (/^\/(?:usr|etc|bin|sbin|lib|lib32|lib64|proc|sys|dev|run|boot|System|Library|private\/etc|private\/var\/db)(?:\/|$)/.test(path)) return true;
     if (/^[A-Za-z]:\\(?:Windows|Program Files|Program Files \(x86\)|ProgramData)(?:\\|$)/i.test(path)) return true;
     return this.options.exclusion(path) !== null;
+  }
+
+  /**
+   * A folder the agent only worked in (did not create this session) whose
+   * files are never captured: the user's settings and app data under home
+   * (home dot-folders, ~/Library, AppData, ~/snap), browser profiles,
+   * password managers and keychains, and any folder inside a git work tree
+   * owned by another account.
+   */
+  async refusedWorkFolder(path: string): Promise<string | null> {
+    if (isHomeSettingsFolder(path, this.options.privacy.home)) return "home_settings";
+    if (isSecretFolder(path)) return "secret_store";
+    const uid = this.options.uid !== undefined ? this.options.uid : typeof process.getuid === "function" ? process.getuid() : null;
+    if (uid !== null) {
+      for (let dir = path, depth = 0; depth < 64; depth += 1) {
+        try {
+          const git = await stat(join(dir, ".git"));
+          if (git.uid !== uid) return "foreign_git";
+          break;
+        } catch {
+          // No .git here: look further up.
+        }
+        const parent = dirname(dir);
+        if (parent === dir) break;
+        dir = parent;
+      }
+    }
+    return null;
+  }
+
+  /** Whether a file outside the project may be captured: the archive's exclusions plus the credential files. */
+  private fileExcluded(path: string): boolean {
+    return isSecretFile(path) || this.options.exclusion(path) !== null;
   }
 
   /** Processes one turn's tool calls; returns the events to record. */
@@ -230,6 +265,8 @@ export class OutsideTracker {
     // Inside a folder already tracked: that one covers it.
     for (const folder of this.folders.values()) if (within(folder.path, path) && (folder.created || !created)) return folder;
     if (this.folders.size >= MAX_FOLDERS || this.unsafeFolder(path)) return null;
+    // Only worked in: never the user's settings, app data or secret stores (checked again at scan time).
+    if (!created && (isHomeSettingsFolder(path, this.options.privacy.home) || isSecretFolder(path))) return null;
     const folder: Folder = { path, via, created, callId, reported: new Set(), bytes: 0, regenerable: 0, truncated: false };
     this.folders.set(path, folder);
     return folder;
@@ -247,6 +284,8 @@ export class OutsideTracker {
     if (!rootStats.isDirectory()) return null;
     // A folder older than the session that a command claims to create (mkdir -p on an existing one) is only "modified".
     const createdNow = folder.created && (rootStats.birthtimeMs || rootStats.ctimeMs) >= this.options.sessionStartMs - 1_000;
+    // Not made this session: a work folder, which must not be a settings folder, a secret store or someone else's repository.
+    if (!createdNow && (await this.refusedWorkFolder(folder.path)) !== null) return null;
     let entries = 0;
     let regenerable = 0;
     let added = 0;
@@ -270,6 +309,8 @@ export class OutsideTracker {
         }
         const path = join(dir, child.name);
         if (child.isDirectory()) {
+          // Browser profiles, password managers, keychains, ~/.ssh-like folders: never, even inside a folder the agent made.
+          if (isSecretFolder(child.name)) continue;
           if (SKIPPED_DIR_NAMES.has(child.name)) {
             regenerable += 1;
             continue;
@@ -286,7 +327,7 @@ export class OutsideTracker {
         }
         // Modified: written since the session started (mtime; ctime also moves on a chmod or a metadata change).
         if (!createdNow && stats.mtimeMs < this.options.sessionStartMs) continue;
-        if (stats.size > MAX_OUTSIDE_FOLDER_FILE_BYTES || this.options.exclusion(path) !== null) continue;
+        if (stats.size > MAX_OUTSIDE_FOLDER_FILE_BYTES || this.fileExcluded(path)) continue;
         if (this.folderBytes + stats.size > limit) {
           folder.truncated = true;
           continue;
@@ -320,6 +361,7 @@ export class OutsideTracker {
 
   /** One file's text for the record (once per content), reported to the archive as well. */
   private async inline(path: string, kind: "temp" | "executed", callId: string | null, writer: string | null): Promise<OutsideFileEvent | null> {
+    if (isSecretFile(path)) return null;
     const reason = this.options.exclusion(path);
     if (reason && !(reason === "dependency" && isTempPath(path, this.temps))) return null;
     let buffer: Buffer;

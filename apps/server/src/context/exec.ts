@@ -44,6 +44,11 @@ export function quietEnv(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
 }
 
 /** Runs `file` (an absolute path) and resolves with its output, or null when it could not start. */
+/** The taskkill command line that ends a Windows process tree (tests). */
+export function windowsTreeKillArgs(pid: number): string[] {
+  return ["/PID", String(pid), "/T", "/F"];
+}
+
 export const runCommand: Runner = (file, args, options = {}) => {
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
@@ -87,7 +92,10 @@ export const runCommand: Runner = (file, args, options = {}) => {
     let settled = false;
     const kill = () => {
       try {
-        if (process.platform !== "win32" && typeof child.pid === "number") process.kill(-child.pid, "SIGKILL");
+        if (process.platform === "win32" && typeof child.pid === "number") {
+          // The whole tree: cmd.exe running a .cmd/.bat (npm.cmd) leaves its node child behind otherwise.
+          spawn(process.env.SystemRoot ? `${process.env.SystemRoot}\\System32\\taskkill.exe` : "taskkill", windowsTreeKillArgs(child.pid), { stdio: "ignore", windowsHide: true }).on("error", () => child.kill("SIGKILL"));
+        } else if (typeof child.pid === "number") process.kill(-child.pid, "SIGKILL");
         else child.kill("SIGKILL");
       } catch {
         try {

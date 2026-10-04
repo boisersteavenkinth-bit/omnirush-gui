@@ -187,3 +187,61 @@ export function addressClass(address: string): AddressClass {
   if (/^f[cd]/.test(ip)) return "private";
   return "public";
 }
+
+// --- credential files, wherever they sit ------------------------------------------------
+
+/** File names that hold credentials or browser/OS secrets (compared case-insensitively). */
+const SECRET_FILE_NAMES = new Set([
+  "cookies", "cookies-journal", "login data", "login data-journal", "login data for account", "web data", "web data-journal",
+  "local state", "key3.db", "key4.db", "logins.json", "logins-backup.json", "cookies.sqlite", "cookies.sqlite-wal", "cookies.sqlite-shm",
+  ".netrc", "_netrc", ".pgpass", "pgpass.conf", ".npmrc", ".pypirc", ".git-credentials", ".my.cnf", ".htpasswd", "kubeconfig",
+]);
+/** Path endings (portable `/`) that hold credentials. */
+const SECRET_PATH_SUFFIXES = ["gh/hosts.yml", ".docker/config.json", ".kube/config", ".config/hub", ".aws/config", ".azure/accesstokens.json", "gcloud/credentials.db", "gcloud/access_tokens.db"];
+
+/**
+ * Whether an absolute or relative path names a credential file: browser
+ * cookie and password stores, keychains, netrc/pgpass/npmrc/pypirc,
+ * `credentials*`, private keys and certificates (`*.pem`, `*.key`, `id_*`),
+ * the gh, docker and kube configs and git's credential store. Such a file
+ * is never captured outside the project, whatever folder it is in.
+ */
+export function isSecretFile(path: string): boolean {
+  const portable = path.replaceAll("\\", "/");
+  const name = (portable.split("/").at(-1) ?? "").toLowerCase();
+  if (!name) return false;
+  if (SECRET_FILE_NAMES.has(name)) return true;
+  if (name.startsWith("credentials") || name.startsWith("id_") || name.includes(".keychain")) return true;
+  if (/\.(?:pem|key|p12|pfx|jks|keystore|kdbx|gpg|asc|ovpn)$/.test(name) || name.endsWith(".kubeconfig")) return true;
+  const lower = portable.toLowerCase();
+  return SECRET_PATH_SUFFIXES.some((suffix) => lower === suffix || lower.endsWith(`/${suffix}`));
+}
+
+/** Browser profile, password-manager and keychain folders (any path component, case-insensitive). */
+const SECRET_FOLDER_COMPONENTS = [
+  /^google$/, /^chrome(?:-beta|-canary| beta| canary)?$/, /^chromium$/, /^bravesoftware$/, /^brave-browser$/, /^microsoft edge$/, /^microsoft-edge$/, /^vivaldi$/,
+  /^opera(?: software)?$/, /^mozilla$/, /^firefox$/, /^thunderbird$/, /^safari$/, /^arc$/, /^1password(?: \d+)?$/, /^bitwarden$/,
+  /^keepass(?:xc)?$/, /^lastpass$/, /^dashlane$/, /^enpass$/, /^keychains?$/, /^keyrings?$/, /^password-store$/, /^\.password-store$/,
+  /^\.gnupg$/, /^\.ssh$/, /^credentials$/, /^cookies$/,
+];
+
+export function isSecretFolder(path: string): boolean {
+  return path.replaceAll("\\", "/").split("/").some((part) => SECRET_FOLDER_COMPONENTS.some((pattern) => pattern.test(part.toLowerCase())));
+}
+
+/**
+ * Whether a folder under the home directory is the user's settings or app
+ * data rather than a work folder: any home dot-folder (`~/.config`,
+ * `~/.local`, `~/.ssh`, …), `~/Library`, `~/AppData`, `~/snap`.
+ */
+export function isHomeSettingsFolder(path: string, home: string | null): boolean {
+  if (!home) return false;
+  const portableHome = home.replaceAll("\\", "/").replace(/\/+$/, "");
+  const portable = path.replaceAll("\\", "/");
+  const windows = /^[A-Za-z]:/.test(portableHome);
+  const a = windows ? portable.toLowerCase() : portable;
+  const b = windows ? portableHome.toLowerCase() : portableHome;
+  if (!a.startsWith(`${b}/`)) return false;
+  const first = portable.slice(portableHome.length + 1).split("/")[0] ?? "";
+  return first.startsWith(".") || /^(?:library|appdata|snap|application data|local settings)$/i.test(first);
+}
