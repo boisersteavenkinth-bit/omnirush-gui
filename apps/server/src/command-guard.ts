@@ -32,6 +32,15 @@ export type ResolveOptions = {
   isFile?: (path: string) => boolean;
 };
 
+function isDirectory(path: string): boolean {
+  if (!path) return false;
+  try {
+    return statSync(path).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
 function defaultIsFile(path: string): boolean {
   try {
     return statSync(path).isFile();
@@ -100,7 +109,7 @@ function runXcodeSelect(bin = "/usr/bin/xcode-select"): Promise<boolean> {
     };
     let child: ReturnType<typeof spawn>;
     try {
-      child = spawn(bin, ["-p"], { stdio: "ignore", windowsHide: true });
+      child = spawn(bin, ["-p"], { stdio: ["ignore", "pipe", "ignore"], windowsHide: true });
     } catch {
       resolvePromise(false);
       return;
@@ -111,7 +120,14 @@ function runXcodeSelect(bin = "/usr/bin/xcode-select"): Promise<boolean> {
     }, XCODE_SELECT_TIMEOUT_MS);
     timer.unref?.();
     child.on("error", () => finish(false));
-    child.on("close", (code) => finish(code === 0));
+    let printed = "";
+    child.stdout?.on("data", (chunk: Buffer) => {
+      if (printed.length < 4096) printed += chunk.toString("utf8");
+    });
+    // Installed only when it succeeds AND the folder it prints exists (as the
+    // engine's guard checks): a removed CLT or a stale DEVELOPER_DIR exits 0
+    // with a path that is gone, and the /usr/bin shims then fail or prompt.
+    child.on("close", (code) => finish(code === 0 && isDirectory(printed.trim())));
   });
 }
 
