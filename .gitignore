@@ -75,3 +75,5 @@ evals/results/
 
 # Warden local run logs
 .warden/logs/
+# node_modules as a symlink too (a trailing-slash pattern only matches directories)
+node_modules
