@@ -11,6 +11,7 @@ import { loopbackFetch } from "./server-fetch.js";
 import { isFinishedAssistantMessage, isPromptMessage, type ArchiveEngineReads, type ProjectArchiveLifecycle } from "./session-archive/lifecycle.js";
 import { MAX_UPLOAD_CHILD_SESSION_DEPTH, type UploadSessionModel, type SessionUploader } from "./session-uploader.js";
 import { recordTurnFiles, type TurnFilesInput } from "./session-archive/turn-files.js";
+import { watchToolStarts } from "./session-archive/tool-start.js";
 
 /** The engine a captured request went to: base URL, request headers (the engine's auth), query and API generation. */
 export type EngineTarget = {
@@ -751,7 +752,7 @@ export function projectArchiveEngineReads(target: EngineTarget | (() => EngineTa
  */
 export function observeUploadedSession(input: {
   sessionUploader: ObservedUploader;
-  archive: Pick<ProjectArchiveLifecycle, "turnFollowed" | "turnCompleted" | "turnIncomplete">;
+  archive: Pick<ProjectArchiveLifecycle, "turnFollowed" | "turnCompleted" | "turnIncomplete"> & Partial<Pick<ProjectArchiveLifecycle, "turnMessages">>;
   /**
    * The session's workspace: each settled turn reports the files outside it
    * that the turn touched to the archive, and records the files it read
@@ -920,6 +921,8 @@ export function observeUploadedSession(input: {
     // survives app restarts; without the messages the archiver numbers it
     // right after the last archived turn. It also arms the idle final archive.
     turnArchived = true;
+    // Capture v2: the turn's attachments are staged ahead of its delta.
+    if (history) input.archive.turnMessages?.(sessionId, history.delta);
     input.archive.turnCompleted(sessionId, history ? history.outline : null);
   };
 
@@ -1056,4 +1059,46 @@ export function observeUploadedSession(input: {
     observer.sessions.delete(sessionId);
   });
   return session.done;
+}
+
+/** Capture v2: the tool-start listener of each session's current turn (followToolStart). */
+const TOOL_WATCHES = new WeakMap<SessionObservers, Map<string, AbortController>>();
+/** A turn's listener stops after this long at most (the observer's own bound). */
+const MAX_TOOL_WATCH_MS = MAX_OBSERVED_TURN_MS;
+
+/**
+ * Capture v2, #9: call when a prompt of the session goes to the engine.
+ * Listens to the engine's event stream until the turn's first tool call
+ * starts and tells the project archive (toolStarted), which captures the
+ * folder's state in the background when it changed. A newer prompt of the
+ * session replaces the listener; the observers' stop ends it.
+ */
+export function followToolStart(input: {
+  observers: SessionObservers;
+  archive: Pick<ProjectArchiveLifecycle, "toolStarted">;
+  sessionId: string;
+  target: EngineTarget;
+}): void {
+  let watches = TOOL_WATCHES.get(input.observers);
+  if (!watches) {
+    watches = new Map();
+    TOOL_WATCHES.set(input.observers, watches);
+  }
+  watches.get(input.sessionId)?.abort();
+  const controller = new AbortController();
+  watches.set(input.sessionId, controller);
+  const map = watches;
+  const { baseUrl, headers, search, engine } = input.target;
+  const url = buildOpencodeProxyUrl(baseUrl, engine === "v2" ? "/api/event" : "/event", search);
+  const signal = AbortSignal.any([controller.signal, input.observers.controller.signal, AbortSignal.timeout(MAX_TOOL_WATCH_MS)]);
+  void watchToolStarts({
+    url,
+    headers: new Headers(headers),
+    sessionId: input.sessionId,
+    signal,
+    fetch: (target, init) => loopbackFetch(target, init),
+    onToolStart: () => input.archive.toolStarted(input.sessionId),
+  }).finally(() => {
+    if (map.get(input.sessionId) === controller) map.delete(input.sessionId);
+  });
 }

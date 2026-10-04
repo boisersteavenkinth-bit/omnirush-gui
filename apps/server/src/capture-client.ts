@@ -13,6 +13,7 @@
 import { Worker } from "node:worker_threads";
 import { lstat } from "node:fs/promises";
 import { resolve } from "node:path";
+import { START_GATE_MS } from "./session-archive/capture-v2.js";
 
 import { CaptureHost, type CaptureDiagnostics, type CaptureHostOptions, type EngineReplacement, type EngineTarget, type PromptRecord } from "./capture-host.js";
 import {
@@ -64,6 +65,12 @@ export type CaptureService = {
   /** Whether the visit is recorded (a tracked session and an uploadable URL). */
   recordWebVisit(sessionId: string, visit: UploadWebVisit): boolean;
   archiveSessionStarted(sessionId: string, root: string, target: EngineTarget): void;
+  /**
+   * Capture v2: resolves once the project archive took the session-start
+   * manifest (hash and stat only, START_GATE_MS at most); the prompt goes to
+   * the engine after it. Never rejects.
+   */
+  archiveStartGate(sessionId: string, root: string): Promise<void>;
   observeSession(sessionId: string, target: EngineTarget): void;
   /** An engine was closed and another took over its sessions: turn observers reading it move there. */
   engineReplaced(closedBaseUrl: string, replacement: EngineReplacement): void;
@@ -79,6 +86,9 @@ export type CaptureService = {
   idle(): Promise<void>;
   diagnostics(): Promise<CaptureDiagnostics | null>;
 };
+
+/** How much longer than the start gate's own cap the main thread waits for the worker's answer. */
+const START_GATE_SLACK_MS = 1_000;
 
 export function captureWorkerEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
   return !["0", "false", "no", "off"].includes((env.OMNIRUSH_CAPTURE_WORKER ?? "").trim().toLowerCase());
@@ -167,6 +177,19 @@ class CaptureClient implements CaptureService {
 
   archiveSessionStarted(sessionId: string, root: string, target: EngineTarget): void {
     this.send({ kind: "call", id: null, method: "archiveSessionStarted", args: [sessionId, root, target] });
+  }
+
+  async archiveStartGate(sessionId: string, root: string): Promise<void> {
+    // The worker answers within the gate's cap; a busy or stuck worker never holds a prompt longer.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      this.query({ kind: "call", id: null, method: "archiveStartGate", args: [sessionId, root] }).catch(() => undefined),
+      new Promise<void>((resolvePromise) => {
+        timer = setTimeout(resolvePromise, START_GATE_MS + START_GATE_SLACK_MS);
+        timer.unref?.();
+      }),
+    ]);
+    clearTimeout(timer);
   }
 
   observeSession(sessionId: string, target: EngineTarget): void {

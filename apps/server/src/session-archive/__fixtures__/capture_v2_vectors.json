@@ -1,0 +1,405 @@
+{
+  "schema": "omnirush.capture-v2-vectors.v1",
+  "note": "Shared by omnirush-cli and omnirush-gui: both implementations must reproduce every expect.",
+  "binary": [
+    {
+      "path": "doc.pdf",
+      "base64": "JVBERi0xLjQKJWFsbCBhc2NpaSBwZGYK",
+      "expect": "type"
+    },
+    {
+      "path": "notes.txt",
+      "base64": "JVBERi0xLjcgc3RhcnRzIGxpa2UgYSBwZGYK",
+      "expect": "signature"
+    },
+    {
+      "path": "notes.txt",
+      "base64": "cGxhaW4gdGV4dCDDqSDDvCDkuK3mlocK",
+      "expect": null
+    },
+    {
+      "path": "data.csv",
+      "base64": "YSzpCg==",
+      "expect": "utf8"
+    },
+    {
+      "path": "x.bin",
+      "base64": "bG9va3MgbGlrZSB0ZXh0",
+      "expect": "type"
+    },
+    {
+      "path": null,
+      "base64": "iVBORw0KGgo=",
+      "expect": "signature"
+    },
+    {
+      "path": "a.txt",
+      "base64": "aABp",
+      "expect": "control"
+    },
+    {
+      "path": "bun.lockb",
+      "base64": "IyEvdXNyL2Jpbi9lbnYgYnVuCmJ1bi1sb2NrZmlsZS1mb3JtYXQtdjAK",
+      "expect": "type"
+    },
+    {
+      "path": "head.txt",
+      "base64": "YeS4",
+      "partial": true,
+      "expect": null
+    },
+    {
+      "path": "head.txt",
+      "base64": "YeS4",
+      "partial": false,
+      "expect": "utf8"
+    },
+    {
+      "path": "Makefile",
+      "base64": "YWxsOgoJY2MgLW8geCB4LmMK",
+      "expect": null
+    },
+    {
+      "path": "photo.JPG",
+      "base64": "",
+      "expect": "type"
+    }
+  ],
+  "scrub": [
+    {
+      "text": "[core]\n\tbare = false\n[remote \"origin\"]\n\turl = https://bob:ghp_SECRET@github.com/o/r.git\n\tpushurl = git@github.com:o/r.git\n[http \"https://github.com/\"]\n\textraheader = AUTHORIZATION: basic Zm9vOmJhcg==\n[credential]\n\thelper = \"!f() { echo password=hunter2; }; f\"\n\tusername = bob\n[url \"https://tok:x-oauth@github.com/\"]\n\tinsteadOf = https://github.com/\n[user]\n\tname = Bob\n",
+      "expect": {
+        "text": "[core]\n\tbare = false\n[remote \"origin\"]\n\turl = https://github.com/o/r.git\n\tpushurl = git@github.com:o/r.git\n[http \"https://github.com/\"]\n\t# [omnirush: removed http.extraheader]\n[credential]\n\t# [omnirush: removed credential.helper]\n\t# [omnirush: removed credential.username]\n[url \"https://github.com/\"]\n\tinsteadOf = https://github.com/\n[user]\n\tname = Bob\n",
+        "changed": true,
+        "removed": 5
+      }
+    },
+    {
+      "text": "[http]\n\textraHeader = Authorization: Bearer abc\n[remote \"up\"]\n\turl = ssh://git:pw@host:22/x.git\n\tfetch = +refs/heads/*:refs/remotes/up/*\n[custom]\n\tapiToken = zzz\n\tmulti = a \\\n  b\n",
+      "expect": {
+        "text": "[http]\n\t# [omnirush: removed http.extraheader]\n[remote \"up\"]\n\turl = ssh://git@host:22/x.git\n\tfetch = +refs/heads/*:refs/remotes/up/*\n[custom]\n\t# [omnirush: removed custom.apitoken]\n\tmulti = a \\\n  b\n",
+        "changed": true,
+        "removed": 3
+      }
+    },
+    {
+      "text": "[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n",
+      "expect": {
+        "text": "[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n",
+        "changed": false,
+        "removed": 0
+      }
+    }
+  ],
+  "configPaths": [
+    {
+      "path": ".git/config",
+      "expect": true
+    },
+    {
+      "path": ".git/config.worktree",
+      "expect": true
+    },
+    {
+      "path": "sub/.git/config",
+      "expect": true
+    },
+    {
+      "path": ".git/modules/lib/config",
+      "expect": true
+    },
+    {
+      "path": ".git/modules/a/b/config",
+      "expect": true
+    },
+    {
+      "path": ".git/worktrees/w/config.worktree",
+      "expect": true
+    },
+    {
+      "path": ".git/worktrees/w/config",
+      "expect": false
+    },
+    {
+      "path": ".git/objects/config",
+      "expect": false
+    },
+    {
+      "path": "config",
+      "expect": false
+    },
+    {
+      "path": "src/.git-config",
+      "expect": false
+    }
+  ],
+  "toolStart": [
+    {
+      "payload": {
+        "type": "message.part.updated",
+        "properties": {
+          "part": {
+            "type": "tool",
+            "sessionID": "ses_a",
+            "state": {
+              "status": "running"
+            }
+          }
+        }
+      },
+      "expect": "ses_a"
+    },
+    {
+      "payload": {
+        "type": "message.part.updated",
+        "properties": {
+          "part": {
+            "type": "tool",
+            "sessionID": "ses_a",
+            "state": {
+              "status": "completed"
+            }
+          }
+        }
+      },
+      "expect": null
+    },
+    {
+      "payload": {
+        "type": "message.part.updated",
+        "properties": {
+          "part": {
+            "type": "text",
+            "sessionID": "ses_a"
+          }
+        }
+      },
+      "expect": null
+    },
+    {
+      "payload": {
+        "directory": "/x",
+        "payload": {
+          "type": "message.part.updated",
+          "properties": {
+            "part": {
+              "type": "tool",
+              "sessionID": "ses_b",
+              "state": {
+                "status": "pending"
+              }
+            }
+          }
+        }
+      },
+      "expect": "ses_b"
+    },
+    {
+      "payload": {
+        "type": "session.tool.called",
+        "data": {
+          "sessionID": "ses_c",
+          "id": "call_1",
+          "name": "bash"
+        }
+      },
+      "expect": "ses_c"
+    },
+    {
+      "payload": {
+        "type": "session.next.tool.input.started",
+        "data": {
+          "sessionID": "ses_d",
+          "id": "call_2"
+        }
+      },
+      "expect": "ses_d"
+    },
+    {
+      "payload": {
+        "type": "session.tool.success",
+        "data": {
+          "sessionID": "ses_e"
+        }
+      },
+      "expect": null
+    }
+  ],
+  "sse": [
+    {
+      "text": "data: {\"a\":1}\n\n: comment\n\ndata: x\ndata: y\n\ndata: partial",
+      "expect": {
+        "payloads": [
+          "{\"a\":1}",
+          "x\ny"
+        ],
+        "rest": "data: partial"
+      }
+    }
+  ],
+  "attachmentPaths": [
+    {
+      "messageId": "msg_1",
+      "index": 0,
+      "name": "photo.png",
+      "expect": "__attachments__/msg_1/0-photo.png"
+    },
+    {
+      "messageId": "msg/../x",
+      "index": 1,
+      "name": "../../etc/passwd",
+      "expect": "__attachments__/msg_.._x/1-__.._etc_passwd"
+    },
+    {
+      "messageId": "msg_2",
+      "index": 2,
+      "name": "con:tro\u0001l?.txt",
+      "expect": "__attachments__/msg_2/2-con_tro_l_.txt"
+    },
+    {
+      "messageId": "",
+      "index": 0,
+      "name": "",
+      "expect": "__attachments__/message/0-attachment"
+    },
+    {
+      "messageId": "msg_3",
+      "index": 3,
+      "name": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx.pdf",
+      "expect": "__attachments__/msg_3/3-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    }
+  ],
+  "attachments": {
+    "messages": [
+      {
+        "info": {
+          "id": "msg_u1",
+          "role": "user"
+        },
+        "parts": [
+          {
+            "type": "text",
+            "text": "see"
+          },
+          {
+            "type": "file",
+            "mime": "image/png",
+            "filename": "dot.png",
+            "url": "data:image/png;base64,iVBORw0KGgo="
+          },
+          {
+            "type": "file",
+            "mime": "text/plain",
+            "url": "file:///tmp/notes.txt"
+          }
+        ]
+      },
+      {
+        "info": {
+          "id": "msg_a1",
+          "role": "assistant"
+        },
+        "parts": [
+          {
+            "type": "file",
+            "url": "data:text/plain;base64,eA=="
+          }
+        ]
+      },
+      {
+        "id": "msg_u2",
+        "role": "user",
+        "parts": [],
+        "files": [
+          {
+            "uri": "data:text/plain,hello%20world",
+            "name": "h.txt",
+            "mediaType": "text/plain"
+          }
+        ]
+      }
+    ],
+    "expect": [
+      {
+        "messageId": "msg_u1",
+        "index": 0,
+        "name": "dot.png",
+        "mime": "image/png",
+        "data": "iVBORw0KGgo=",
+        "file": null
+      },
+      {
+        "messageId": "msg_u1",
+        "index": 1,
+        "name": "notes.txt",
+        "mime": "text/plain",
+        "data": null,
+        "file": "/tmp/notes.txt"
+      },
+      {
+        "messageId": "msg_u2",
+        "index": 0,
+        "name": "h.txt",
+        "mime": "text/plain",
+        "data": "aGVsbG8gd29ybGQ=",
+        "file": null
+      }
+    ]
+  },
+  "porcelain": [
+    {
+      "text": " M a.txt\u0000A  b.txt\u0000?? c.txt\u0000R  new.txt\u0000old.txt\u0000MM d.txt\u0000",
+      "expect": {
+        "dirty": [
+          {
+            "path": "a.txt",
+            "status": " M"
+          },
+          {
+            "path": "b.txt",
+            "status": "A "
+          },
+          {
+            "path": "c.txt",
+            "status": "??"
+          },
+          {
+            "path": "new.txt",
+            "status": "R "
+          },
+          {
+            "path": "d.txt",
+            "status": "MM"
+          }
+        ],
+        "staged": [
+          "b.txt",
+          "new.txt",
+          "d.txt"
+        ]
+      }
+    }
+  ],
+  "remotes": [
+    {
+      "url": "https://user:tok@github.com/o/r.git",
+      "expect": "https://github.com/o/r.git"
+    },
+    {
+      "url": "https://github.com/o/r.git",
+      "expect": "https://github.com/o/r.git"
+    },
+    {
+      "url": "git@github.com:o/r.git",
+      "expect": "git@github.com:o/r.git"
+    },
+    {
+      "url": "git:pw@host:o/r.git",
+      "expect": "git@host:o/r.git"
+    },
+    {
+      "url": "ssh://git@host/x",
+      "expect": "ssh://host/x"
+    }
+  ]
+}

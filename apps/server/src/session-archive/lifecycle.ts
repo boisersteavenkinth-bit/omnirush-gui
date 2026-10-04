@@ -13,12 +13,14 @@
  */
 import { realpath } from "node:fs/promises";
 
+import { attachmentsFromMessages } from "./attachments.js";
+import type { StartCapture } from "./capture-v2.js";
 import type { CaptureResult, DrainResult, FinalReason, SessionArchiver } from "./index.js";
 
 export type ProjectArchiver = Pick<
   SessionArchiver,
   "captureBase" | "captureDelta" | "captureFinal" | "startFinalCandidates" | "recordTouched" | "forgetTouched" | "drain" | "signOut" | "stop"
->;
+> & Partial<Pick<SessionArchiver, "startManifest" | "hasStartManifest" | "captureState" | "recordAttachments" | "recordBinary">>;
 
 /** Engine reads for one session, resolving to the parsed JSON, or null when it cannot be read. */
 export type ArchiveEngineReads = {
@@ -167,6 +169,10 @@ type SessionRecord = {
   idleFinal: AbortController | null;
   /** Engine reads retried on their own while unresolved, and the retry waiting (see unresolved()). */
   retries?: { count: number; timer: ReturnType<typeof setTimeout> | null };
+  /** Capture v2: the completed turns last counted (the turn in progress is the next one). */
+  turns?: number;
+  /** Capture v2: a prompt went out and this turn's first tool call has not been seen yet. */
+  awaitingTool?: boolean;
 };
 
 /** An unresolved session start reads the engine again after these waits, then only at its next prompt or turn. */
@@ -256,21 +262,77 @@ export class ProjectArchiveLifecycle {
     if (known) {
       known.engine = input.engine;
       known.activeAt = promptedAt;
+      known.awaitingTool = true;
     }
     // Resolved, or its start step is still queued: nothing to add.
     if (known && (!known.start || known.starting)) return;
     // New, or unresolved because the engine could not be read: (re)try with this prompt's reads.
-    const record: SessionRecord = known ?? { root: null, start: null, starting: false, engine: input.engine, activeAt: promptedAt, idleTimer: null, idleFinal: null };
+    const record: SessionRecord = known ?? { root: null, start: null, starting: false, engine: input.engine, activeAt: promptedAt, idleTimer: null, idleFinal: null, awaitingTool: true };
     record.start = { root: input.root, engine: input.engine };
     record.starting = true;
     this.sessions.set(input.sessionId, record);
+    // Capture v2: a base whose start manifest was taken before the prompt packs at once (its files may change any moment).
+    const immediate = this.archiver.hasStartManifest?.(input.sessionId) === true;
     this.schedule(input.sessionId, "base", async () => {
       try {
         if (this.sessions.get(input.sessionId) === record && record.start) await this.resolve(input.sessionId, record, null);
       } finally {
         record.starting = false;
       }
-    }, () => this.quietPeriod(promptedAt));
+    }, immediate ? undefined : () => this.quietPeriod(promptedAt));
+  }
+
+  /**
+   * Capture v2, #8: call before a prompt is sent to the engine, and send it
+   * once this resolves. The first prompt of a session in this run takes the
+   * start manifest (hash and stat only, at most START_GATE_MS); any later
+   * prompt resolves at once. Never rejects.
+   */
+  async startGate(sessionId: string, root: string): Promise<StartCapture | "skipped"> {
+    if (!this.active || this.consentOff || !this.archiver.startManifest) return "skipped";
+    const known = this.sessions.get(sessionId);
+    if (known && !known.start) return "skipped";
+    try {
+      return await this.archiver.startManifest(sessionId, root);
+    } catch (error) {
+      this.warn("start-manifest", error, sessionId);
+      return "skipped";
+    }
+  }
+
+  /**
+   * Capture v2, #9: a tool call of the session started (tool-start.ts). The
+   * first one of each turn queues a pre_tool state, captured when anything
+   * changed since the chain's last state; the tool itself is never held.
+   */
+  toolStarted(sessionId: string): void {
+    const record = this.sessions.get(sessionId);
+    if (!this.active || this.consentOff || !record || !record.awaitingTool || !this.archiver.captureState) return;
+    record.awaitingTool = false;
+    const capture = this.archiver.captureState.bind(this.archiver);
+    this.schedule(sessionId, "pre_tool", async () => {
+      if (this.sessions.get(sessionId) !== record || !record.root) return;
+      const result = await capture(sessionId, (record.turns ?? 0) + 1);
+      if (result.status === "skipped" && result.reason === "stopped") record.root = null;
+      this.settle(result);
+    });
+  }
+
+  /**
+   * Capture v2, #11: a settled turn's messages; the files attached to its
+   * user messages are staged for the turn's archive (queued before its delta).
+   */
+  turnMessages(sessionId: string, messages: unknown): void {
+    const record = this.sessions.get(sessionId);
+    if (!this.active || this.consentOff || !record || !this.archiver.recordAttachments) return;
+    const sources = attachmentsFromMessages(messages);
+    if (sources.length === 0) return;
+    const stage = this.archiver.recordAttachments.bind(this.archiver);
+    this.schedule(sessionId, "attachments", async () => {
+      if (this.sessions.get(sessionId) !== record) return;
+      const root = record.root ?? record.start?.root;
+      if (root) await stage(sessionId, root, sources);
+    });
   }
 
   /**
@@ -286,6 +348,7 @@ export class ProjectArchiveLifecycle {
     const record = this.sessions.get(sessionId);
     if (!this.active || this.consentOff || !record) return;
     const turns = completedTurnCount(messages);
+    if (turns !== null) record.turns = turns;
     this.schedule(sessionId, "delta", async () => {
       if (this.sessions.get(sessionId) !== record) return;
       if (record.start && !(await this.resolve(sessionId, record, turns))) return;
@@ -304,6 +367,13 @@ export class ProjectArchiveLifecycle {
     const record = this.sessions.get(sessionId);
     if (!this.active || this.consentOff || !record || (!record.root && !record.start)) return;
     this.archiver.recordTouched(sessionId, path);
+  }
+
+  /** Capture v2: a binary file the session uploader found in the session's workspace (workspace-relative). */
+  binaryFile(sessionId: string, path: string): void {
+    const record = this.sessions.get(sessionId);
+    if (!this.active || this.consentOff || !record || (!record.root && !record.start)) return;
+    this.archiver.recordBinary?.(sessionId, path);
   }
 
   /**
@@ -413,6 +483,7 @@ export class ProjectArchiveLifecycle {
     }
     const count = turns ?? completedTurnCount(await start.engine.messages().catch(() => null));
     if (count === null) return this.unresolved(sessionId, record, "the engine messages could not be read");
+    record.turns ??= count;
     record.start = null;
     record.root = root;
     const result = await this.archiver.captureBase(sessionId, root, count);
