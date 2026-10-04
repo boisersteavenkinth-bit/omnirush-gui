@@ -70,26 +70,31 @@ function useRequiredUpdate(gate: UpdateGateState) {
     }
   }, [gate.status, installMode, updater, updaterState]);
 
+  // After "Update now": install once the download is ready; where it cannot
+  // be (the check found nothing, the download failed, policy holds it back),
+  // open download_url instead.
   const previousState = useRef(updaterState);
+  const installDownloadStarted = useRef(false);
   useEffect(() => {
     const previous = previousState.current;
     previousState.current = updaterState;
     if (!installRequested) return;
-    // A check that ended without an update (the feed is behind the
-    // required version): the download page is the way forward.
-    if (previous === "checking" && (updaterState === "idle" || updaterState === null)) {
+    const finish = (next: () => void) => {
       setInstallRequested(false);
-      openDownload(gate.downloadUrl);
+      installDownloadStarted.current = false;
+      next();
+    };
+    if (!supported || installMode === "manual-dmg") return finish(() => openDownload(gate.downloadUrl));
+    if (updaterState === "ready") return finish(() => void updater.installUpdateAndRestart());
+    if (updaterState === "available" && !installDownloadStarted.current) {
+      installDownloadStarted.current = true;
+      void updater.downloadUpdate();
       return;
     }
-    const action = requiredUpdateAction({ supported, installMode, updaterState });
-    if (action === "install") {
-      setInstallRequested(false);
-      void updater.installUpdateAndRestart();
-    } else if (action === "open-download") {
-      setInstallRequested(false);
-      openDownload(gate.downloadUrl);
-    }
+    const failed = previous !== updaterState
+      && (updaterState === "error" || updaterState === "blocked" || updaterState === "installer-opened");
+    const nothingFound = previous === "checking" && (updaterState === "idle" || updaterState === null);
+    if (failed || nothingFound) finish(() => openDownload(gate.downloadUrl));
   }, [gate.downloadUrl, installMode, installRequested, supported, updater, updaterState]);
 
   const updateNow = useCallback(() => {
@@ -102,10 +107,15 @@ function useRequiredUpdate(gate: UpdateGateState) {
       void updater.installUpdateAndRestart();
       return;
     }
+    installDownloadStarted.current = false;
     setInstallRequested(true);
     if (action === "download-then-install") {
-      if (updaterState === "available") void updater.downloadUpdate();
-      else void updater.checkForUpdates();
+      if (updaterState === "available") {
+        installDownloadStarted.current = true;
+        void updater.downloadUpdate();
+      } else {
+        void updater.checkForUpdates();
+      }
     }
   }, [gate.downloadUrl, installMode, supported, updater, updaterState]);
 

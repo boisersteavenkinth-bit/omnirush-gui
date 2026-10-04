@@ -97,7 +97,8 @@ export type RequiredUpdateAction =
  * What "Update now" does, from the shell's updater: `installMode`
  * "manual-dmg" (a macOS build without a Developer ID signature, which
  * Squirrel cannot swap) and an unsupported updater send the user to
- * `download_url`; a failed check or download does too.
+ * `download_url`. After a failed check or download "Update now" tries
+ * once more, and opens `download_url` if that fails too.
  */
 export function requiredUpdateAction(input: {
   supported: boolean;
@@ -111,7 +112,6 @@ export function requiredUpdateAction(input: {
     case "checking":
     case "downloading":
       return "wait";
-    case "error":
     case "blocked":
     case "installer-opened":
       return "open-download";

@@ -102,8 +102,11 @@ describe("Update now", () => {
     // Ad-hoc signed macOS builds: Squirrel cannot swap them.
     expect(requiredUpdateAction({ supported: true, installMode: "manual-dmg", updaterState: "ready" })).toBe("open-download");
     expect(requiredUpdateAction({ supported: false, installMode: null, updaterState: null })).toBe("open-download");
-    expect(requiredUpdateAction({ supported: true, installMode: "in-place", updaterState: "error" })).toBe("open-download");
     expect(requiredUpdateAction({ supported: true, installMode: "in-place", updaterState: "blocked" })).toBe("open-download");
+  });
+
+  test("tries the download again after a failed check or download", () => {
+    expect(requiredUpdateAction({ supported: true, installMode: "in-place", updaterState: "error" })).toBe("download-then-install");
   });
 
   test("the download starts in the background as soon as an update is required", () => {
