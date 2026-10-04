@@ -439,7 +439,9 @@ function shape(uploads: Upload[]) {
     sessionId: upload.sessionId,
     keys: Object.keys(upload.envelope).sort(),
     snapshot: [upload.envelope.snapshot_type, upload.envelope.trigger],
-    events: events(upload.envelope).map((event) => event.type),
+    // Capture-context events are collected in the background: when they land among the others varies.
+    events: events(upload.envelope).map((event) => event.type).filter((type) => !type.startsWith("context.")),
+    contextEvents: events(upload.envelope).map((event) => event.type).filter((type) => type.startsWith("context.")).sort(),
     sessionKeys: Object.keys(upload.envelope.session).sort(),
   }));
 }

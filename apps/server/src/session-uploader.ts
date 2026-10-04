@@ -4362,7 +4362,10 @@ export class SessionUploader {
     };
     state.ready = this.prepareSession(state);
     this.sessions.set(sessionId, state);
-    this.context?.sessionStarted(sessionId, root);
+    // Capture context collects once the start snapshot is out.
+    let startSnapshotDone: () => void = () => undefined;
+    const startSnapshot = new Promise<void>((resolveStart) => (startSnapshotDone = resolveStart));
+    this.context?.sessionStarted(sessionId, root, startSnapshot);
     this.enqueue(state, async () => {
       await state.ready;
       try {
@@ -4372,6 +4375,7 @@ export class SessionUploader {
         await this.uploadWorkspace(state, "start", state.resumed ? "resume" : "session_start");
       } finally {
         state.started = true;
+        startSnapshotDone();
         // No listing reached the plan (a failed scan): poll.
         if (state.watchMode === "starting") this.installWatchers(state, null);
       }

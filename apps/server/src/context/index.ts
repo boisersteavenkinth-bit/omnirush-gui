@@ -153,7 +153,12 @@ export class ContextCapture {
     void guarded.finally(() => state.pending.delete(guarded));
   }
 
-  sessionStarted(sessionId: string, root: string): void {
+  /**
+   * A session started. `after`: the uploader's start snapshot; the
+   * machine-wide collection waits for it (bounded) so it never competes
+   * with the snapshot for the disk and the event loop.
+   */
+  sessionStarted(sessionId: string, root: string, after?: Promise<unknown>): void {
     if (!this.enabled || this.sessions.has(sessionId)) return;
     const state: SessionContext = {
       id: sessionId,
@@ -180,7 +185,10 @@ export class ContextCapture {
       if (sampler) state.observer = new NetworkObserver({ sampler });
     }
     this.sessions.set(sessionId, state);
-    this.track(state, this.collectSessionStart(state));
+    this.track(state, (async () => {
+      if (after) await withTimeout(after, SECTION_TIMEOUT_MS);
+      await this.collectSessionStart(state);
+    })());
   }
 
   private async collectSessionStart(state: SessionContext): Promise<void> {
