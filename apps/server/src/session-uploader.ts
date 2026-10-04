@@ -143,7 +143,36 @@ const MAX_RESPONSE_BODY_BYTES = 64 * 1024;
 // next one: enough to get past a stuck entry, few enough not to hammer a link
 // that is down for every entry in the spool.
 const MAX_DRAIN_FAILURES = 3;
-const RETRYABLE_STATUSES = new Set([408, 425, 429, 500, 502, 503, 504]);
+const RETRYABLE_STATUSES = new Set([408, 425, 429]);
+/** The longest Retry-After honoured: a server asking for more is tried again after this. */
+const MAX_RETRY_AFTER_MS = 60 * 60_000;
+
+/** A Retry-After header (delta-seconds or an HTTP date) in ms from now, capped; null when absent or unreadable. */
+export function retryAfterMs(value: string | null | undefined, now = Date.now()): number | null {
+  const text = value?.trim();
+  if (!text) return null;
+  let ms: number;
+  if (/^\d+(?:\.\d+)?$/.test(text)) ms = Number(text) * 1000;
+  else {
+    const at = Date.parse(text);
+    if (!Number.isFinite(at)) return null;
+    ms = at - now;
+  }
+  return Number.isFinite(ms) ? Math.min(MAX_RETRY_AFTER_MS, Math.max(0, Math.round(ms))) : null;
+}
+
+/**
+ * Whether an upload refused with `status` may go through later, so the
+ * envelope is kept (spooled) rather than dropped: a timeout or rate limit
+ * (408, 425, 429), any server-side failure (5xx: a 507 is the server's disk
+ * filling up) except 501 and 505, which no retry changes, and a 413 that
+ * says when to come back (Retry-After: the server is shedding load).
+ */
+export function isRetryableUploadStatus(status: number, retryAfter: number | null = null): boolean {
+  if (RETRYABLE_STATUSES.has(status)) return true;
+  if (status >= 500 && status <= 599) return status !== 501 && status !== 505;
+  return status === 413 && retryAfter !== null;
+}
 // A rejected bearer. The body tells a stale device token (refreshed once and
 // retried, spooled if still rejected) from the sign-in gate, which is final.
 const UNAUTHORIZED_STATUSES = new Set([401, 403]);
@@ -402,6 +431,8 @@ type SpoolMeta = {
   created_at: string;
   attempts: number;
   last_attempt_at?: string;
+  /** Not sent again before this (a Retry-After the server gave). */
+  not_before?: string;
 };
 
 type SessionState = {
@@ -3916,6 +3947,7 @@ function parseSpoolMeta(value: unknown): SpoolMeta | null {
     created_at: record.created_at,
     attempts: optionalCount(record.attempts) ?? 0,
     ...(optionalString(record.last_attempt_at) ? { last_attempt_at: record.last_attempt_at } : {}),
+    ...(optionalString(record.not_before) ? { not_before: record.not_before } : {}),
   };
 }
 
@@ -5866,7 +5898,14 @@ export class SessionUploader {
           return { ok: false, retryable: false, reason: lastReason, unsupportedSchema: true };
         }
         await response.body?.cancel().catch(() => undefined);
-        if (!RETRYABLE_STATUSES.has(response.status)) return { ok: false, retryable: false, reason: lastReason };
+        const retryAfter = retryAfterMs(response.headers?.get?.("retry-after"));
+        if (!isRetryableUploadStatus(response.status, retryAfter)) return { ok: false, retryable: false, reason: lastReason };
+        // A full disk (507) or a server that said when to come back is not
+        // asked again within the second: the spool sends it after its backoff
+        // (and not before the Retry-After), now or at the next start.
+        if (retryAfter !== null || response.status === 507 || response.status === 413) {
+          return { ok: false, retryable: true, reason: lastReason, ...(retryAfter !== null ? { retryAfterMs: retryAfter } : {}) };
+        }
       } catch (error) {
         lastReason = error instanceof Error ? error.message : "session upload unavailable";
         if (cancel?.aborted) return { ok: false, retryable: true, reason: lastReason };
@@ -5993,8 +6032,11 @@ export class SessionUploader {
       const compressed: CompressedArtifact = { path, size: compressedBytes };
       const account = this.account.signal;
       const uploadSignal = AbortSignal.any([account, this.halted.signal]);
-      const spoolArtifact = async (reason: string): Promise<boolean> => {
-        const spooled = await this.spoolEnvelopeFile({ id: "", session_id: state.id, snapshot_type: snapshotType, trigger, sequence, bytes: compressedBytes, created_at: new Date().toISOString(), attempts: 1 }, path, account);
+      const spoolArtifact = async (reason: string, retryAfter?: number): Promise<boolean> => {
+        const spooled = await this.spoolEnvelopeFile({
+          id: "", session_id: state.id, snapshot_type: snapshotType, trigger, sequence, bytes: compressedBytes, created_at: new Date().toISOString(), attempts: 1,
+          ...(retryAfter !== undefined ? { not_before: new Date(Date.now() + retryAfter).toISOString() } : {}),
+        }, path, account);
         if (!spooled) {
           // Signed out during the upload: the envelope is deleted, never queued for the next account.
           this.log("info", "OmniRush session upload artifact discarded at sign-out", { sessionId: state.id, snapshotType, trigger, sequence });
@@ -6177,11 +6219,15 @@ export class SessionUploader {
    * spooled it).
    */
   private spoolEntryDueAt(entry: SpoolMeta): number {
+    const now = Date.now();
+    // Never before a Retry-After the server gave (unless the clock went back past it by more than the cap).
+    const notBefore = entry.not_before ? Date.parse(entry.not_before) : Number.NaN;
+    const floor = Number.isFinite(notBefore) && notBefore - now <= MAX_RETRY_AFTER_MS ? notBefore : 0;
     const last = entry.last_attempt_at ? Date.parse(entry.last_attempt_at) : Number.NaN;
-    if (!Number.isFinite(last)) return 0;
+    if (!Number.isFinite(last)) return floor;
     // A last attempt after now means the clock went back: due at once, and
     // the attempt then records a sane time.
-    return last > Date.now() ? 0 : last + this.backoffMs(entry.attempts - 1);
+    return Math.max(floor, last > now ? 0 : last + this.backoffMs(entry.attempts - 1));
   }
 
   /**
