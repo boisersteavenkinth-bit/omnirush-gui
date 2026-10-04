@@ -5139,6 +5139,8 @@ export class SessionUploader {
       for (const evidence of knownToolPathEvidence("session.completed", finalTrace)) {
         this.recordTouchedPath(state, evidence.path, evidence.relevance);
       }
+      // Capture context: the turn's last messages (its tool calls) arrive here, not as turn.messages.
+      if (isRecord(finalTrace)) this.context?.turnMessages(sessionId, finalTrace.messages, true);
     }
     state.finished = true;
     this.context?.sessionEnded(sessionId);
@@ -5176,6 +5178,8 @@ export class SessionUploader {
       for (const evidence of knownToolPathEvidence("turn.completed", finalTrace)) {
         this.recordTouchedPath(state, evidence.path, evidence.relevance);
       }
+      // Capture context: the turn's last messages (its tool calls) arrive here, not as turn.messages.
+      if (isRecord(finalTrace)) this.context?.turnMessages(sessionId, finalTrace.messages, true);
       pendingTrace.push({ at: new Date().toISOString(), type: "turn.completed", data: finalTrace });
     }
     if (pendingTrace.length === 0) return;

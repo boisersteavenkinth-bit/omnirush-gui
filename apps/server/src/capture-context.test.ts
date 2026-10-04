@@ -215,8 +215,12 @@ test("#7 services: docker containers with image digests, local databases by port
   const calls = [];
   const run = fakeRun({
     docker: (args) => {
-      if (args[0] === "ps") return ok(`${JSON.stringify({ ID: "abc123", Names: "demo-db-1", Image: "postgres:16", Ports: "127.0.0.1:5432->5432/tcp", Status: "Up 2 hours", Labels: "com.docker.compose.project.config_files=/srv/demo/compose.yaml" })}\n`);
-      if (args[0] === "inspect") return ok("abc123 sha256:img1\n");
+      if (args[0] === "ps") return ok([
+        JSON.stringify({ ID: "abc123", Names: "demo-db-1", Image: "postgres:16", Ports: "127.0.0.1:5432->5432/tcp", Status: "Up 2 hours", Labels: "com.docker.compose.project.config_files=/srv/demo/compose.yaml" }),
+        JSON.stringify({ ID: "def456", Names: "telegram-bot", Image: "secret/bot:1", Ports: "", Status: "Up 9 days", Labels: "com.docker.compose.project.config_files=/home/someone/private/bot/compose.yml" }),
+      ].join("\n") + "\n");
+      // demo-db-1 bind-mounts the project; telegram-bot is unrelated and older than the session.
+      if (args[0] === "inspect") return ok(`abc123 sha256:img1 2020-01-01T00:00:00.123456789Z ${JSON.stringify([{ Type: "bind", Source: `${root}/data` }])}\ndef456 sha256:img2 2020-01-01T00:00:00Z ${JSON.stringify([{ Type: "bind", Source: "/home/someone/private/bot" }])}\n`);
       if (args[0] === "image") return ok('sha256:img1 ["postgres@sha256:deadbeef"]\n');
       return null;
     },
@@ -238,6 +242,8 @@ test("#7 services: docker containers with image digests, local databases by port
     resolve: (command) => (["docker", "psql", "redis-server"].includes(command) ? `/usr/local/bin/${command}` : null),
   });
   assert.equal(result.docker.reachable, true);
+  assert.equal(result.docker.other_containers, 1, "the unrelated container is counted, not named");
+  assert.ok(!JSON.stringify(result).includes("telegram") && !JSON.stringify(result).includes("private/bot"));
   assert.deepEqual(result.docker.containers, [{ name: "demo-db-1", image: "postgres:16", image_digest: "postgres@sha256:deadbeef", ports: "127.0.0.1:5432->5432/tcp".replace("127.0.0.1", uploader.redactUploadText("127.0.0.1").text), status: "Up 2 hours" }]);
   assert.deepEqual(result.databases, [
     { kind: "postgres", port: 5432, address: "loopback", client_version: "psql (PostgreSQL) 16.3", process: "docker-proxy" },
@@ -746,4 +752,200 @@ test("a folder the agent created stays allowed, even under ~/.config, minus cred
 
 test("Windows: a timed-out command's whole process tree is ended (taskkill /T /F)", () => {
   assert.deepEqual(exec.windowsTreeKillArgs(4242), ["/PID", "4242", "/T", "/F"]);
+});
+
+// --- release e2e fixes: process privacy, docker, network per call, final messages ---------
+
+test("#19 privacy: only the session's process tree and processes in its folders are named; other ports are port + base name", async () => {
+  const project = tmp("proc-proj");
+  const table = [
+    { pid: 100, ppid: 1, name: "node", command: "node /usr/lib/omnirush/bin.js" },
+    { pid: 101, ppid: 100, name: "opencode", command: "opencode serve --port 4096" },
+    { pid: 102, ppid: 101, name: "bash", command: `bash -c npm test --token=${GH_TOKEN}` },
+    { pid: 103, ppid: 102, name: "node", command: "node server.js" },
+    { pid: 200, ppid: 1, name: "python3", command: "python3 /home/other/telegram-bot/bot.py --api-key=xyz" },
+    { pid: 201, ppid: 1, name: "node", command: "node /opt/bootstrapper/agent.js" },
+    { pid: 202, ppid: 1, name: "vite", command: "/usr/bin/node vite --port 5173" },
+  ];
+  const listening = [
+    { proto: "tcp", address: "127.0.0.1", port: 3000, pid: 103, process: "node" },
+    { proto: "tcp", address: "0.0.0.0", port: 8443, pid: 200, process: "/home/other/telegram-bot/venv/bin/python3" },
+    { proto: "tcp", address: "127.0.0.1", port: 5173, pid: 202, process: "vite" },
+  ];
+  const snapshot = await processes.processSnapshot("turn_start", 1, {
+    privacy: { home: "/home/me", user: "me" },
+    scrub: SCRUB,
+    selfPid: 100,
+    precomputed: { processes: table, listening },
+    scope: { rootPid: 100, folders: () => [project] },
+    cwdOf: async (pids) => new Map(pids.map((pid) => [pid, pid === 202 ? path.join(project, "web") : "/home/other/telegram-bot"])),
+  });
+  assert.deepEqual(snapshot.processes.map((p) => [p.pid, p.scope]), [[102, "session"], [103, "session"], [202, "folder"]]);
+  assert.ok(snapshot.processes.find((p) => p.pid === 102).command.includes("--token=[REDACTED]"));
+  assert.deepEqual(snapshot.listening, [
+    { proto: "tcp", address: "loopback", port: 3000, pid: 103, process: "node" },
+    { proto: "tcp", port: 8443, process: "python3" },
+    { proto: "tcp", address: "loopback", port: 5173, pid: 202, process: "vite" },
+  ]);
+  assert.equal(snapshot.total_processes, table.length);
+  const text = JSON.stringify(snapshot);
+  for (const leaked of ["telegram", "bootstrapper", "/home/other", "xyz", "opencode serve"]) assert.ok(!text.includes(leaked), leaked);
+});
+
+test.skipIf(process.platform !== "linux")("#19 privacy, live (Linux): the snapshot lists this process's children, never another account's or an unrelated process", async () => {
+  const child = spawn(process.execPath, ["-e", "setTimeout(()=>{}, 20000)", "--", "child-marker"], { stdio: "ignore" });
+  const outsider = spawn("/bin/sh", ["-c", "exec sleep 20"], { stdio: "ignore", detached: true });
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    const snapshot = await processes.processSnapshot("turn_start", 1, { privacy: privacy.currentPrivacy(), scrub: SCRUB, scope: { rootPid: process.pid, folders: () => [] } });
+    assert.ok(snapshot.processes.some((p) => p.pid === child.pid && p.command.includes("child-marker")));
+    const pids = new Set(snapshot.processes.map((p) => p.pid));
+    const all = await processes.linuxProcesses();
+    const tree = processes.descendantsOf(process.pid, all);
+    for (const pid of pids) assert.ok(tree.has(pid), `pid ${pid} is in the session tree`);
+  } finally {
+    child.kill();
+    outsider.kill();
+  }
+});
+
+test("#20 a shell call's start makes the observer sample every 50 ms", async () => {
+  const times = [];
+  const sampler = { method: "fake", pollMs: 1_000, tree: async () => { times.push(Date.now()); return []; }, connections: async () => [] };
+  const observer = new network.NetworkObserver({ sampler });
+  observer.start();
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  const before = times.length;
+  observer.boost(600);
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  await observer.stop();
+  assert.ok(times.length - before >= 6, `samples while boosted: ${times.length - before}`);
+});
+
+test("#20 attribution: a shell fed its command on stdin goes to the one call running; a socket-table root to its call", async () => {
+  const now = Date.now();
+  const resolver = { lookup: async (host) => (host === "example.com" ? ["93.184.215.14"] : []), reverse: async () => [] };
+  const calls = [
+    { callId: "c-curl", tool: "bash", input: {}, status: "completed", start: now, end: now + 300, command: "curl -s https://example.com -o /dev/null", cwd: "/p" },
+    { callId: "c-npx", tool: "bash", input: {}, status: "completed", start: now + 1_000, end: now + 4_000, command: "npx -y cowsay@1.6.0 hi", cwd: "/p" },
+  ];
+  const roots = [
+    { pid: 5, command: "/bin/bash", bareShell: true, firstSeen: now + 50, connections: new Map([["93.184.215.14|443", { ip: "93.184.215.14", port: 443, first: now + 50 }]]) },
+    { pid: -1, command: "x", firstSeen: now + 1_200, callId: "c-npx", connections: new Map([["104.16.0.1|443", { ip: "104.16.0.1", port: 443, first: now + 1_200 }]]) },
+  ];
+  const events = await network.attributeConnections(roots, calls, { turn: 1, method: "proc", pollMs: 250, resolver });
+  assert.deepEqual(events.map((e) => [e.tool_call_id, e.scope]).sort(), [["c-curl", "call"], ["c-npx", "call"]]);
+  assert.equal(events.find((e) => e.tool_call_id === "c-curl").connections[0].host, "example.com");
+  // The socket-table diff keeps only peers of hosts the command names.
+  const before = new Map([["a", { ip: "1.1.1.1", port: 443 }]]);
+  const after = new Map([["a", { ip: "1.1.1.1", port: 443 }], ["b", { ip: "93.184.215.14", port: 443 }], ["c", { ip: "8.8.8.8", port: 443 }]]);
+  const diff = await network.socketDiffConnections(before, after, "curl https://example.com", now, resolver);
+  assert.deepEqual([...diff.keys()], ["93.184.215.14|443"]);
+});
+
+test("#20 opencode tool events: message.part.updated running and completed (and v2) are parsed", async () => {
+  const toolEvents = await import("./context/tool-events.js");
+  const part = (status) => ({ type: "message.part.updated", properties: { part: { type: "tool", tool: "bash", callID: "call_1", sessionID: "ses_1", state: { status, input: { command: "curl https://example.com", workdir: "/w" }, time: { start: 10, end: 20 } } } } });
+  assert.deepEqual(toolEvents.toolEventOf(part("running")), { sessionId: "ses_1", event: { callId: "call_1", tool: "bash", status: "running", command: "curl https://example.com", workdir: "/w", at: 10 } });
+  assert.equal(toolEvents.toolEventOf(part("completed")).event.status, "completed");
+  assert.equal(toolEvents.toolEventOf({ payload: part("pending") }).event.status, "running");
+  assert.equal(toolEvents.toolEventOf({ type: "message.part.updated", properties: { part: { type: "text" } } }), null);
+  assert.deepEqual(toolEvents.toolEventOf({ type: "session.tool.called", data: { sessionID: "s", callID: "c", tool: "bash", input: { command: "ls" } } }), { sessionId: "s", event: { callId: "c", tool: "bash", status: "running", command: "ls", workdir: null } });
+});
+
+test("#20 the turn's network waits for its last messages: a call known only from the final flush still gets its tool_call_id", async () => {
+  const self = process.pid;
+  let live = false;
+  const sampler = {
+    method: "fake",
+    pollMs: 1_000,
+    tree: async () => (live ? [{ pid: 999_001, ppid: self, argv: ["/bin/bash"] }] : []),
+    connections: async (pids) => (pids.includes(999_001) ? [{ pid: 999_001, ip: "93.184.215.14", port: 443 }] : []),
+  };
+  const resolver = { lookup: async (host) => (host === "example.com" ? ["93.184.215.14"] : []), reverse: async () => [] };
+  const recorded = [];
+  const capture = new context.ContextCapture({
+    client: "cli", scrub: SCRUB, record: (_id, type, data) => recorded.push({ type, data }), env: {}, sampler, resolver, platform: "darwin",
+    sections: { system_packages: false, services: false, setup: false, pm_config: false, shell_aliases: false, processes: false },
+    ephemeral: { registryFallback: false },
+  });
+  const sid = "ses-final-msgs";
+  capture.sessionStarted(sid, tmp("final"));
+  capture.turnStarted(sid);
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  const command = "curl -s https://example.com -o /dev/null";
+  const start = Date.now();
+  capture.toolEvent(sid, { callId: "call-curl", tool: "bash", status: "running", command });
+  live = true;
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  live = false;
+  capture.toolEvent(sid, { callId: "call-curl", tool: "bash", status: "completed" });
+  // The milestone comes before the uploader flushes the turn's last messages.
+  capture.turnEnded(sid);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  capture.turnMessages(sid, [{ info: { role: "assistant" }, parts: [
+    { type: "tool", tool: "bash", callID: "call-curl", state: { status: "completed", input: { command }, time: { start, end: Date.now() } } },
+    { type: "tool", tool: "bash", callID: "call-npx", state: { status: "completed", input: { command: "npx -y cowsay@1.6.0 hi" }, time: { start: Date.now() + 1_000, end: Date.now() + 2_000 } } },
+  ] }], true);
+  await capture.settled(sid, 10_000);
+  const net = recorded.filter((e) => e.type === "context.network").map((e) => e.data);
+  assert.deepEqual(net.map((e) => [e.tool_call_id, e.scope, e.connections[0]?.host]), [["call-curl", "call", "example.com"]]);
+  const tools = recorded.filter((e) => e.type === "context.ephemeral_tool").map((e) => e.data);
+  assert.deepEqual(tools.map((t) => [t.tool_call_id, t.package, t.version]), [["call-npx", "cowsay", "1.6.0"]]);
+});
+
+test.skipIf(process.platform !== "linux")("#20 live (Linux): a curl-short connection (~20 ms) is tied to its call by the tool-start boost and the socket-table diff", async () => {
+  // The client closes first (as curl does after a response): its socket lingers in TIME_WAIT.
+  const server = net.createServer((socket) => socket.on("end", () => socket.end())).listen(0, "127.0.0.1");
+  await new Promise((resolve) => server.once("listening", resolve));
+  const port = server.address().port;
+  const recorded = [];
+  const capture = new context.ContextCapture({
+    client: "cli", scrub: SCRUB, record: (_id, type, data) => recorded.push({ type, data }), env: {}, platform: "linux",
+    sections: { system_packages: false, services: false, setup: false, pm_config: false, shell_aliases: false, processes: false },
+    ephemeral: { registryFallback: false },
+  });
+  const sid = "ses-live-short";
+  capture.sessionStarted(sid, tmp("live-short"));
+  capture.turnStarted(sid);
+  const command = `node -e "const s=require('net').connect(${port},'127.0.0.1',()=>s.end());s.on('close',()=>process.exit(0))"`;
+  const start = Date.now();
+  capture.toolEvent(sid, { callId: "call-short", tool: "bash", status: "running", command });
+  await new Promise((resolve) => spawn("/bin/bash", ["-c", command], { stdio: "ignore" }).on("exit", resolve));
+  capture.toolEvent(sid, { callId: "call-short", tool: "bash", status: "completed" });
+  capture.turnEnded(sid);
+  capture.turnMessages(sid, [{ info: { role: "assistant" }, parts: [{ type: "tool", tool: "bash", callID: "call-short", state: { status: "completed", input: { command }, time: { start, end: Date.now() } } }] }], true);
+  await capture.settled(sid, 10_000);
+  server.close();
+  const event = recorded.find((e) => e.type === "context.network" && e.data.tool_call_id === "call-short");
+  assert.ok(event, JSON.stringify(recorded.filter((e) => e.type === "context.network")));
+  assert.ok(event.data.connections.some((c) => c.port === port && c.address_class === "loopback"));
+});
+
+test.skipIf(!hasZstd)("uploader: the turn's last messages (the final flush, not turn.messages) feed the ephemeral tools", async () => {
+  const root = write(tmp("final-flush"), { "package.json": "{}" });
+  const envelopes = [];
+  const syncer = new uploader.SessionUploader({
+    stateDir: tmp("final-flush-state"),
+    fallbackScanMs: 60_000,
+    capabilities: async () => ({ schema_versions: [2], canonical_trace: false }),
+    upload: async (_sessionId, compressed) => {
+      envelopes.push(JSON.parse(zlib.zstdDecompressSync(Buffer.from(compressed)).toString("utf8")));
+      return new Response("{}", { status: 201 });
+    },
+    context: { sections: { system_packages: false, services: false, pm_config: false, setup: false, shell_aliases: false }, sampler: null, ephemeral: { registryFallback: false }, env: {} },
+  });
+  const sessionId = "01a0dcd2-d8ee-7222-80eb-240063770432";
+  syncer.startSession(sessionId, "ws", root);
+  syncer.captureSnapshot(sessionId, "prompt");
+  syncer.captureSnapshot(sessionId, "turn_completed");
+  syncer.flushTrace(sessionId, { messages: [{ info: { role: "assistant" }, parts: [
+    { type: "tool", tool: "bash", callID: "call-cow", state: { status: "completed", input: { command: "npx -y cowsay@1.6.0 hi" }, time: { start: Date.now(), end: Date.now() } } },
+  ] }] });
+  await syncer.context?.settled(sessionId, 30_000);
+  syncer.finishSession(sessionId);
+  await syncer.idle(sessionId);
+  await syncer.stop();
+  const tools = traceEventsOf(envelopes).filter((e) => e.type === "context.ephemeral_tool").map((e) => e.data);
+  assert.deepEqual(tools.map((t) => [t.tool_call_id, t.package, t.version, t.resolved]), [["call-cow", "cowsay", "1.6.0", "exact"]]);
 });

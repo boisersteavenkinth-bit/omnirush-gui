@@ -19,11 +19,11 @@
 
 import { toolCallsOf, commandEffects, toolKind, type ToolCall } from "./commands.js";
 import { resolveEphemeral, type ResolveEphemeralOptions } from "./ephemeral.js";
-import { attributeConnections, defaultSampler, NetworkObserver, type HostResolver, type Sampler } from "./network.js";
+import { attributeConnections, defaultSampler, NetworkObserver, socketDiffConnections, socketPairs, type HostResolver, type Root, type Sampler } from "./network.js";
 import { OutsideTracker } from "./outside.js";
 import { collectPmConfig } from "./pm-config.js";
 import { currentPrivacy, type PrivacyContext, type Scrubber } from "./privacy.js";
-import { processSnapshot, processTable, listeningPorts, type ProcessInfo, type ListeningPort } from "./processes.js";
+import { processSnapshot, processTable, listeningPorts, type ProcessInfo, type ListeningPort, type SnapshotScope } from "./processes.js";
 import { collectServices } from "./services.js";
 import { collectSetup, type SetupFile, type SetupModel } from "./setup.js";
 import { collectShellAliases } from "./shell-aliases.js";
@@ -31,7 +31,7 @@ import { systemPackages } from "./system-packages.js";
 
 export const CONTEXT_SCHEMA = 1;
 const SECTION_TIMEOUT_MS = 30_000;
-const SETTLE_TIMEOUT_MS = 1_000;
+const SETTLE_TIMEOUT_MS = 3_000;
 const MAX_SETUP_FILES_EVENT_BYTES = 512 * 1024;
 const MAX_EPHEMERAL_PER_SESSION = 500;
 
@@ -78,6 +78,8 @@ export type ContextOptions = {
   mcpFiles?: string[];
   env?: NodeJS.ProcessEnv;
   platform?: NodeJS.Platform;
+  /** The app's process, whose descendants are the session's processes (process.pid by default). */
+  rootPid?: number;
   /** Tests: overrides. */
   enabled?: boolean;
   network?: boolean;
@@ -100,6 +102,14 @@ type SessionContext = {
   /** Tool calls of the current turn, by call id (or position). */
   calls: Map<string, ToolCall>;
   processedCalls: Set<string>;
+  /** Shell calls the engine reported starting this turn (tool events), by call id. */
+  liveCalls: Map<string, ToolCall>;
+  /** Linux: the socket table as each live shell call started (its diff at the end names short connections). */
+  socketsAtStart: Map<string, Promise<Map<string, { ip: string; port: number }>>>;
+  /** Connections found by a call's socket-table diff, as roots for the attribution. */
+  diffRoots: Promise<Root | null>[];
+  /** Resolves when the turn's last messages arrived (the uploader's final trace flush). */
+  finalMessages: { promise: Promise<void>; resolve: () => void };
   ephemeral: number;
   pending: Set<Promise<unknown>>;
   ended: boolean;
@@ -110,6 +120,27 @@ export type ContextTimings = { session_start: number[]; turn_start: number[]; tu
 
 /** Active turns across every capture in this process: an unmatched tool shell is only a turn's when one turn runs. */
 const activeTurns = new Set<string>();
+
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve: () => void = () => undefined;
+  const promise = new Promise<void>((done) => (resolve = done));
+  return { promise, resolve };
+}
+
+/** A tool call the engine reported starting or ending (its event stream, or pi's tool hooks). */
+export type ToolEvent = {
+  callId: string;
+  tool: string;
+  status: "running" | "completed" | "error";
+  /** The shell command (shell tools). */
+  command?: string | null;
+  /** Its working directory input, as given. */
+  workdir?: string | null;
+  at?: number;
+};
+
+/** How long a turn's network attribution waits for the turn's last messages. */
+const FINAL_MESSAGES_WAIT_MS = 5_000;
 
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<{ value: T } | { timeout: true } | { error: true }> {
   return Promise.race([
@@ -133,6 +164,11 @@ export class ContextCapture {
     this.networkEnabled = this.enabled && (options.network ?? captureNetworkEnabled(this.env));
     this.privacy = options.privacy ?? currentPrivacy();
     this.platform = options.platform ?? process.platform;
+  }
+
+  /** The session's processes: the app's process tree, and processes working in the project or its outside folders. */
+  private scopeOf(state: SessionContext): SnapshotScope {
+    return { rootPid: this.options.rootPid ?? process.pid, folders: () => [state.root, ...state.outside.folderPaths()] };
   }
 
   private section(name: keyof NonNullable<ContextOptions["sections"]>): boolean {
@@ -176,6 +212,10 @@ export class ContextCapture {
       observer: null,
       calls: new Map(),
       processedCalls: new Set(),
+      liveCalls: new Map(),
+      socketsAtStart: new Map(),
+      diffRoots: [],
+      finalMessages: deferred(),
       ephemeral: 0,
       pending: new Set(),
       ended: false,
@@ -216,14 +256,14 @@ export class ContextCapture {
         table = processes;
         const ports = await listeningPorts(processes, runOpts);
         listening = ports.ports;
-        return processSnapshot("session_start", 0, { ...runOpts, privacy, scrub, precomputed: { processes, listening, method: `${method}+${ports.method}` } });
+        return processSnapshot("session_start", 0, { ...runOpts, privacy, scrub, scope: this.scopeOf(state), precomputed: { processes, listening, method: `${method}+${ports.method}` } });
       });
       if (snapshot) this.emit(state.id, "context.processes", snapshot);
     }
 
     const [packages, services, setup, pmConfig, aliases] = await Promise.all([
       this.section("system_packages") ? timed("system_packages", () => systemPackages({ platform: this.platform, cacheDir: this.options.cacheDir ?? null })) : undefined,
-      this.section("services") ? timed("services", () => collectServices({ root: state.root, listening, processes: table, privacy, scrub, platform: this.platform })) : undefined,
+      this.section("services") ? timed("services", () => collectServices({ root: state.root, listening, processes: table, privacy, scrub, platform: this.platform, sessionStartMs: state.startedAt, folders: state.outside.folderPaths() })) : undefined,
       this.section("setup")
         ? timed("setup", () => collectSetup({
           root: state.root,
@@ -288,6 +328,10 @@ export class ContextCapture {
     if (!state || state.ended) return;
     state.turn += 1;
     state.calls = new Map();
+    state.liveCalls = new Map();
+    state.socketsAtStart = new Map();
+    state.diffRoots = [];
+    state.finalMessages = deferred();
     if (state.observer) {
       activeTurns.add(sessionId);
       state.observer.start();
@@ -297,16 +341,54 @@ export class ContextCapture {
     this.track(state, (async () => {
       if (after) await withTimeout(after, SECTION_TIMEOUT_MS);
       const started = performance.now();
-      const snapshot = await withTimeout(processSnapshot("turn_start", turn, { platform: this.platform, privacy: this.privacy, scrub: this.options.scrub }), SECTION_TIMEOUT_MS);
+      const snapshot = await withTimeout(processSnapshot("turn_start", turn, { platform: this.platform, privacy: this.privacy, scrub: this.options.scrub, scope: this.scopeOf(state) }), SECTION_TIMEOUT_MS);
       this.timings.turn_start.push(Math.round(performance.now() - started));
       if ("value" in snapshot) this.emit(sessionId, "context.processes", snapshot.value);
     })());
   }
 
-  /** The turn's engine messages (possibly in several parts): its tool calls feed #10, #21 and #22. */
-  turnMessages(sessionId: string, messages: unknown): void {
+  /**
+   * A tool call started or ended (the engine's event stream, pi's tool
+   * hooks). A shell call's start makes the network observer sample every
+   * 50 ms for its first 2 s and, on Linux, notes the socket table so that a
+   * connection too short to be sampled is still found from the table's
+   * diff at its end (only for hosts its command names).
+   */
+  toolEvent(sessionId: string, event: ToolEvent): void {
+    const state = this.sessions.get(sessionId);
+    if (!state || state.ended || !event.callId || toolKind(event.tool) !== "shell") return;
+    const at = event.at ?? Date.now();
+    const known = state.liveCalls.get(event.callId);
+    if (event.status === "running") {
+      if (known) return;
+      const command = typeof event.command === "string" ? event.command : null;
+      const workdir = typeof event.workdir === "string" && event.workdir.trim() ? event.workdir.trim() : null;
+      state.liveCalls.set(event.callId, { callId: event.callId, tool: event.tool, input: {}, status: "running", start: at, end: null, command, cwd: workdir ? workdir : state.root });
+      state.observer?.boost();
+      if (this.platform === "linux" && state.observer && command) state.socketsAtStart.set(event.callId, socketPairs().catch(() => new Map()));
+      return;
+    }
+    if (!known) return;
+    known.end = at;
+    known.status = event.status;
+    if (typeof event.command === "string" && !known.command) known.command = event.command;
+    const before = state.socketsAtStart.get(event.callId);
+    state.socketsAtStart.delete(event.callId);
+    if (before && known.command) {
+      const command = known.command;
+      const callId = event.callId;
+      state.diffRoots.push((async () => {
+        const connections = await socketDiffConnections(await before, await socketPairs().catch(() => new Map()), command, known.start ?? at, this.options.resolver);
+        return connections.size > 0 ? { pid: -1, command, firstSeen: known.start ?? at, connections, callId, method: "socket_table" } : null;
+      })().catch(() => null));
+    }
+  }
+
+  /** The turn's engine messages (possibly in several parts): its tool calls feed #10, #21 and #22. `final`: the turn's last part. */
+  turnMessages(sessionId: string, messages: unknown, final = false): void {
     const state = this.sessions.get(sessionId);
     if (!state) return;
+    if (final) queueMicrotask(() => state.finalMessages.resolve());
     const calls = toolCallsOf(messages, state.root, this.privacy.home);
     const fresh: ToolCall[] = [];
     calls.forEach((call, index) => {
@@ -344,13 +426,29 @@ export class ContextCapture {
     const state = this.sessions.get(sessionId);
     if (!state || !state.observer) return;
     const observer = state.observer;
-    const calls = [...state.calls.values()];
     const turn = state.turn;
     const alone = activeTurns.size <= 1;
     activeTurns.delete(sessionId);
+    const finalMessages = state.finalMessages.promise;
+    const live = state.liveCalls;
+    const diffs = state.diffRoots;
     this.track(state, (async () => {
+      const roots: Root[] = await observer.stop();
+      // The turn's calls are known once its last messages arrived (the uploader flushes them right after this milestone).
+      await withTimeout(finalMessages, FINAL_MESSAGES_WAIT_MS);
       const started = performance.now();
-      const roots = await observer.stop();
+      for (const root of await Promise.all(diffs)) if (root) roots.push(root);
+      const calls = [...state.calls.values()];
+      // Calls the tool events saw but no message carried yet (the engine had not stored them).
+      for (const call of live.values()) if (!calls.some((known) => known.callId === call.callId)) calls.push(call);
+      // A message's call takes the tool event's start and end when it has none.
+      for (const call of calls) {
+        const seen = call.callId ? live.get(call.callId) : undefined;
+        if (seen) {
+          call.start ??= seen.start;
+          call.end ??= seen.end;
+        }
+      }
       this.timings.network_sample_ms = observer.sampleMs;
       this.timings.network_samples = observer.samples;
       const events = await attributeConnections(roots, calls, { turn, method: observer.method, pollMs: observer.pollMs, ...(this.options.resolver ? { resolver: this.options.resolver } : {}) });
@@ -377,6 +475,7 @@ export class ContextCapture {
     const state = this.sessions.get(sessionId);
     if (!state || state.ended) return;
     if (state.observer && activeTurns.has(sessionId)) this.turnEnded(sessionId);
+    state.finalMessages.resolve();
     state.ended = true;
     void this.settled(sessionId, SETTLE_TIMEOUT_MS).finally(() => this.sessions.delete(sessionId));
   }

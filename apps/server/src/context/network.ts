@@ -28,6 +28,9 @@ import { addressClass, type AddressClass } from "./privacy.js";
 import { parseNetstat, parsePs, parseProcNetTcp, parseProcStat, parseWindowsProcesses, splitHostPort, type ProcessInfo } from "./processes.js";
 
 export const MAX_CONNECTIONS_PER_CALL = 100;
+/** Sampling interval in the first BOOST_MS of each tool call. */
+export const BOOST_POLL_MS = 50;
+export const BOOST_MS = 2_000;
 const MAX_ROOTS_PER_TURN = 500;
 const SHELLS = new Set(["bash", "sh", "zsh", "dash", "ksh", "fish", "pwsh", "powershell", "cmd", "busybox"]);
 
@@ -44,7 +47,18 @@ export type NetworkEvent = {
 };
 
 type Seen = { ip: string; port: number; first: number };
-type Root = { pid: number; command: string; firstSeen: number; connections: Map<string, Seen> };
+export type Root = {
+  pid: number;
+  command: string;
+  firstSeen: number;
+  connections: Map<string, Seen>;
+  /** The tool call this root is known to belong to (a socket-table diff of that call). */
+  callId?: string;
+  /** How the connections were seen when not by sampling the process tree. */
+  method?: string;
+  /** A shell that names no command (fed on stdin): attributed to the one shell call running when it appeared. */
+  bareShell?: boolean;
+};
 
 /** The engine that runs the tools (`opencode serve`, the app's engine binary). */
 export function isEngineProcess(argv: string[]): boolean {
@@ -326,6 +340,8 @@ export class NetworkObserver {
   private preexisting: Set<number> | null = null;
   /** Whether the last sample saw a tool shell running (sample faster then). */
   private busy = false;
+  /** Until when to sample at BOOST_POLL_MS: the first seconds of a tool call that just started. */
+  private boostUntil = 0;
   /** Time spent sampling (overhead measurement). */
   sampleMs = 0;
   samples = 0;
@@ -351,9 +367,32 @@ export class NetworkObserver {
   private schedule(delay: number): void {
     if (!this.active) return;
     this.timer = setTimeout(() => {
-      this.sampling = this.sample().catch(() => undefined).finally(() => this.schedule(this.busy ? this.options.sampler.activePollMs ?? this.options.sampler.pollMs : this.options.sampler.pollMs));
+      this.sampling = this.sample().catch(() => undefined).finally(() => this.schedule(this.nextDelay()));
     }, delay);
     this.timer.unref?.();
+  }
+
+  private nextDelay(): number {
+    if (Date.now() < this.boostUntil) return BOOST_POLL_MS;
+    return this.busy ? this.options.sampler.activePollMs ?? this.options.sampler.pollMs : this.options.sampler.pollMs;
+  }
+
+  /**
+   * A tool call is about to run (the engine's tool-start event comes before
+   * its process is spawned): sample every BOOST_POLL_MS for the next
+   * BOOST_MS, so a command that lasts a fraction of a second is still seen.
+   */
+  boost(ms = BOOST_MS): void {
+    if (!this.active) return;
+    this.boostUntil = Math.max(this.boostUntil, Date.now() + ms);
+    // Take the next sample now rather than after the slow interval.
+    if (this.timer) {
+      clearTimeout(this.timer);
+      this.timer = null;
+      void this.sampling.then(() => {
+        if (this.active && !this.timer) this.schedule(0);
+      });
+    }
   }
 
   private stopTimer(): void {
@@ -408,7 +447,9 @@ export class NetworkObserver {
       members.push(entry.pid);
       if (!this.roots.has(root) && this.roots.size < MAX_ROOTS_PER_TURN) {
         const argv = byPid.get(root)!.argv;
-        this.roots.set(root, { pid: root, command: shellCommandOf(argv) ?? argv.join(" "), firstSeen: now, connections: new Map() });
+        const command = shellCommandOf(argv);
+        const bareShell = command === null && SHELLS.has((argv[0]?.split(/[\\/]/).at(-1) ?? "").replace(/\.exe$/i, "").toLowerCase());
+        this.roots.set(root, { pid: root, command: command ?? argv.join(" "), firstSeen: now, connections: new Map(), ...(bareShell ? { bareShell } : {}) });
       }
     }
     this.busy = members.length > 0;
@@ -435,6 +476,54 @@ export class NetworkObserver {
     this.roots = new Map();
     return roots;
   }
+}
+
+// --- socket-table diff (Linux): connections of a call too short to sample ------------
+
+/** Every TCP socket's (local, remote) pair with a remote peer, from /proc/net/tcp{,6}: TIME_WAIT included. */
+export async function socketPairs(procNet = "/proc/net"): Promise<Map<string, { ip: string; port: number }>> {
+  const out = new Map<string, { ip: string; port: number }>();
+  const sockets = (await Promise.all(["tcp", "tcp6"].map((name) => readFile(`${procNet}/${name}`, "utf8").catch(() => "")))).flatMap(parseProcNetTcp);
+  // The accepting side of a local connection (its local port listens) is not a connection the tool made.
+  const listening = new Set(sockets.filter((socket) => socket.state === "0A").map((socket) => socket.local.port));
+  for (const socket of sockets) {
+    if (socket.state === "0A" || socket.remote.port === 0 || listening.has(socket.local.port)) continue;
+    out.set(`${socket.local.address}:${socket.local.port}>${socket.remote.address}:${socket.remote.port}`, { ip: socket.remote.address, port: socket.remote.port });
+  }
+  return out;
+}
+
+/**
+ * The connections a call made that sampling may have missed: sockets that
+ * appeared between its start and end (a closed one lingers in TIME_WAIT),
+ * kept only when their peer is an address of a host the command names, so
+ * nothing another process on the machine did is ever attributed to it.
+ */
+export async function socketDiffConnections(
+  before: Map<string, { ip: string; port: number }>,
+  after: Map<string, { ip: string; port: number }>,
+  command: string,
+  at: number,
+  resolver: HostResolver = SYSTEM_RESOLVER,
+): Promise<Map<string, Seen>> {
+  const fresh = [...after].filter(([key]) => !before.has(key)).map(([, peer]) => peer);
+  const out = new Map<string, Seen>();
+  if (fresh.length === 0) return out;
+  const named = new Set<string>();
+  await Promise.all(hostnamesInCommand(command).map(async (host) => {
+    for (const ip of (await withTimeout(resolver.lookup(host), 1_000)) ?? []) named.add(normalizeIp(ip));
+  }));
+  // IP literals the command names count as named hosts too.
+  for (const match of command.matchAll(/(?<![\d.])(\d{1,3}(?:\.\d{1,3}){3})(?![\d.])/g)) named.add(match[1]!);
+  if (/\blocalhost\b/.test(command)) {
+    named.add("127.0.0.1");
+    named.add("::1");
+  }
+  for (const peer of fresh) {
+    if (!named.has(normalizeIp(peer.ip))) continue;
+    out.set(`${peer.ip}|${peer.port}`, { ip: peer.ip, port: peer.port, first: at });
+  }
+  return out;
 }
 
 // --- naming hosts and attributing roots to calls -------------------------------------
@@ -551,11 +640,15 @@ export async function attributeConnections(
   const perCall = new Map<ToolCall, Seen[]>();
   const turn: Seen[] = [];
   const turnCommands: string[] = [];
+  const within = (call: ToolCall, at: number, slack: number) => call.start !== null && at >= call.start - slack && (call.end === null || at <= call.end + slack);
   for (const root of roots) {
     if (root.connections.size === 0) continue;
+    const byId = root.callId ? shellCalls.find((call) => call.callId === root.callId) : undefined;
     const candidates = shellCalls.filter((call) => sameCommand(call.command!, root.command));
-    const timed = candidates.filter((call) => call.start === null || (root.firstSeen >= call.start - 2_000 && (call.end === null || root.firstSeen <= call.end + 2_000)));
-    const call = (timed.length > 0 ? timed : candidates)[0];
+    const timed = candidates.filter((call) => call.start === null || within(call, root.firstSeen, 2_000));
+    // A shell the command cannot name (a command fed on stdin): the one shell call running when it appeared.
+    const running = shellCalls.filter((call) => within(call, root.firstSeen, 500));
+    const call = byId ?? (timed.length > 0 ? timed : candidates)[0] ?? (root.bareShell && running.length === 1 ? running[0] : undefined);
     if (call) perCall.set(call, [...(perCall.get(call) ?? []), ...root.connections.values()]);
     else {
       turn.push(...root.connections.values());
