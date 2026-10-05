@@ -357,3 +357,290 @@ test.skipIf(!hasZstd)("a short session still records it: the last snapshot waits
   assert.equal("toolchain" in start.environment, false);
   assert.deepEqual(end.environment.toolchain.versions, { node: "v22.19.0" });
 });
+
+// Nested projects: a monorepo's apps/web and apps/api, a backend/python with
+// its own venv. Manifests are searched a few levels down, each Python project
+// is frozen with the environment next to it, each installed Node folder gets
+// its own npm ls, and the size caps are shared between them.
+
+const npmTree = (name, deps) => ok(JSON.stringify({ name, version: "1.0.0", dependencies: Object.fromEntries(Object.entries(deps).map(([dep, version]) => [dep, { version }])) }));
+
+test("nested: backend/python with its venv records its manifests, venv interpreter and pip freeze; frontend its npm ls", async () => {
+  const root = tempProject({
+    "README.md": "# app\n",
+    "backend/python/requirements.txt": "fastapi\n",
+    "backend/python/venv/pyvenv.cfg": "home = /usr/bin\n",
+    "backend/python/venv/bin/python": "",
+    "backend/python/venv/lib/python3.12/site-packages/fastapi/setup.py": "",
+    "frontend/package.json": "{}",
+    "frontend/package-lock.json": "{}",
+    "frontend/node_modules/react/package.json": "{}",
+  });
+  const calls = [];
+  const result = await toolchain.collectToolchain(root, {
+    env: {},
+    resolve: (command) => (["python3", "npm"].includes(command) ? `/usr/bin/${command}` : null),
+    run: fakeRun({
+      python3: ok("Python 3.10.12\n"),
+      python: (args) => (args[0] === "--version" ? ok("Python 3.12.3\n") : ok("fastapi==0.115.0\nuvicorn==0.30.6\n")),
+      npm: (args) => (args[0] === "ls" ? npmTree("frontend", { react: "18.3.1" }) : ok("10.8.2\n")),
+    }, calls),
+  });
+  assert.deepEqual(result.manifests, ["backend/python/requirements.txt", "frontend/package.json"]);
+  assert.deepEqual(result.lockfiles, ["frontend/package-lock.json"]);
+  assert.equal(result.python_executable_kind, "venv");
+  assert.equal(result.versions.venv_python, "Python 3.12.3");
+  assert.equal(result.versions.python3, "Python 3.10.12");
+  assert.deepEqual(result.pip_freeze, ["fastapi==0.115.0", "uvicorn==0.30.6"], "old consumers: the first project's freeze at the top level");
+  assert.equal(result.pip_freeze_tool, "pip");
+  assert.equal(result.pip_freeze_dir, "backend/python");
+  assert.deepEqual(result.pip_freeze_by_dir, { "backend/python": ["fastapi==0.115.0", "uvicorn==0.30.6"] });
+  assert.deepEqual(result.python_executable_kind_by_dir, { "backend/python": "venv" });
+  assert.deepEqual(result.venv_python_by_dir, { "backend/python": "Python 3.12.3" });
+  assert.deepEqual(result.npm_ls, { name: "frontend", version: "1.0.0", dependencies: { react: "18.3.1" } });
+  assert.equal(result.npm_ls_dir, "frontend");
+  assert.deepEqual(result.npm_ls_by_dir, { frontend: { name: "frontend", version: "1.0.0", dependencies: { react: "18.3.1" } } });
+  assert.equal(result.skipped, undefined);
+  const venvPython = path.join(root, "backend", "python", "venv", "bin", "python");
+  const freeze = calls.find((call) => call.args[0] === "-m");
+  assert.equal(freeze.file, venvPython);
+  assert.equal(freeze.cwd, path.join(root, "backend", "python"));
+  assert.equal(calls.find((call) => call.args[0] === "ls").cwd, path.join(root, "frontend"));
+  assert.ok(!calls.some((call) => call.file === "/usr/bin/python3" && call.args[0] === "-m"), "the system interpreter is not frozen for a project with its own venv");
+  assert.ok(!JSON.stringify(result).includes(root), "no absolute path is recorded");
+
+  // Without node_modules the nested package.json says why there is no npm ls.
+  const bare = await toolchain.collectToolchain(tempProject({ "web/package.json": "{}" }), { env: {}, resolve: () => null, run: fakeRun({}) });
+  assert.deepEqual(bare.manifests, ["web/package.json"]);
+  assert.equal(bare.skipped?.npm_ls, "not_installed");
+});
+
+test("nested: a monorepo with apps/web and apps/api; a venv above a project is found; one interpreter is frozen once", async () => {
+  const root = tempProject({
+    "package.json": "{}",
+    "pnpm-lock.yaml": "",
+    "node_modules/turbo/package.json": "{}",
+    "apps/web/package.json": "{}",
+    "apps/web/node_modules/next/package.json": "{}",
+    "apps/api/pyproject.toml": "[project]\nname='api'\n",
+    "apps/api/.venv/pyvenv.cfg": "",
+    "apps/api/.venv/bin/python": "",
+    "apps/api/worker/requirements.txt": "celery\n",
+    "apps/docs/package.json": "{}",
+    "tools/requirements-dev.txt": "ruff\n",
+  });
+  const calls = [];
+  const result = await toolchain.collectToolchain(root, {
+    env: {},
+    resolve: (command) => (["python3", "npm", "uv"].includes(command) ? `/usr/bin/${command}` : null),
+    run: fakeRun({
+      python3: ok("Python 3.11.9\n"),
+      python: ok("Python 3.12.3\n"),
+      uv: (args) => {
+        if (args[0] !== "pip") return ok("uv 0.5.0\n");
+        return args[3].includes(".venv") ? ok("fastapi==0.115.0\n") : ok("ruff==0.6.9\n");
+      },
+      npm: (args) => {
+        if (args[0] !== "ls") return ok("10.8.2\n");
+        return calls.at(-1).cwd.endsWith("web") ? npmTree("web", { next: "15.0.3" }) : npmTree("mono", { turbo: "2.1.0" });
+      },
+    }, calls),
+  });
+  assert.deepEqual(result.manifests, ["apps/api/pyproject.toml", "apps/api/worker/requirements.txt", "apps/docs/package.json", "apps/web/package.json", "package.json", "tools/requirements-dev.txt"]);
+  assert.deepEqual(result.lockfiles, ["pnpm-lock.yaml"]);
+  // The root is a Node project only: the first Python project found (shallowest, then by name) is the top level.
+  assert.equal(result.pip_freeze_dir, "tools");
+  assert.deepEqual(result.pip_freeze, ["ruff==0.6.9"]);
+  assert.equal(result.python_executable_kind, "system");
+  assert.equal(result.pip_freeze_tool, "uv");
+  assert.deepEqual(result.pip_freeze_by_dir, {
+    tools: ["ruff==0.6.9"],
+    "apps/api": ["fastapi==0.115.0"],
+    "apps/api/worker": ["fastapi==0.115.0"],
+  });
+  assert.deepEqual(result.python_executable_kind_by_dir, { tools: "system", "apps/api": "venv", "apps/api/worker": "venv" });
+  assert.deepEqual(result.venv_python_by_dir, { "apps/api": "Python 3.12.3", "apps/api/worker": "Python 3.12.3" });
+  const freezes = calls.filter((call) => call.args[0] === "pip");
+  assert.equal(freezes.length, 2, "apps/api and its worker share the .venv: frozen once");
+  assert.equal(result.npm_ls_dir, ".");
+  assert.deepEqual(result.npm_ls.dependencies, { turbo: "2.1.0" });
+  assert.deepEqual(Object.keys(result.npm_ls_by_dir), [".", "apps/web"]);
+  assert.deepEqual(result.npm_ls_by_dir["apps/web"].dependencies, { next: "15.0.3" });
+  assert.equal(calls.filter((call) => call.args[0] === "ls").length, 2, "apps/docs has no node_modules: no npm ls there");
+
+  // A project whose root alone is Python looks exactly as before: no per-folder fields.
+  const flat = await toolchain.collectToolchain(tempProject({ "requirements.txt": "attrs\n", ".venv/pyvenv.cfg": "", ".venv/bin/python": "" }), {
+    env: {},
+    resolve: () => null,
+    run: fakeRun({ python: (args) => (args[0] === "--version" ? ok("Python 3.12.3\n") : ok("attrs==24.2.0\n")) }),
+  });
+  assert.deepEqual(flat.pip_freeze, ["attrs==24.2.0"]);
+  assert.equal(flat.python_executable_kind, "venv");
+  for (const key of ["pip_freeze_dir", "pip_freeze_by_dir", "python_executable_kind_by_dir", "venv_python_by_dir", "npm_ls_dir", "npm_ls_by_dir"]) {
+    assert.equal(flat[key], undefined, key);
+  }
+});
+
+test("nested: dependency, build, cache and environment folders are never searched; three levels down at most; no symlinks", async () => {
+  const root = tempProject({
+    "package.json": "{}",
+    "node_modules/left-pad/package.json": "{}",
+    ".git/package.json": "{}",
+    ".cache/pyproject.toml": "",
+    ".tox/py312/setup.py": "",
+    "dist/package.json": "{}",
+    "build/requirements.txt": "",
+    "target/Cargo.toml": "",
+    "vendor/github.com/x/go.mod": "",
+    "__pycache__/setup.py": "",
+    "env/pyvenv.cfg": "",
+    "env/lib/python3.12/site-packages/pkg/setup.py": "",
+    "myenv/pyvenv.cfg": "",
+    "myenv/lib/python3.12/site-packages/other/pyproject.toml": "",
+    "conda/conda-meta/history": "",
+    "conda/lib/pkg/setup.py": "",
+    "a/b/c/go.mod": "",
+    "a/b/c/d/Cargo.toml": "",
+    "a/b/c/venv/pyvenv.cfg": "",
+    "services/api/Gemfile": "",
+    "services/api/Gemfile.lock": "",
+    "services/java/pom.xml": "",
+    "services/java/build.gradle.kts": "",
+    "services/py/setup.cfg": "",
+    "services/py/Pipfile": "",
+    "services/py/poetry.lock": "",
+    "services/py/uv.lock": "",
+    "services/js/bun.lockb": "",
+    "services/js/yarn.lock": "",
+  });
+  if (process.platform !== "win32") fs.symlinkSync(path.join(root, "services"), path.join(root, "link"), "dir");
+  const files = await toolchain.projectFiles(root);
+  assert.deepEqual(files.manifests, [
+    "a/b/c/go.mod",
+    "package.json",
+    "services/api/Gemfile",
+    "services/java/build.gradle.kts",
+    "services/java/pom.xml",
+    "services/py/Pipfile",
+    "services/py/setup.cfg",
+  ]);
+  assert.deepEqual(files.lockfiles, ["services/api/Gemfile.lock", "services/js/bun.lockb", "services/js/yarn.lock", "services/py/poetry.lock", "services/py/uv.lock"]);
+  // Any folder with pyvenv.cfg is an environment, found at the last level too.
+  assert.deepEqual(files.venvs, ["a/b/c/venv", "env", "myenv"]);
+  assert.deepEqual(files.pythonDirs, [".", "services/py", "a/b/c"], "shallowest first");
+  assert.equal(files.truncated, false);
+  assert.equal(toolchain.venvFor("services/py", files.venvs), "env", "the nearest environment above, preferred names first");
+  assert.equal(toolchain.venvFor("a/b/c", files.venvs), "a/b/c/venv");
+  assert.equal(toolchain.venvFor(".", ["myenv", ".venv", "venv"]), ".venv");
+  assert.equal(toolchain.venvFor("x", []), null);
+});
+
+test("nested: the search stops at 200 folders and 2 s, and says so", async () => {
+  const many = {};
+  for (let i = 0; i < 260; i += 1) many[`pkg${String(i).padStart(3, "0")}/package.json`] = "{}";
+  const root = tempProject(many);
+  const files = await toolchain.projectFiles(root);
+  assert.equal(files.truncated, true);
+  assert.equal(files.manifests.length, 199, "the root and 199 folders read");
+  assert.equal(toolchain.MANIFEST_SCAN_MAX_DIRS, 200);
+  assert.equal(toolchain.MANIFEST_SCAN_BUDGET_MS, 2_000);
+
+  let clock = 0;
+  const slow = await toolchain.projectFiles(root, { now: () => (clock += 500) });
+  assert.equal(slow.truncated, true);
+  assert.ok(slow.manifests.length <= 4, `${slow.manifests.length} folders read past the deadline`);
+
+  const result = await toolchain.collectToolchain(root, { env: {}, files, resolve: () => null, run: fakeRun({}) });
+  assert.equal(result.manifests_truncated, true);
+  assert.equal(result.manifests.length, 199);
+});
+
+test("nested: more than 8 projects are not all probed; the freeze caps are shared, the top level keeps its own", async () => {
+  const layout = {};
+  for (let i = 0; i < 10; i += 1) {
+    layout[`svc${i}/requirements.txt`] = "x\n";
+    layout[`svc${i}/.venv/pyvenv.cfg`] = "";
+    layout[`svc${i}/.venv/bin/python`] = "";
+  }
+  const root = tempProject(layout);
+  const freezeOf = (cwd) => {
+    const n = Number(/svc(\d)/.exec(cwd)[1]);
+    // svc0: small; the rest: 1500 entries each.
+    return n === 0 ? "tiny==1.0\n" : Array.from({ length: 1500 }, (_, i) => `svc${n}-package-with-a-long-name-${i}==1.0.${i}`).join("\n");
+  };
+  const calls = [];
+  const result = await toolchain.collectToolchain(root, {
+    env: {},
+    resolve: () => null,
+    run: async (file, args, options) => {
+      calls.push({ file, args, cwd: options.cwd });
+      return args[0] === "--version" ? ok("Python 3.12.3\n") : ok(freezeOf(options.cwd));
+    },
+  });
+  assert.equal(result.projects_truncated, true);
+  assert.equal(calls.filter((call) => call.args[0] === "-m").length, 8);
+  const byDir = result.pip_freeze_by_dir;
+  assert.equal(Object.keys(byDir).length, 8);
+  assert.deepEqual(byDir.svc0, ["tiny==1.0"]);
+  const all = Object.values(byDir).flat();
+  assert.ok(all.length <= toolchain.MAX_FREEZE_LINES, `${all.length} lines in all`);
+  assert.ok(all.reduce((sum, line) => sum + Buffer.byteLength(line) + 1, 0) <= toolchain.MAX_FREEZE_BYTES);
+  assert.deepEqual(result.pip_freeze_truncated_dirs, ["svc1", "svc2", "svc3", "svc4", "svc5", "svc6", "svc7"]);
+  assert.equal(result.pip_freeze_dir, "svc0");
+  assert.deepEqual(result.pip_freeze, ["tiny==1.0"]);
+
+  assert.deepEqual(toolchain.splitBudget([10, 5000, 5000], 2000), [10, 995, 995]);
+  assert.deepEqual(toolchain.splitBudget([100, 200], 2000), [100, 200]);
+  assert.deepEqual(toolchain.splitBudget([], 2000), []);
+
+  // npm ls: one 64 KiB cap shared between folders.
+  const web = tempProject({ "a/package.json": "{}", "a/node_modules/x/package.json": "{}", "b/package.json": "{}", "b/node_modules/x/package.json": "{}" });
+  const big = (prefix) => ok(JSON.stringify({ dependencies: Object.fromEntries(Array.from({ length: 3000 }, (_, i) => [`${prefix}-dependency-${i}`, { version: "1.2.3" }])) }));
+  const npm = await toolchain.collectToolchain(web, {
+    env: {},
+    resolve: (command) => (command === "npm" ? "/usr/bin/npm" : null),
+    run: async (_file, args, options) => (args[0] === "ls" ? big(path.basename(options.cwd)) : ok("10.8.2\n")),
+  });
+  assert.equal(npm.npm_ls_dir, "a");
+  assert.ok(npm.npm_ls.truncated);
+  const sizes = Object.values(npm.npm_ls_by_dir).map((summary) => JSON.stringify(summary).length);
+  assert.equal(sizes.length, 2);
+  assert.ok(sizes.reduce((a, b) => a + b, 0) <= toolchain.MAX_NPM_LS_BYTES + 64, sizes.join(" + "));
+  assert.ok(Object.values(npm.npm_ls_by_dir).every((summary) => summary.truncated));
+});
+
+test.skipIf(process.platform === "win32")("nested: a project's freeze that hangs is killed at its timeout; the others are still recorded", async () => {
+  const script = (freeze) => `#!/bin/sh\nif [ "$1" = "--version" ]; then echo "Python 3.12.3"; exit 0; fi\n${freeze}\n`;
+  const root = tempProject({
+    "fast/requirements.txt": "attrs\n",
+    "fast/venv/pyvenv.cfg": "",
+    "fast/venv/bin/python": script('echo "attrs==24.2.0"'),
+    "slow/requirements.txt": "attrs\n",
+    "slow/venv/pyvenv.cfg": "",
+    "slow/venv/bin/python": script("exec sleep 30"),
+  });
+  fs.chmodSync(path.join(root, "fast/venv/bin/python"), 0o755);
+  fs.chmodSync(path.join(root, "slow/venv/bin/python"), 0o755);
+  const started = Date.now();
+  const result = await toolchain.collectToolchain(root, { env: {}, resolve: () => null, freezeTimeoutMs: 300, probes: [] });
+  assert.ok(Date.now() - started < 5_000, `took ${Date.now() - started} ms`);
+  assert.deepEqual(result.pip_freeze_by_dir, { fast: ["attrs==24.2.0"] });
+  assert.deepEqual(result.python_executable_kind_by_dir, { fast: "venv", slow: "venv" });
+  assert.deepEqual(result.venv_python_by_dir, { fast: "Python 3.12.3", slow: "Python 3.12.3" });
+});
+
+test("nested: the cache collects again when a nested manifest or environment changes", async () => {
+  const root = tempProject({ "backend/requirements.txt": "attrs\n" });
+  const cache = new toolchain.ToolchainCache({ waitMs: 10_000, env: {}, resolve: () => null, run: fakeRun({}) });
+  await cache.get(root);
+  await cache.get(root);
+  assert.equal(cache.collections, 1);
+  fs.mkdirSync(path.join(root, "backend", "venv"));
+  fs.writeFileSync(path.join(root, "backend", "venv", "pyvenv.cfg"), "");
+  await cache.get(root);
+  assert.equal(cache.collections, 2);
+  fs.writeFileSync(path.join(root, "backend", "requirements.txt"), "attrs\nrequests\n");
+  const last = await cache.get(root);
+  assert.equal(cache.collections, 3);
+  assert.deepEqual(last.manifests, ["backend/requirements.txt"]);
+});
