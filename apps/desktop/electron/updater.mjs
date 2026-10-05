@@ -1136,6 +1136,14 @@ export function registerUpdaterIpc({
     }
   }));
 
+  /** Downloads; ~/Downloads where the desktop names no download folder (Electron then answers home). */
+  async function packageDownloadDirectory() {
+    const downloads = app.getPath("downloads");
+    if (downloads !== app.getPath("home")) return downloads;
+    const fallback = path.join(downloads, "Downloads");
+    return (await fileExists(fallback)) ? fallback : downloads;
+  }
+
   /** The downloaded package and its install command (package mode only). */
   function downloadedPackageDetails(installMode) {
     if (installMode !== "package") return {};
@@ -1162,7 +1170,7 @@ export function registerUpdaterIpc({
       }
       if (installMode === "package") {
         downloadedInstallerPath = await downloadManualInstaller(checkedInstallerArtifact, {
-          directory: app.getPath("downloads"),
+          directory: await packageDownloadDirectory(),
         });
       } else {
         downloadedInstallerPath = await downloadManualInstaller(checkedInstallerArtifact);

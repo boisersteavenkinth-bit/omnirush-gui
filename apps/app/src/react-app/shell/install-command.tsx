@@ -6,8 +6,8 @@ export function InstallCommand(props: { command: string; onShowFile?: (() => voi
   return (
     <div data-testid="update-install-command" className="mt-4 w-full">
       <pre className={dark
-        ? "overflow-x-auto rounded-xl border border-white/10 bg-black/40 px-3 py-2 font-mono text-xs text-emerald-100 select-text"
-        : "overflow-x-auto rounded-lg border border-border bg-muted px-3 py-2 font-mono text-xs text-foreground select-text"}
+        ? "whitespace-pre-wrap break-all rounded-xl border border-white/10 bg-black/40 px-3 py-2 font-mono text-xs text-emerald-100 select-text"
+        : "whitespace-pre-wrap break-all rounded-lg border border-border bg-muted px-3 py-2 font-mono text-xs text-foreground select-text"}
       >{props.command}</pre>
       {props.onShowFile ? (
         <button
