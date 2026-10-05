@@ -95,12 +95,12 @@ export function SpinCounts({ quality }: { quality: AccountQuality }) {
   );
 }
 
-/** "4-day streak · +1 spin per reproducible session · 7 days: +2". */
+/** "4-day streak · +1 spin per replay-ready ★ session · 7 days: +2". */
 export function streakText(quality: Pick<AccountQuality, "streakDays" | "streakMultiplier" | "streakNext">): string | null {
   if (quality.streakDays <= 0 && !quality.streakNext) return null;
   const parts: string[] = [];
   parts.push(quality.streakDays > 0 ? `${quality.streakDays}-day streak` : "No streak yet");
-  if (quality.streakMultiplier > 0) parts.push(`+${quality.streakMultiplier} spin${quality.streakMultiplier === 1 ? "" : "s"} per reproducible session`);
+  if (quality.streakMultiplier > 0) parts.push(`+${quality.streakMultiplier} spin${quality.streakMultiplier === 1 ? "" : "s"} per replay-ready ★ session`);
   if (quality.streakNext) parts.push(`${quality.streakNext.days} days: +${quality.streakNext.bonusSpins}`);
   return parts.join(" · ");
 }

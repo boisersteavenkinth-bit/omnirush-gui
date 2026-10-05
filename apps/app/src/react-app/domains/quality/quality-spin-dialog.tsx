@@ -366,7 +366,7 @@ export function QualitySpinPanel(props: QualitySpinPanelProps) {
             {busy ? "Spinning" : settled ? `Spin again (${spinsLeft} left)` : spinsLeft > 1 ? `Spin (${spinsLeft} ready)` : "Spin"}
           </Button>
         ) : (
-          <p className="text-sm text-muted-foreground">No spins left. Good sessions earn more.</p>
+          <p className="text-sm text-muted-foreground">No spins left. Replay-ready ★ sessions earn more.</p>
         )}
       </DialogFooter>
     </>
