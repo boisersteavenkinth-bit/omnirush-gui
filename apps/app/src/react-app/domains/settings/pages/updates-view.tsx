@@ -18,7 +18,9 @@ import { Switch } from "@/components/ui/switch";
 import { formatBytes, formatRelativeTime } from "../../../../app/utils";
 import { t } from "../../../../i18n";
 import type { ReleaseChannel } from "../../../../app/types";
-import type { UpdaterInstallMode } from "../../../../app/lib/desktop";
+import type { UpdaterInstallMode, UpdaterPackageKind } from "../../../../app/lib/desktop";
+import { useUpdateGateStore } from "../../../../app/lib/update-gate";
+import { InstallCommand } from "../../../shell/install-command";
 import type { SettingsUpdateStatus } from "../state/electron-updater-state";
 import {
   LayoutSectionItem,
@@ -89,12 +91,17 @@ export type UpdatesViewProps = {
    */
   alphaChannelSupported?: boolean;
   /**
-   * How the shell applies a downloaded update. "manual-dmg" (macOS builds
-   * without a Developer ID signature) opens the installer instead of
-   * restarting in place, so the buttons say so.
+   * How the shell applies a downloaded update. "manual-dmg" (a macOS copy
+   * that cannot be replaced) opens the installer, and "package" (a .deb,
+   * .rpm or .pacman install) downloads the package and shows the command
+   * that installs it, so the buttons say so.
    */
   installMode?: UpdaterInstallMode | null;
+  packageKind?: UpdaterPackageKind | null;
+  showDownloadedUpdate?: () => void;
 };
+
+const PACKAGE_LABELS: Record<UpdaterPackageKind, string> = { deb: ".deb", rpm: ".rpm", pacman: ".pacman", appimage: "AppImage" };
 
 export function UpdatesView(props: UpdatesViewProps) {
   const [confirmRestartOpen, setConfirmRestartOpen] = useState(false);
@@ -112,6 +119,10 @@ export function UpdatesView(props: UpdatesViewProps) {
       : t("settings.update_check_failed");
   const updateNotes = props.updateStatus?.notes ?? null;
   const manualInstall = props.installMode === "manual-dmg";
+  const packageInstall = props.installMode === "package";
+  const packageLabel = props.packageKind ? PACKAGE_LABELS[props.packageKind] : null;
+  const installCommand = packageInstall ? props.updateStatus?.installCommand ?? null : null;
+  const downloadPageUrl = useUpdateGateStore((store) => store.state.downloadUrl);
   const installButtonLabel = manualInstall
     ? t("settings.update_open_installer_button")
     : t("settings.update_install_button");
@@ -168,17 +179,36 @@ export function UpdatesView(props: UpdatesViewProps) {
                       {t("settings.update_check_button")}
                     </Button>
 
-                    {updateState === "available" ? (
+                    {updateState === "available" && packageInstall && !packageLabel ? (
+                      // A tar.gz install: the feed has no package for it.
+                      <Button
+                        variant="secondary"
+                        onClick={() => void window.__OMNIRUSH_ELECTRON__?.shell?.openExternal?.(downloadPageUrl)}
+                        disabled={props.busy}
+                      >
+                        {t("settings.update_open_download_page_button")}
+                      </Button>
+                    ) : updateState === "available" ? (
                       <Button
                         variant="secondary"
                         onClick={() => void props.downloadUpdate()}
                         disabled={props.busy}
                       >
-                        {t("settings.update_download_button")}
+                        {packageLabel
+                          ? t("settings.update_download_package_button", undefined, { kind: packageLabel })
+                          : t("settings.update_download_button")}
                       </Button>
                     ) : null}
 
-                    {updateState === "ready" ? (
+                    {updateState === "ready" && installCommand ? (
+                      <Button
+                        variant="secondary"
+                        onClick={() => void navigator.clipboard?.writeText(installCommand)}
+                        disabled={props.busy}
+                      >
+                        {t("settings.update_copy_command_button")}
+                      </Button>
+                    ) : updateState === "ready" && !packageInstall ? (
                       <Button
                         variant="secondary"
                         onClick={() => {
@@ -213,6 +243,13 @@ export function UpdatesView(props: UpdatesViewProps) {
                   <Info />
                   <AlertDescription>{updateErrorMessage}</AlertDescription>
                 </Alert>
+              ) : null}
+
+              {updateState === "ready" && installCommand ? (
+                <div>
+                  <p className="text-sm text-muted-foreground">{t("settings.update_package_hint")}</p>
+                  <InstallCommand command={installCommand} onShowFile={props.showDownloadedUpdate ?? null} tone="light" />
+                </div>
               ) : null}
 
               {updateState === "ready" && manualInstall ? (

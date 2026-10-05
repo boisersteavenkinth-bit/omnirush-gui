@@ -11,6 +11,7 @@ import {
   requiredUpdateAction,
   shouldStartBackgroundDownload,
   updateBannerText,
+  updateButtonLabel,
   useUpdateGateStore,
   type UpdateGateState,
 } from "../src/app/lib/update-gate";
@@ -29,6 +30,18 @@ const required: UpdateGateState = {
   source: "header",
 };
 const blocked: UpdateGateState = { ...required, status: "blocked", message: "Update OmniRush.ai to 3.1.0 to keep using models.", source: "rejection" };
+
+function fakeUpdate(over: Partial<{ label: string; working: boolean; detail: string | null; command: string | null }> = {}) {
+  return {
+    updateNow: () => undefined,
+    working: false,
+    detail: null,
+    label: "Update and restart",
+    command: null,
+    showDownloaded: () => undefined,
+    ...over,
+  };
+}
 
 describe("update gate state from the desktop bridge", () => {
   test("normalizes the main-process state and rejects anything malformed", () => {
@@ -61,22 +74,22 @@ describe("required-update banner", () => {
     expect(updateBannerText({ ...required, minimum: null, deadline: null }, "OmniRush.ai", NOW)).toBe("A newer OmniRush.ai is required");
   });
 
-  test("renders the countdown and an Update now button, with no way to dismiss it", () => {
+  test("renders the countdown and a button that says what it does, with no way to dismiss it", () => {
     const html = renderToStaticMarkup(
-      <RequiredUpdateBanner gate={required} appName="OmniRush.ai" onUpdateNow={() => undefined} working={false} detail={null} />,
+      <RequiredUpdateBanner gate={required} appName="OmniRush.ai" update={fakeUpdate({ label: "Restart to update" })} />,
     );
     expect(html).toContain("data-testid=\"update-required-banner\"");
     expect(html).toMatch(/OmniRush\.ai 3\.1\.0 is required in \d+(d \d+h|h \d+m|m)|less than a minute/);
-    expect(html).toContain("Update now");
+    expect(html).toContain("Restart to update");
     expect(html.toLowerCase()).not.toContain("dismiss");
     expect(html).not.toContain("aria-label=\"Close\"");
   });
 });
 
 describe("blocked view", () => {
-  test("is full-screen, shows the server message and both versions, and offers Update now", () => {
+  test("is full-screen, shows the server message, both versions and the download progress", () => {
     const html = renderToStaticMarkup(
-      <UpdateRequiredView gate={blocked} appName="OmniRush.ai" onUpdateNow={() => undefined} working={false} detail="Downloading the update… 40%" />,
+      <UpdateRequiredView gate={blocked} appName="OmniRush.ai" update={fakeUpdate({ label: "Downloading 3.1.1… 40%", working: true })} />,
     );
     expect(html).toContain("data-testid=\"update-required-view\"");
     expect(html).toContain("fixed inset-0");
@@ -84,29 +97,68 @@ describe("blocked view", () => {
     expect(html).toContain(blocked.message!);
     expect(html).toContain(">3.0.2<");
     expect(html).toContain(">3.1.0<");
-    expect(html).toContain("Update now");
+    expect(html).toContain("Downloading 3.1.1… 40%");
     expect(html).toContain("keep uploading in the background");
-    expect(html).toContain("Downloading the update… 40%");
+    expect(html).toContain("Open the download page instead");
+  });
+
+  test("shows the install command for a package install", () => {
+    const command = "sudo apt install /home/pat/Downloads/omnirush-linux-amd64-3.1.1.deb";
+    const html = renderToStaticMarkup(
+      <UpdateRequiredView gate={blocked} appName="OmniRush.ai" update={fakeUpdate({ label: "Copy install command", command })} />,
+    );
+    expect(html).toContain("data-testid=\"update-install-command\"");
+    expect(html).toContain(command);
+    expect(html).toContain("Copy install command");
+    expect(html).toContain("Show the downloaded file");
   });
 });
 
 describe("Update now", () => {
-  test("installs a staged update in place (Linux AppImage, Windows, Developer ID macOS)", () => {
+  test("installs a staged update in place (Linux AppImage, Windows, macOS signed or not)", () => {
     expect(requiredUpdateAction({ supported: true, installMode: "in-place", updaterState: "ready" })).toBe("install");
     expect(requiredUpdateAction({ supported: true, installMode: "in-place", updaterState: "available" })).toBe("download-then-install");
     expect(requiredUpdateAction({ supported: true, installMode: "in-place", updaterState: null })).toBe("download-then-install");
     expect(requiredUpdateAction({ supported: true, installMode: "in-place", updaterState: "downloading" })).toBe("wait");
   });
 
-  test("opens download_url where the app cannot replace itself", () => {
-    // Ad-hoc signed macOS builds: Squirrel cannot swap them.
+  test("opens download_url only where the app cannot replace itself, and says so", () => {
+    // A translocated macOS copy (run from Downloads) cannot be replaced.
     expect(requiredUpdateAction({ supported: true, installMode: "manual-dmg", updaterState: "ready" })).toBe("open-download");
+    // A tar.gz install: no package in the feed.
+    expect(requiredUpdateAction({ supported: true, installMode: "package", packageKind: null, updaterState: "available" })).toBe("open-download");
+    expect(updateButtonLabel({ action: "open-download" })).toBe("Open download page");
     expect(requiredUpdateAction({ supported: false, installMode: null, updaterState: null })).toBe("open-download");
     expect(requiredUpdateAction({ supported: true, installMode: "in-place", updaterState: "blocked" })).toBe("open-download");
   });
 
   test("tries the download again after a failed check or download", () => {
     expect(requiredUpdateAction({ supported: true, installMode: "in-place", updaterState: "error" })).toBe("download-then-install");
+    expect(updateButtonLabel({ action: "download-then-install", updaterState: "error" })).toBe("Try the update again");
+  });
+
+  test("a package install downloads the package and then offers its command", () => {
+    const base = { supported: true, installMode: "package" as const, packageKind: "deb" };
+    expect(requiredUpdateAction({ ...base, updaterState: "available" })).toBe("download-package");
+    expect(requiredUpdateAction({ ...base, updaterState: "downloading" })).toBe("wait");
+    expect(requiredUpdateAction({ ...base, updaterState: "ready" })).toBe("copy-command");
+    expect(updateButtonLabel({ action: "download-package", version: "3.1.1", packageKind: "deb" })).toBe("Download 3.1.1 (.deb)");
+    expect(updateButtonLabel({ action: "copy-command" })).toBe("Copy install command");
+  });
+
+  test("the button says what happens: progress while downloading, then restart", () => {
+    expect(updateButtonLabel({ action: "wait", updaterState: "downloading", version: "3.1.1", progress: 42 })).toBe("Downloading 3.1.1… 42%");
+    expect(updateButtonLabel({ action: "wait", updaterState: "checking" })).toBe("Checking for the update…");
+    expect(updateButtonLabel({ action: "install" })).toBe("Restart to update");
+    expect(updateButtonLabel({ action: "install", restarting: true })).toBe("Restarting…");
+    expect(updateButtonLabel({ action: "download-then-install" })).toBe("Update and restart");
+  });
+
+  test("nothing opens a browser by itself", () => {
+    const hook = read("../src/react-app/shell/update-gate.tsx");
+    // openDownload runs only from the "open-download" action and the explicit link.
+    expect(hook.match(/openDownload\(/g)?.length).toBe(3);
+    expect(hook).toContain('case "open-download":\n        openDownload(gate.downloadUrl);');
   });
 
   test("the download starts in the background as soon as an update is required", () => {
@@ -117,6 +169,8 @@ describe("Update now", () => {
     expect(shouldStartBackgroundDownload({ ...base, gate: required, updaterState: "ready" })).toBe(false);
     expect(shouldStartBackgroundDownload({ ...base, gate: NO_UPDATE_GATE, updaterState: null })).toBe(false);
     expect(shouldStartBackgroundDownload({ supported: true, installMode: "manual-dmg", gate: required, updaterState: null })).toBe(false);
+    // A package lands in Downloads: it waits for a click.
+    expect(shouldStartBackgroundDownload({ supported: true, installMode: "package", gate: required, updaterState: null })).toBe(false);
   });
 });
 

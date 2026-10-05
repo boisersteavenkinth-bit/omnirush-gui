@@ -10,6 +10,7 @@ import { useDesktopConfig } from "../../cloud/desktop-config-provider";
 import { useBrandAppName } from "../../cloud/brand-theme";
 import { notifyAlert } from "../../../shell/notifications";
 import { useElectronUpdaterState } from "./electron-updater-state";
+import { InstallCommand } from "../../../shell/install-command";
 
 function useUpdatePreference(key: string) {
   const [enabled, setEnabled] = useState(() => {
@@ -65,15 +66,53 @@ export function DesktopUpdaterProvider({ children }: { children: ReactNode }) {
   return <DesktopUpdaterContext.Provider value={updater}>{children}</DesktopUpdaterContext.Provider>;
 }
 
+function PackageUpdateButton(props: { command: string; version: string; onShowFile: () => void }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <Button
+        variant="ghost"
+        size="sm"
+        data-update-button
+        onClick={() => setOpen(true)}
+        className="mac:titlebar-no-drag h-7 gap-1.5 rounded-lg border border-foreground/[0.06] bg-foreground/[0.04] px-2.5 text-xs font-medium text-foreground/80 shadow-none transition-colors hover:bg-foreground/[0.08] hover:text-foreground"
+      >
+        <RotateCw className="size-3.5 opacity-70" strokeWidth={1.75} aria-hidden="true" />
+        {t("settings.update_install_version_button", undefined, { version: props.version })}
+      </Button>
+      <AlertDialog open={open} onOpenChange={setOpen}>
+        <AlertDialogContent className="max-w-[420px] gap-0 rounded-[15px] border border-border p-6 ring-0 sm:max-w-[420px]">
+          <AlertDialogTitle className="mb-2 text-[19px] leading-tight tracking-tight">
+            {t("settings.update_package_title", undefined, { version: props.version })}
+          </AlertDialogTitle>
+          <AlertDialogDescription className="text-xs leading-[1.75]">{t("settings.update_package_hint")}</AlertDialogDescription>
+          <InstallCommand command={props.command} onShowFile={props.onShowFile} tone="light" />
+          <AlertDialogFooter className="mt-5">
+            <AlertDialogCancel variant="ghost" size="sm" className="rounded-[7px] text-[11px] text-muted-foreground">{t("settings.update_keep_working")}</AlertDialogCancel>
+            <AlertDialogAction size="sm" className="rounded-[7px] text-[11px]" onClick={() => {
+              void navigator.clipboard?.writeText(props.command);
+              setOpen(false);
+            }}>{t("settings.update_copy_command_button")}</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </>
+  );
+}
+
 export function DesktopUpdateButton() {
   const updater = useContext(DesktopUpdaterContext);
   const appName = useBrandAppName();
   const [confirmRestart, setConfirmRestart] = useState(false);
   if (updater?.updateStatus?.state !== "ready") return null;
-  // macOS builds without a Developer ID signature cannot swap themselves:
-  // the shell opens the downloaded DMG and quits, so say that instead of
-  // promising a restart.
+  // A macOS copy that cannot be replaced opens the downloaded DMG and quits,
+  // so say that instead of promising a restart.
   const manualInstall = updater.installMode === "manual-dmg";
+  // A .deb/.rpm/.pacman install: the package manager installs it.
+  const installCommand = updater.installMode === "package" ? updater.updateStatus.installCommand ?? null : null;
+  if (installCommand) {
+    return <PackageUpdateButton command={installCommand} version={updater.updateStatus.version ?? ""} onShowFile={updater.showDownloadedUpdate} />;
+  }
   return (
     <>
       <Tooltip>
