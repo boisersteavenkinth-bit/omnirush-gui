@@ -38,17 +38,14 @@ export function createWheelSounds(): WheelSounds | null {
   return {
     tick() {
       if (context.state === "suspended") void context.resume();
-      tone(1_700, context.currentTime, 0.03, 0.08, "square");
+      tone(1_200, context.currentTime, 0.025, 0.04, "sine");
     },
     win(celebrate) {
       if (context.state === "suspended") void context.resume();
       const now = context.currentTime;
-      const notes = celebrate === "jackpot"
-        ? [523, 659, 784, 1047, 784, 1047, 1319, 1568]
-        : celebrate === "big"
-          ? [523, 659, 784, 1047]
-          : [659, 880];
-      notes.forEach((note, index) => tone(note, now + index * 0.09, 0.22, 0.12, "triangle"));
+      // A soft two-note chime; a third note for the jackpot.
+      const notes = celebrate === "jackpot" ? [659, 880, 1047] : [659, 880];
+      notes.forEach((note, index) => tone(note, now + index * 0.12, 0.3, 0.07, "sine"));
     },
     dispose() {
       void context.close().catch(() => undefined);

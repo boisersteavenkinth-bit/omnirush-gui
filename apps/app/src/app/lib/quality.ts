@@ -181,42 +181,13 @@ export function wheelTargetRotation(
 }
 
 /**
- * The spin's shape over time: a short acceleration, a long deceleration
- * that overshoots the stop by `overshoot` degrees, and a settle back onto
- * it. `progress` is 0..1; the result goes from `from` to `to`.
+ * The spin's shape over time: one ease-out (quartic) from `from` to `to`,
+ * no wind-up and no overshoot. `progress` is 0..1.
  */
-export function wheelAngleAt(progress: number, from: number, to: number, overshoot = 0): number {
+export function wheelEaseOut(progress: number, from: number, to: number): number {
   const p = Math.min(1, Math.max(0, progress));
-  const distance = to - from;
-  const ACCEL = 0.12;
-  const SETTLE = 0.88;
-  // Velocity ramps up linearly over ACCEL and decays as a cubic after it, so
-  // the curve is smooth where the phases meet. Normalised so it ends on `to + overshoot`.
-  const accelArea = ACCEL / 2;
-  const decelArea = (SETTLE - ACCEL) / 4;
-  const total = accelArea + decelArea;
-  const reach = distance + overshoot;
-  if (p >= SETTLE) {
-    const q = (p - SETTLE) / (1 - SETTLE);
-    const ease = q * q * (3 - 2 * q);
-    return to + overshoot * (1 - ease);
-  }
-  if (p <= ACCEL) {
-    const area = (p * p) / (2 * ACCEL);
-    return from + reach * (area / total);
-  }
-  const d = (p - ACCEL) / (SETTLE - ACCEL);
-  const area = accelArea + ((SETTLE - ACCEL) * (1 - (1 - d) ** 4)) / 4;
-  return from + reach * (area / total);
-}
-
-/** How far the wheel may overshoot its stop without leaving the slice. */
-export function wheelOvershoot(segments: WheelSegment[], index: number, offset = 0): number {
-  const slice = wheelSlices(segments)[index];
-  if (!slice) return 0;
-  const half = (slice.end - slice.start) / 2;
-  const room = half * (1 - Math.max(-0.7, Math.min(0.7, offset)));
-  return Math.min(6, room * 0.6);
+  if (p >= 1) return to;
+  return from + (to - from) * (1 - (1 - p) ** 4);
 }
 
 /** "12%": a segment's share of the weights. */
@@ -273,7 +244,7 @@ export function nearMissText(spin: QualitySpin, jackpotTokens?: number | null): 
 /** The star, explained wherever it shows. */
 export const CLIENT_GRADE_NOTE = "★ Replay-ready sessions earn +2 spins on a richer wheel.";
 /** What users read for a client-grade session or spin (internal fields keep `client`). */
-export const REPLAY_READY_LABEL = "replay-ready ★";
+export const REPLAY_READY_LABEL = "Replay-ready ★";
 
 /**
  * The prize shown `progress` (0..1) into the count-up: an ease-out that never
