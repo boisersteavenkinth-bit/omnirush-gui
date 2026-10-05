@@ -8,11 +8,13 @@ import {
   requiredUpdateAction,
   shouldStartBackgroundDownload,
   updateBannerText,
+  updateButtonLabel,
   useUpdateGateState,
   type UpdateGateState,
 } from "../../app/lib/update-gate";
 import { useBrandAppName } from "../domains/cloud/brand-theme";
 import { useDesktopUpdater } from "../domains/settings/state/desktop-updater-provider";
+import { InstallCommand } from "./install-command";
 
 /** Height of the required-update banner; the app below it is shifted by this much. */
 const BANNER_HEIGHT_PX = 36;
@@ -34,17 +36,22 @@ function openDownload(url: string) {
 
 /**
  * Starts the update download in the background as soon as an update is
- * required, and runs "Update now": install the staged update (electron-updater
- * quitAndInstall on Linux, Windows and Developer ID macOS), or open
- * `download_url` where the app cannot replace itself (ad-hoc signed macOS
- * builds, no updater, a failed download).
+ * required, and runs "Update now": restart into the staged update wherever
+ * the app can replace itself (Linux AppImage, Windows, macOS with or without
+ * a Developer ID signature), download the package and show its install
+ * command for a .deb/.rpm/.pacman install, and open `download_url` only from
+ * a button that says so. A failed check or download is shown and retried
+ * from the button, never answered by opening a browser.
  */
 function useRequiredUpdate(gate: UpdateGateState) {
   const updater = useDesktopUpdater();
   const supported = updater.updateEnv?.supported !== false && Boolean(updater.appVersion);
   const installMode = updater.installMode;
-  const updaterState = updater.updateStatus?.state ?? null;
+  const packageKind = updater.packageKind;
+  const status = updater.updateStatus;
+  const updaterState = status?.state ?? null;
   const [installRequested, setInstallRequested] = useState(false);
+  const [copied, setCopied] = useState(false);
   const backgroundStarted = useRef(false);
   const downloadRequested = useRef(false);
 
@@ -63,96 +70,117 @@ function useRequiredUpdate(gate: UpdateGateState) {
   }, [gate, installMode, supported, updater, updaterState]);
 
   useEffect(() => {
-    if (gate.status === "none" || installMode === "manual-dmg") return;
+    if (gate.status === "none" || installMode !== "in-place") return;
     if (updaterState === "available" && !downloadRequested.current) {
       downloadRequested.current = true;
       void updater.downloadUpdate();
     }
   }, [gate.status, installMode, updater, updaterState]);
 
-  // After "Update now": install once the download is ready; where it cannot
-  // be (the check found nothing, the download failed, policy holds it back),
-  // open download_url instead.
-  const previousState = useRef(updaterState);
+  // After "Update now": restart once the download is ready. A failure ends
+  // the request; the detail line says what went wrong and the button retries.
   const installDownloadStarted = useRef(false);
   useEffect(() => {
-    const previous = previousState.current;
-    previousState.current = updaterState;
     if (!installRequested) return;
-    const finish = (next: () => void) => {
+    const finish = (next?: () => void) => {
       setInstallRequested(false);
       installDownloadStarted.current = false;
-      next();
+      next?.();
     };
-    if (!supported || installMode === "manual-dmg") return finish(() => openDownload(gate.downloadUrl));
-    if (updaterState === "ready") return finish(() => void updater.installUpdateAndRestart());
+    if (updaterState === "ready") {
+      return finish(installMode === "in-place" ? () => void updater.installUpdateAndRestart() : undefined);
+    }
     if (updaterState === "available" && !installDownloadStarted.current) {
       installDownloadStarted.current = true;
       void updater.downloadUpdate();
       return;
     }
-    const failed = previous !== updaterState
-      && (updaterState === "error" || updaterState === "blocked" || updaterState === "installer-opened");
-    const nothingFound = previous === "checking" && (updaterState === "idle" || updaterState === null);
-    if (failed || nothingFound) finish(() => openDownload(gate.downloadUrl));
-  }, [gate.downloadUrl, installMode, installRequested, supported, updater, updaterState]);
+    if (updaterState === "error" || updaterState === "blocked" || updaterState === "installer-opened") finish();
+  }, [installMode, installRequested, updater, updaterState]);
+
+  const action = requiredUpdateAction({ supported, installMode, updaterState, packageKind });
 
   const updateNow = useCallback(() => {
-    const action = requiredUpdateAction({ supported, installMode, updaterState });
-    if (action === "open-download") {
-      openDownload(gate.downloadUrl);
-      return;
-    }
-    if (action === "install") {
-      void updater.installUpdateAndRestart();
-      return;
-    }
-    installDownloadStarted.current = false;
-    setInstallRequested(true);
-    if (action === "download-then-install") {
-      if (updaterState === "available") {
-        installDownloadStarted.current = true;
-        void updater.downloadUpdate();
-      } else {
-        void updater.checkForUpdates();
+    switch (action) {
+      case "open-download":
+        openDownload(gate.downloadUrl);
+        return;
+      case "install":
+        void updater.installUpdateAndRestart();
+        return;
+      case "copy-command": {
+        const command = status?.installCommand;
+        if (command) {
+          void navigator.clipboard?.writeText(command).then(() => setCopied(true)).catch(() => undefined);
+        }
+        return;
       }
+      case "wait":
+        setInstallRequested(true);
+        return;
+      default:
+        installDownloadStarted.current = false;
+        setInstallRequested(true);
+        if (updaterState === "available") {
+          installDownloadStarted.current = true;
+          void updater.downloadUpdate();
+        } else {
+          void updater.checkForUpdates();
+        }
     }
-  }, [gate.downloadUrl, installMode, supported, updater, updaterState]);
+  }, [action, gate.downloadUrl, status?.installCommand, updater, updaterState]);
 
-  const progress = updater.updateStatus?.state === "downloading" && updater.updateStatus.totalBytes
-    ? Math.min(100, Math.round(((updater.updateStatus.downloadedBytes ?? 0) / updater.updateStatus.totalBytes) * 100))
+  useEffect(() => {
+    if (!copied) return;
+    const timer = window.setTimeout(() => setCopied(false), 2_000);
+    return () => window.clearTimeout(timer);
+  }, [copied]);
+
+  const progress = updaterState === "downloading" && status?.totalBytes
+    ? Math.min(100, Math.round(((status.downloadedBytes ?? 0) / status.totalBytes) * 100))
     : null;
-  const working = installRequested && (updaterState === "checking" || updaterState === "downloading" || updaterState === "available" || updaterState === "idle");
-  const detail = updaterState === "downloading"
-    ? progress === null ? "Downloading the update…" : `Downloading the update… ${progress}%`
-    : updaterState === "ready"
-      ? "The update is downloaded and ready to install."
-      : updaterState === "installer-opened"
-        ? "The installer is open. Replace the app from it, then open it again."
-        : null;
-  return { updateNow, working, detail };
+  const version = status?.version ?? gate.minimum;
+  const label = copied
+    ? "Copied"
+    : updateButtonLabel({ action, version, progress, updaterState, packageKind, restarting: status?.restarting });
+  const working = action === "wait" || Boolean(status?.restarting);
+  const detail = updaterState === "error" && status?.message
+    ? `The update did not finish: ${status.message}`
+    : updaterState === "ready" && installMode === "package" && status?.installCommand
+      ? "Downloaded. Run the install command in a terminal, then open the app again."
+      : updaterState === "ready" && installMode === "in-place" && !status?.restarting
+        ? "Downloaded. The app closes and reopens on the new version."
+        : updaterState === "installer-opened"
+          ? "The installer is open. Replace the app from it, then open it again."
+          : null;
+  const command = installMode === "package" && updaterState === "ready" ? status?.installCommand ?? null : null;
+  return { updateNow, working, detail, label, command, showDownloaded: updater.showDownloadedUpdate };
 }
 
-function UpdateNowButton(props: { onClick: () => void; working: boolean; large?: boolean; testId: string }) {
+type RequiredUpdate = ReturnType<typeof useRequiredUpdate>;
+
+function UpdateNowButton(props: { update: RequiredUpdate; large?: boolean; testId: string }) {
+  const { update } = props;
   return (
     <button
       type="button"
       data-testid={props.testId}
-      onClick={props.onClick}
-      disabled={props.working}
+      onClick={update.updateNow}
+      disabled={update.working}
       className={props.large
         ? "inline-flex items-center justify-center gap-2 rounded-full bg-white px-6 py-3 text-sm font-semibold text-black transition hover:bg-emerald-100 disabled:cursor-wait disabled:opacity-80 mac:titlebar-no-drag"
         : "inline-flex h-6 shrink-0 items-center gap-1.5 rounded-md bg-black/85 px-2.5 text-[11px] font-semibold text-amber-50 transition hover:bg-black disabled:cursor-wait disabled:opacity-80 mac:titlebar-no-drag"}
     >
-      {props.working ? <Loader2 className={props.large ? "size-4 animate-spin" : "size-3 animate-spin"} aria-hidden="true" /> : <Download className={props.large ? "size-4" : "size-3"} aria-hidden="true" />}
-      Update now
+      {update.working ? <Loader2 className={props.large ? "size-4 animate-spin" : "size-3 animate-spin"} aria-hidden="true" /> : <Download className={props.large ? "size-4" : "size-3"} aria-hidden="true" />}
+      {update.label}
     </button>
   );
 }
 
-export function RequiredUpdateBanner(props: { gate: UpdateGateState; appName: string; onUpdateNow: () => void; working: boolean; detail: string | null }) {
+export function RequiredUpdateBanner(props: { gate: UpdateGateState; appName: string; update: RequiredUpdate }) {
   const now = useNow(true);
   const text = updateBannerText(props.gate, props.appName, now);
+  const detail = props.update.command ?? props.update.detail;
   return (
     <div
       role="alert"
@@ -164,14 +192,14 @@ export function RequiredUpdateBanner(props: { gate: UpdateGateState; appName: st
     >
       <ArrowUpCircle className="size-4 shrink-0" aria-hidden="true" />
       <span className="truncate" data-testid="update-required-banner-text">{text}</span>
-      {props.detail ? <span className="hidden truncate text-amber-900/80 md:inline">· {props.detail}</span> : null}
-      <UpdateNowButton onClick={props.onUpdateNow} working={props.working} testId="update-required-banner-button" />
+      {detail ? <span className={props.update.command ? "hidden truncate font-mono text-amber-900/80 select-text md:inline" : "hidden truncate text-amber-900/80 md:inline"}>· {detail}</span> : null}
+      <UpdateNowButton update={props.update} testId="update-required-banner-button" />
     </div>
   );
 }
 
-export function UpdateRequiredView(props: { gate: UpdateGateState; appName: string; onUpdateNow: () => void; working: boolean; detail: string | null }) {
-  const { gate, appName } = props;
+export function UpdateRequiredView(props: { gate: UpdateGateState; appName: string; update: RequiredUpdate }) {
+  const { gate, appName, update } = props;
   return (
     <main
       role="alertdialog"
@@ -204,16 +232,17 @@ export function UpdateRequiredView(props: { gate: UpdateGateState; appName: stri
           </div>
         </div>
         <div className="mt-8 flex flex-col items-start gap-3 sm:flex-row sm:items-center">
-          <UpdateNowButton onClick={props.onUpdateNow} working={props.working} large testId="update-required-button" />
+          <UpdateNowButton update={update} large testId="update-required-button" />
           <button
             type="button"
             onClick={() => openDownload(gate.downloadUrl)}
             className="text-sm font-medium text-white/60 underline-offset-4 hover:text-white hover:underline mac:titlebar-no-drag"
           >
-            Download from omnirush.ai
+            Open the download page instead
           </button>
         </div>
-        {props.detail ? <p className="mt-4 text-sm text-white/60" data-testid="update-required-detail">{props.detail}</p> : null}
+        {update.command ? <InstallCommand command={update.command} onShowFile={update.showDownloaded} /> : null}
+        {update.detail ? <p className="mt-4 text-sm text-white/60" data-testid="update-required-detail">{update.detail}</p> : null}
       </section>
     </main>
   );
@@ -231,7 +260,7 @@ export function UpdateGate({ children }: { children: ReactNode }) {
   // The product name as the release names it, unless an organization brands the app.
   const brandName = useBrandAppName();
   const appName = brandName === "omnirush.ai" ? "OmniRush.ai" : brandName;
-  const { updateNow, working, detail } = useRequiredUpdate(gate);
+  const update = useRequiredUpdate(gate);
 
   useEffect(() => {
     connectUpdateGate();
@@ -248,7 +277,7 @@ export function UpdateGate({ children }: { children: ReactNode }) {
   const banner = gate.status === "required";
   return (
     <>
-      {banner ? <RequiredUpdateBanner gate={gate} appName={appName} onUpdateNow={updateNow} working={working} detail={detail} /> : null}
+      {banner ? <RequiredUpdateBanner gate={gate} appName={appName} update={update} /> : null}
       <div
         data-update-gate-shifted={banner ? "" : undefined}
         style={banner
@@ -257,7 +286,7 @@ export function UpdateGate({ children }: { children: ReactNode }) {
       >
         {children}
       </div>
-      {gate.status === "blocked" ? <UpdateRequiredView gate={gate} appName={appName} onUpdateNow={updateNow} working={working} detail={detail} /> : null}
+      {gate.status === "blocked" ? <UpdateRequiredView gate={gate} appName={appName} update={update} /> : null}
     </>
   );
 }

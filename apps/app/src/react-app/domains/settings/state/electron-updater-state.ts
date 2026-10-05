@@ -2,7 +2,8 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 
 import { isDenControlPlaneConfigured, type DenDesktopConfig } from "../../../../app/lib/den";
-import type { UpdaterInstallMode } from "../../../../app/lib/desktop";
+import type { UpdaterInstallMode, UpdaterPackageKind } from "../../../../app/lib/desktop";
+import { useUpdateGateStore } from "../../../../app/lib/update-gate";
 import {
   isAlphaChannelAllowedByDesktopConfig,
   isAlphaUpdateAllowed,
@@ -27,6 +28,11 @@ export type SettingsUpdateStatus = {
   downloadedBytes?: number;
   message?: string;
   failedAction?: "check" | "download" | "install";
+  /** "package" installs: the downloaded package and the command that installs it. */
+  installerPath?: string | null;
+  installCommand?: string | null;
+  /** The app is quitting to install the update. */
+  restarting?: boolean;
 } | null;
 
 type ElectronUpdaterBridge = NonNullable<Window["__OMNIRUSH_ELECTRON__"]>["updater"] & {
@@ -54,6 +60,8 @@ export type ElectronUpdaterEnvState = {
   updateEnv: { supported?: boolean; reason?: string | null } | null;
   /** How the shell applies updates; null until the bridge reports it. */
   installMode: UpdaterInstallMode | null;
+  /** "package" installs: which package the feed offers (null: none, e.g. a tar.gz install). */
+  packageKind: UpdaterPackageKind | null;
   /**
    * Whether this distribution ships an Alpha feed. null until the bridge
    * reports it so a stored Alpha preference is not rewritten before we know.
@@ -68,8 +76,20 @@ export function unsupportedElectronUpdaterEnvState(): ElectronUpdaterEnvState {
     appVersion: null,
     updateEnv: { supported: false, reason: ELECTRON_UPDATER_UNSUPPORTED_REASON },
     installMode: null,
+    packageKind: null,
     alphaChannelSupported: null,
   };
+}
+
+/**
+ * Whether a check may start the download by itself. A package lands in the
+ * user's Downloads folder, so that one waits for a click.
+ */
+export function downloadsAutomatically(input: {
+  updateAutoDownload: boolean;
+  installMode: UpdaterInstallMode | null;
+}): boolean {
+  return input.updateAutoDownload && input.installMode !== "package";
 }
 
 export function shouldScheduleElectronUpdateAutoCheck(input: {
@@ -109,7 +129,7 @@ export function keepsReadyUpdate(input: {
 
 type ElectronUpdaterEnvAction =
   | { type: "app-version"; appVersion: string | null }
-  | { type: "capabilities"; installMode?: UpdaterInstallMode | null; alphaChannelSupported?: boolean | null }
+  | { type: "capabilities"; installMode?: UpdaterInstallMode | null; packageKind?: UpdaterPackageKind | null; alphaChannelSupported?: boolean | null }
   | { type: "unsupported"; reason: string };
 
 function electronUpdaterEnvReducer(
@@ -121,9 +141,14 @@ function electronUpdaterEnvReducer(
       return { ...state, appVersion: action.appVersion };
     case "capabilities": {
       const installMode = action.installMode ?? state.installMode;
+      const packageKind = action.packageKind !== undefined ? action.packageKind : state.packageKind;
       const alphaChannelSupported = action.alphaChannelSupported ?? state.alphaChannelSupported;
-      if (installMode === state.installMode && alphaChannelSupported === state.alphaChannelSupported) return state;
-      return { ...state, installMode, alphaChannelSupported };
+      if (
+        installMode === state.installMode
+        && packageKind === state.packageKind
+        && alphaChannelSupported === state.alphaChannelSupported
+      ) return state;
+      return { ...state, installMode, packageKind, alphaChannelSupported };
     }
     case "unsupported":
       return {
@@ -133,15 +158,29 @@ function electronUpdaterEnvReducer(
   }
 }
 
+const INSTALL_MODES: readonly UpdaterInstallMode[] = ["in-place", "manual-dmg", "package"];
+const PACKAGE_KINDS: readonly UpdaterPackageKind[] = ["deb", "rpm", "pacman", "appimage"];
+
 function capabilitiesFromBridge(state: {
   installMode?: UpdaterInstallMode;
+  packageKind?: UpdaterPackageKind | null;
   alphaChannelSupported?: boolean;
 } | null | undefined): ElectronUpdaterEnvAction {
+  const installMode = state?.installMode && INSTALL_MODES.includes(state.installMode) ? state.installMode : null;
   return {
     type: "capabilities",
-    installMode: state?.installMode === "manual-dmg" || state?.installMode === "in-place" ? state.installMode : null,
+    installMode,
+    // Only a package install reports a kind; leave it alone otherwise.
+    ...(installMode === "package"
+      ? { packageKind: state?.packageKind && PACKAGE_KINDS.includes(state.packageKind) ? state.packageKind : null }
+      : {}),
     alphaChannelSupported: typeof state?.alphaChannelSupported === "boolean" ? state.alphaChannelSupported : null,
   };
+}
+
+/** Where "Open download page" goes: the server's download_url while an update is required. */
+function downloadPageUrl(): string {
+  return useUpdateGateStore.getState().state.downloadUrl;
 }
 
 function electronUpdaterBridge(): ElectronUpdaterBridge | null {
@@ -218,9 +257,12 @@ export function useElectronUpdaterState(options: UseElectronUpdaterStateOptions)
       ? null
       : { supported: false, reason: ELECTRON_UPDATER_UNSUPPORTED_REASON },
     installMode: null,
+    packageKind: null,
     alphaChannelSupported: null,
   });
-  const { appVersion, updateEnv, installMode, alphaChannelSupported } = envState;
+  const { appVersion, updateEnv, installMode, packageKind, alphaChannelSupported } = envState;
+  const installModeRef = useRef(installMode);
+  installModeRef.current = installMode;
   const updateStatusRef = useRef(updateStatus);
   updateStatusRef.current = updateStatus;
   const lastAutoCheckAtRef = useRef(0);
@@ -399,7 +441,7 @@ export function useElectronUpdaterState(options: UseElectronUpdaterStateOptions)
         });
         return;
       }
-      dispatchEnvState(capabilitiesFromBridge({ installMode: result.mode }));
+      dispatchEnvState(capabilitiesFromBridge({ installMode: result.mode, packageKind: result.packageKind }));
       if (
         releaseChannelResolution.channel === "alpha" &&
         !isAlphaChannelAllowedByDesktopConfig(desktopConfigRef.current)
@@ -416,6 +458,8 @@ export function useElectronUpdaterState(options: UseElectronUpdaterStateOptions)
       setUpdateStatus((current) => ({
         ...(current ?? {}),
         state: "ready",
+        installerPath: result.mode === "package" ? result.path ?? null : null,
+        installCommand: result.mode === "package" ? result.command ?? null : null,
       }));
     } catch (error) {
       if (!isCurrentReleaseChannel()) return;
@@ -609,7 +653,7 @@ export function useElectronUpdaterState(options: UseElectronUpdaterStateOptions)
         : null;
       downloadedReleaseChannelRef.current = null;
       setUpdateStatus(nextStatus);
-      if (availableAllowed && updateAutoDownload) {
+      if (availableAllowed && downloadsAutomatically({ updateAutoDownload, installMode: result.installMode ?? installModeRef.current })) {
         await downloadUpdate(checkedReleaseChannel);
       }
     } catch (error) {
@@ -705,12 +749,29 @@ export function useElectronUpdaterState(options: UseElectronUpdaterStateOptions)
           await runCheckForUpdates(undefined, true);
           return;
         }
+        const reason = result?.reason ? stripRemoteMethodErrorPrefix(result.reason) : "Update install failed.";
+        if (result?.fallback === "download-page") {
+          // The app could not replace itself (the administrator prompt was
+          // cancelled): this is the one place the download page opens, and
+          // the message says so.
+          void window.__OMNIRUSH_ELECTRON__?.shell?.openExternal?.(downloadPageUrl());
+          setUpdateStatus((current) => ({
+            ...(current ?? {}),
+            state: "error",
+            message: `${reason} The download page is open in your browser.`,
+            failedAction: "install",
+          }));
+          return;
+        }
         setUpdateStatus({
           state: "error",
-          message: result?.reason ? stripRemoteMethodErrorPrefix(result.reason) : "Update install failed.",
+          message: reason,
           failedAction: "install",
         });
         return;
+      }
+      if (result.mode === "in-place") {
+        setUpdateStatus((current) => ({ ...(current ?? {}), state: "ready", restarting: true }));
       }
       if (result.mode === "manual-dmg") {
         // The shell opened the DMG and quits shortly; leave the instructions
@@ -763,10 +824,16 @@ export function useElectronUpdaterState(options: UseElectronUpdaterStateOptions)
     [checkForUpdates, onReleaseChannelChange, resolvePolicyReleaseChannel],
   );
 
+  const showDownloadedUpdate = useCallback(() => {
+    void electronUpdaterBridge()?.showDownloaded?.();
+  }, []);
+
   return {
     appVersion,
     updateEnv,
     installMode,
+    packageKind,
+    showDownloadedUpdate,
     alphaChannelSupported: alphaChannelSupported === true,
     updateStatus,
     checkForUpdates,

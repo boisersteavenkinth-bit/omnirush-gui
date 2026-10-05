@@ -2595,6 +2595,8 @@ function SettingsRouteContent(props: SettingsSurfaceProps = {}) {
               desktopConfig.config.allowAlphaUpdates !== false
             }
             installMode={electronUpdaterState.installMode}
+            packageKind={electronUpdaterState.packageKind}
+            showDownloadedUpdate={electronUpdaterState.showDownloadedUpdate}
           />
         );
       case "environment":

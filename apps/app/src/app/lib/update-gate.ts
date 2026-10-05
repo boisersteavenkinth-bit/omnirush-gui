@@ -84,28 +84,50 @@ export function chatBlockedByUpdate(state: UpdateGateState): boolean {
 }
 
 export type RequiredUpdateAction =
-  /** A staged update is ready: install it (Linux AppImage, Windows, Developer ID macOS). */
+  /** A staged update is ready: restart into it. */
   | "install"
-  /** The updater cannot install this build (ad-hoc macOS, no updater): open the download page. */
+  /** The app cannot update itself here (no updater, a DMG-only copy): the button opens the download page. */
   | "open-download"
-  /** Start (or keep) the download and install as soon as it is ready. */
+  /** Start (or retry) the download and restart as soon as it is ready. */
   | "download-then-install"
+  /** A package install: download the package; the user runs the command. */
+  | "download-package"
+  /** The package is downloaded: copy the command that installs it. */
+  | "copy-command"
   /** A check or download is running: install when it is ready. */
   | "wait";
 
+type UpdaterInstallMode = "in-place" | "manual-dmg" | "package";
+
 /**
- * What "Update now" does, from the shell's updater: `installMode`
- * "manual-dmg" (a macOS build without a Developer ID signature, which
- * Squirrel cannot swap) and an unsupported updater send the user to
- * `download_url`. After a failed check or download "Update now" tries
- * once more, and opens `download_url` if that fails too.
+ * What "Update now" does, from the shell's updater. The app replaces itself
+ * wherever it can ("in-place": Squirrel, NSIS, the AppImage file, or the .app
+ * bundle of an unsigned macOS build). A .deb/.rpm/.pacman install downloads
+ * the package and shows the command. Only where none of that applies does
+ * the button open `download_url`, and then its label says so. A failed check
+ * or download is retried from the button; nothing opens a browser by itself.
  */
 export function requiredUpdateAction(input: {
   supported: boolean;
-  installMode: "in-place" | "manual-dmg" | null;
+  installMode: UpdaterInstallMode | null;
   updaterState: string | null | undefined;
+  packageKind?: string | null;
 }): RequiredUpdateAction {
   if (!input.supported || input.installMode === "manual-dmg") return "open-download";
+  if (input.installMode === "package") {
+    if (!input.packageKind) return "open-download";
+    switch (input.updaterState) {
+      case "ready":
+        return "copy-command";
+      case "checking":
+      case "downloading":
+        return "wait";
+      case "blocked":
+        return "open-download";
+      default:
+        return "download-package";
+    }
+  }
   switch (input.updaterState) {
     case "ready":
       return "install";
@@ -120,14 +142,52 @@ export function requiredUpdateAction(input: {
   }
 }
 
-/** Whether the background download should start now (in-place updaters only, once per gate). */
+const PACKAGE_LABELS: Record<string, string> = { deb: ".deb", rpm: ".rpm", pacman: ".pacman", appimage: "AppImage" };
+
+/**
+ * The button says what pressing it does: "Restart to update",
+ * "Downloading 3.1.1… 42%", "Download 3.1.1 (.deb)", "Copy install command",
+ * or "Open download page".
+ */
+export function updateButtonLabel(input: {
+  action: RequiredUpdateAction;
+  version?: string | null;
+  progress?: number | null;
+  updaterState?: string | null;
+  packageKind?: string | null;
+  restarting?: boolean;
+}): string {
+  const version = input.version ? ` ${input.version}` : "";
+  switch (input.action) {
+    case "install":
+      return input.restarting ? "Restarting…" : "Restart to update";
+    case "copy-command":
+      return "Copy install command";
+    case "open-download":
+      return "Open download page";
+    case "download-package":
+      return `Download${version} (${PACKAGE_LABELS[input.packageKind ?? ""] ?? "package"})`;
+    case "wait":
+      if (input.updaterState === "downloading") {
+        return input.progress == null ? `Downloading${version}…` : `Downloading${version}… ${input.progress}%`;
+      }
+      return "Checking for the update…";
+    default:
+      return input.updaterState === "error" ? "Try the update again" : "Update and restart";
+  }
+}
+
+/** Whether the background download should start now (self-updating installs only, once per gate). */
 export function shouldStartBackgroundDownload(input: {
   gate: UpdateGateState;
   supported: boolean;
-  installMode: "in-place" | "manual-dmg" | null;
+  installMode: UpdaterInstallMode | null;
   updaterState: string | null | undefined;
 }): boolean {
-  if (input.gate.status === "none" || !input.supported || input.installMode === "manual-dmg") return false;
+  if (input.gate.status === "none" || !input.supported) return false;
+  // A DMG-only copy cannot replace itself, and a package lands in Downloads:
+  // both wait for a click.
+  if (input.installMode === "manual-dmg" || input.installMode === "package") return false;
   return !["checking", "downloading", "ready", "installer-opened"].includes(input.updaterState ?? "");
 }
 

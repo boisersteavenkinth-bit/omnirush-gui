@@ -159,6 +159,10 @@ contextBridge.exposeInMainWorld("__OMNIRUSH_ELECTRON__", {
     installAndRestart() {
       return ipcRenderer.invoke("omnirush:updater:installAndRestart");
     },
+    /** Reveal a downloaded Linux package in the file manager. */
+    showDownloaded() {
+      return ipcRenderer.invoke("omnirush:updater:showDownloaded");
+    },
     /** Subscribe to incremental download progress from electron-updater. */
     onDownloadProgress(callback) {
       const handler = (_event, data) => callback(data);

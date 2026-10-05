@@ -18,6 +18,21 @@ import {
   stableVersion,
   verifyCachedRecoveryArtifact,
 } from "./recovery.mjs";
+import {
+  canReplaceInPlace,
+  fileExists,
+  isAuthorizationCancelled,
+  isTranslocatedBundle,
+  launchMacSwap,
+  linuxAppImagePath,
+  linuxInstallCommand,
+  linuxPackageType,
+  macBundleFromPath,
+  packageExtension,
+  relaunchAppImageAfterExit,
+  replaceAppImage,
+  stageMacBundle,
+} from "./self-install.mjs";
 
 const ELECTRON_UPDATER_CHANNEL_FILENAME = "electron-updater-channel.v1.json";
 // Where a manually installed update (macOS DMG) is staged before it is opened.
@@ -403,29 +418,46 @@ function installerAssetArch(arch) {
 }
 
 /**
- * Picks the DMG the update manifest lists for this architecture and resolves
- * it against the feed directory, exactly like electron-updater resolves the
- * zip it would hand to Squirrel. Returns null when the manifest has no
- * matching installer or no checksum to verify it with.
+ * The directory a manifest's relative file names resolve against. The public
+ * feed is `releases/latest/download`, which follows whichever release is
+ * latest at download time; the assets are read from the release the manifest
+ * names instead, so a release published mid-download cannot swap the file
+ * out from under the checksum.
  */
-export function selectManualInstallerArtifact(info, feedUrl, arch) {
+export function releaseAssetDirectory(feedUrl, version) {
+  const base = typeof feedUrl === "string" ? feedUrl.replace(/\/+$/, "") : "";
+  if (base === STABLE_UPDATER_FEED_URL && typeof version === "string" && /^\d+\.\d+\.\d+/.test(version)) {
+    return `https://github.com/omnirush-ai/omnirush-gui/releases/download/v${version}`;
+  }
+  return base;
+}
+
+/**
+ * Picks the file the update manifest lists with `extension` (and, for macOS,
+ * this architecture) and resolves it like electron-updater resolves its own
+ * download. Returns null when the manifest has no matching file or no
+ * checksum to verify it with. Only https is accepted, except from the
+ * loopback feed of a local update rig.
+ */
+export function selectReleaseAsset(info, feedUrl, { extension, arch = null }) {
   const files = Array.isArray(info?.files) ? info.files : [];
-  const assetArch = `-${installerAssetArch(arch)}-`;
+  const assetArch = arch ? `-${installerAssetArch(arch)}-` : "";
   const candidate = files.find((file) =>
     typeof file?.url === "string"
-    && file.url.endsWith(".dmg")
-    && file.url.includes(assetArch)
+    && file.url.endsWith(extension)
+    && (!assetArch || file.url.includes(assetArch))
     && typeof file.sha512 === "string"
     && file.sha512.trim(),
   );
   if (!candidate || typeof feedUrl !== "string" || !feedUrl) return null;
   let url;
   try {
-    url = new URL(candidate.url, `${feedUrl.replace(/\/+$/, "")}/`);
+    url = new URL(candidate.url, `${releaseAssetDirectory(feedUrl, info?.version)}/`);
   } catch {
     return null;
   }
-  if (url.protocol !== "https:" || url.origin !== new URL(feedUrl).origin) return null;
+  const secure = url.protocol === "https:" || loopbackDevFeedUrl(feedUrl) !== null;
+  if (!secure || url.origin !== new URL(feedUrl).origin) return null;
   const size = Number(candidate.size);
   return {
     version: typeof info?.version === "string" ? info.version : null,
@@ -434,6 +466,11 @@ export function selectManualInstallerArtifact(info, feedUrl, arch) {
     size: Number.isInteger(size) && size > 0 ? size : null,
     fileName: path.basename(url.pathname),
   };
+}
+
+/** The DMG for this architecture (macOS builds that cannot replace themselves). */
+export function selectManualInstallerArtifact(info, feedUrl, arch) {
+  return selectReleaseAsset(info, feedUrl, { extension: ".dmg", arch });
 }
 
 async function fileMatchesSha512(filePath, expected) {
@@ -475,6 +512,17 @@ export function registerUpdaterIpc({
   quitUpdateTimeoutMs = 120_000,
   // Quits anyway if the updater never quits the app after a quit-time install.
   quitInstallFallbackMs = 30_000,
+  // Self-install (self-install.mjs): the running bundle or AppImage, and the
+  // seams tests replace.
+  getAppPath = () => app.getAppPath(),
+  resourcesPath = process.resourcesPath,
+  pid = process.pid,
+  canReplace = canReplaceInPlace,
+  stageMacUpdate = stageMacBundle,
+  startMacSwap = launchMacSwap,
+  installAppImage = replaceAppImage,
+  relaunchAppImage = relaunchAppImageAfterExit,
+  restartDelayMs = 300,
 }) {
   const feedOptions = updaterFeedOptions({
     manifestChannel,
@@ -489,6 +537,13 @@ export function registerUpdaterIpc({
   let checkedUpdateChannel = null;
   let checkedInstallerArtifact = null;
   let downloadedInstallerPath = null;
+  // mac-swap: the extracted, verified bundle waiting for the swap helper.
+  let stagedMacBundle = null;
+  // appimage: electron-updater's verified download of the new AppImage.
+  let downloadedAppImagePath = null;
+  // What the self-install modes replace, and the Linux package kind.
+  let installTarget = null;
+  let packageKind = null;
   let updateDownloaded = false;
   // The version and channel of the staged download. The feed can move past it
   // before it installs, so every install re-checks against the feed first.
@@ -517,33 +572,96 @@ export function registerUpdaterIpc({
     }
   }
 
-  // "in-place": electron-updater swaps the app (Squirrel.Mac, NSIS, AppImage).
-  // "manual-dmg": the running macOS app is not Developer ID signed, so the
-  // update is downloaded as a DMG and opened for the user to drag over.
+  // "in-place": electron-updater swaps the app (Squirrel.Mac, NSIS).
+  // "mac-swap": a macOS app without a Developer ID signature, which Squirrel
+  //   refuses; the release zip is swapped in by self-install.mjs.
+  // "appimage": the AppImage file is replaced and the app relaunched.
+  // "package": a .deb/.rpm/.pacman install (or an AppImage in a folder this
+  //   user cannot write); the package is downloaded and the user runs the
+  //   install command the app shows.
+  // "manual-dmg": a macOS app that cannot be replaced (App Translocation);
+  //   the DMG is downloaded and opened.
   function resolveInstallMode() {
     if (!installModePromise) {
       installModePromise = (async () => {
-        if (platform !== "darwin" || !app.isPackaged) return "in-place";
-        try {
-          return (await isDeveloperIdSigned()) ? "in-place" : "manual-dmg";
-        } catch {
-          return "manual-dmg";
+        if (!app.isPackaged) return "in-place";
+        if (platform === "darwin") {
+          try {
+            if (await isDeveloperIdSigned()) return "in-place";
+          } catch {
+            // An unknown signature is treated as ad hoc.
+          }
+          let bundle = null;
+          try {
+            bundle = macBundleFromPath(getAppPath()) ?? macAppBundlePath(execPath);
+          } catch {
+            bundle = macAppBundlePath(execPath);
+          }
+          if (!bundle || isTranslocatedBundle(bundle)) return "manual-dmg";
+          installTarget = bundle;
+          return "mac-swap";
         }
+        if (platform === "linux") {
+          const appImage = linuxAppImagePath(env);
+          if (appImage) {
+            installTarget = appImage;
+            if (await canReplace(appImage)) return "appimage";
+            packageKind = "appimage";
+            return "package";
+          }
+          packageKind = await linuxPackageType(resourcesPath);
+          return "package";
+        }
+        return "in-place";
       })();
     }
     return installModePromise;
   }
 
+  /** What the renderer is told: every mode that restarts into the update is "in-place". */
+  function publicInstallMode(mode) {
+    return mode === "mac-swap" || mode === "appimage" ? "in-place" : mode;
+  }
+
+  async function describeInstall() {
+    const mode = await resolveInstallMode();
+    return {
+      installMode: publicInstallMode(mode),
+      ...(mode === "package" ? { packageKind } : {}),
+    };
+  }
+
   async function describeChannelState(channel, targetVersion = null) {
     return {
       ...updaterChannelState(app, channel, targetVersion, feedOptions),
-      installMode: await resolveInstallMode(),
+      ...(await describeInstall()),
     };
+  }
+
+  /** The file a self-install mode downloads itself, from the manifest just read. */
+  function selfInstallAsset(info, feedUrl, installMode) {
+    switch (installMode) {
+      case "manual-dmg":
+        return selectManualInstallerArtifact(info, feedUrl, arch);
+      case "mac-swap":
+        return selectReleaseAsset(info, feedUrl, { extension: ".zip", arch });
+      case "package": {
+        const extension = packageExtension(packageKind);
+        return extension ? selectReleaseAsset(info, feedUrl, { extension }) : null;
+      }
+      default:
+        return null;
+    }
   }
 
   function clearDownloadedUpdate() {
     updateDownloaded = false;
     downloadedInstallerPath = null;
+    downloadedAppImagePath = null;
+    if (stagedMacBundle) {
+      void rm(path.dirname(stagedMacBundle), { recursive: true, force: true }).catch(() => undefined);
+      stagedMacBundle = null;
+    }
     downloadedUpdateVersion = null;
     downloadedUpdateChannel = null;
   }
@@ -561,9 +679,7 @@ export function registerUpdaterIpc({
     checkedUpdateVersion = available ? info.version : null;
     checkedUpdateTargetVersion = available ? targetVersion : null;
     checkedUpdateChannel = available ? channelState.channel : null;
-    checkedInstallerArtifact = available && installMode === "manual-dmg"
-      ? selectManualInstallerArtifact(info, channelState.feedUrl, arch)
-      : null;
+    checkedInstallerArtifact = available ? selfInstallAsset(info, channelState.feedUrl, installMode) : null;
     return available;
   }
 
@@ -602,6 +718,7 @@ export function registerUpdaterIpc({
             autoUpdaterInstance.on("update-downloaded", (info) => {
               updateDownloaded = true;
               if (typeof info?.version === "string") downloadedUpdateVersion = info.version;
+              if (typeof info?.downloadedFile === "string") downloadedAppImagePath = info.downloadedFile;
             });
             // Forward download progress to the renderer so the UI can show
             // incremental bytes instead of staying stuck at 0.
@@ -631,16 +748,18 @@ export function registerUpdaterIpc({
    * the same progress events electron-updater emits, so the Updates page shows
    * one download experience regardless of install mode.
    */
-  async function downloadManualInstaller(artifact) {
+  async function downloadManualInstaller(artifact, { directory = null } = {}) {
     if (!electronNet?.fetch) throw new Error("Installer downloads are unavailable in this package.");
+    // The cache folder is ours to empty; a user folder (Downloads) is not.
+    const target = directory ?? path.join(app.getPath("userData"), INSTALLER_CACHE_DIRECTORY);
+    const destination = path.join(target, artifact.fileName);
+    if (directory && (await fileMatchesSha512(destination, artifact.sha512))) return destination;
     const response = await electronNet.fetch(artifact.url, {
       headers: { Accept: "application/octet-stream, */*" },
     });
     if (!response.ok) throw new Error(`Installer download failed with HTTP ${response.status}.`);
-    const directory = path.join(app.getPath("userData"), INSTALLER_CACHE_DIRECTORY);
-    await rm(directory, { recursive: true, force: true });
-    await mkdir(directory, { recursive: true });
-    const destination = path.join(directory, artifact.fileName);
+    if (!directory) await rm(target, { recursive: true, force: true });
+    await mkdir(target, { recursive: true });
     const partialPath = `${destination}.part`;
     const headerLength = Number(response.headers?.get?.("content-length"));
     const total = artifact.size ?? (Number.isInteger(headerLength) && headerLength > 0 ? headerLength : 0);
@@ -856,7 +975,8 @@ export function registerUpdaterIpc({
     const updater = await ensureAutoUpdater();
     // An ad-hoc signed macOS app cannot be swapped by Squirrel, so recovery
     // there opens the verified installer exactly like a manual update.
-    if (updater && app.isPackaged && (await resolveInstallMode()) === "in-place") {
+    const recoveryMode = await resolveInstallMode();
+    if (updater && app.isPackaged && (recoveryMode === "in-place" || recoveryMode === "appimage")) {
       try {
         await applyElectronUpdaterFeed(app, updater, release.version, feedOptions, true);
         const result = await updater.checkForUpdates();
@@ -925,7 +1045,7 @@ export function registerUpdaterIpc({
       // after an organization policy moves the desktop back to Stable.
       preventPendingUpdaterInstall(updater);
       const state = await applyElectronUpdaterFeed(app, updater, null, feedOptions, false, channel);
-      return { ...state, installMode };
+      return { ...state, ...(await describeInstall()) };
     }
     return describeChannelState(channel);
   }));
@@ -946,7 +1066,7 @@ export function registerUpdaterIpc({
         throw new Error("Target update version must use the stable x.y.z format.");
       }
       const channelState = updater
-        ? { ...(await applyElectronUpdaterFeed(app, updater, targetVersion, feedOptions, false, channel)), installMode }
+        ? { ...(await applyElectronUpdaterFeed(app, updater, targetVersion, feedOptions, false, channel)), ...(await describeInstall()) }
         : await describeChannelState(channel, targetVersion);
       if (!updater) return { available: false, reason: "unavailable", ...channelState };
 
@@ -1009,24 +1129,67 @@ export function registerUpdaterIpc({
         console.warn("[updater] could not cache the current healthy installer", error);
       });
       await downloadCheckedUpdate(updater, installMode);
-      return { ok: true, mode: installMode };
+      return { ok: true, mode: publicInstallMode(installMode), ...downloadedPackageDetails(installMode) };
     } catch (error) {
       clearDownloadedUpdate();
       return { ok: false, reason: String(error?.message ?? error) };
     }
   }));
 
+  /** Downloads; ~/Downloads where the desktop names no download folder (Electron then answers home). */
+  async function packageDownloadDirectory() {
+    const downloads = app.getPath("downloads");
+    if (downloads !== app.getPath("home")) return downloads;
+    const fallback = path.join(downloads, "Downloads");
+    return (await fileExists(fallback)) ? fallback : downloads;
+  }
+
+  /** The downloaded package and its install command (package mode only). */
+  function downloadedPackageDetails(installMode) {
+    if (installMode !== "package") return {};
+    return {
+      packageKind,
+      path: downloadedInstallerPath,
+      command: downloadedInstallerPath
+        ? linuxInstallCommand(packageKind, downloadedInstallerPath, packageKind === "appimage" ? installTarget : null)
+        : null,
+    };
+  }
+
   /** Downloads the version the last successful check recorded. */
   async function downloadCheckedUpdate(updater, installMode) {
     const version = checkedUpdateVersion;
-    if (installMode === "manual-dmg") {
-      // Squirrel.Mac would refuse the zip electron-updater downloads for an
-      // ad-hoc signed app, so fetch the DMG the same manifest lists instead.
-      // The download is plain HTTPS plus the manifest's sha512.
+    if (installMode === "manual-dmg" || installMode === "mac-swap" || installMode === "package") {
+      // Squirrel.Mac refuses an ad-hoc signed app and a package manager owns
+      // a .deb/.rpm/.pacman install, so the file the manifest lists is
+      // fetched directly: plain HTTPS plus the manifest's sha512.
       if (!checkedInstallerArtifact || checkedInstallerArtifact.version !== version) {
-        throw new Error("The release manifest does not list a macOS installer for this update.");
+        throw new Error(installMode === "package"
+          ? "The release manifest does not list a package for this installation."
+          : "The release manifest does not list a macOS installer for this update.");
       }
-      downloadedInstallerPath = await downloadManualInstaller(checkedInstallerArtifact);
+      if (installMode === "package") {
+        downloadedInstallerPath = await downloadManualInstaller(checkedInstallerArtifact, {
+          directory: await packageDownloadDirectory(),
+        });
+      } else {
+        downloadedInstallerPath = await downloadManualInstaller(checkedInstallerArtifact);
+      }
+      if (installMode === "mac-swap") {
+        if (stagedMacBundle) {
+          await rm(path.dirname(stagedMacBundle), { recursive: true, force: true }).catch(() => undefined);
+          stagedMacBundle = null;
+        }
+        // Extracted next to nothing it could clobber; verified to be this
+        // app at the expected version before the restart button appears.
+        const staged = await stageMacUpdate({
+          zipPath: downloadedInstallerPath,
+          version,
+          currentBundle: installTarget,
+        });
+        stagedMacBundle = staged.bundle;
+        await rm(downloadedInstallerPath, { force: true }).catch(() => undefined);
+      }
     } else {
       // Clear any stuck ShipIt state from a prior aborted install so this
       // download applies cleanly.
@@ -1110,13 +1273,24 @@ export function registerUpdaterIpc({
       const updater = autoUpdaterInstance;
       if (!updater || !updateDownloaded || installTriggered) return null;
       const installMode = await resolveInstallMode();
-      if (installMode !== "in-place") return null;
+      if (installMode !== "in-place" && installMode !== "appimage" && installMode !== "mac-swap") return null;
+      // Quitting never asks for a password: an /Applications this user cannot
+      // write waits for "Restart to update".
+      if (installMode === "mac-swap" && !(await canReplace(installTarget))) return null;
       const newest = await withTimeout(
         queueUpdaterOperation(() => ensureNewestDownloaded(updater, installMode)),
         quitUpdateTimeoutMs,
         "The quit-time update refresh",
       );
       if (!newest.ok || !updateDownloaded || installTriggered) return null;
+      if (installMode === "appimage" || installMode === "mac-swap") {
+        return () => {
+          installTriggered = true;
+          void selfInstall(installMode, { relaunch: false })
+            .catch((error) => console.warn("[updater] install on quit failed", error?.message ?? error))
+            .finally(() => app.quit());
+        };
+      }
       return () => {
         installTriggered = true;
         quitInstallInProgress = true;
@@ -1136,6 +1310,52 @@ export function registerUpdaterIpc({
     }
   }
 
+  /**
+   * mac-swap and appimage installs. Starts the swap (or replaces the
+   * AppImage) and, with `relaunch`, arranges for the new version to open
+   * once this process exits. Throws when nothing was changed.
+   */
+  async function selfInstall(installMode, { relaunch }) {
+    if (installMode === "mac-swap") {
+      if (!stagedMacBundle || !(await fileExists(stagedMacBundle))) throw new Error("update-not-downloaded");
+      const writable = await canReplace(installTarget);
+      await startMacSwap({
+        stagedBundle: stagedMacBundle,
+        targetBundle: installTarget,
+        pid,
+        relaunch,
+        writable,
+        logPath: path.join(app.getPath("logs"), "update-install.log"),
+      });
+      // The helper owns the staged bundle now.
+      stagedMacBundle = null;
+      return;
+    }
+    const source = downloadedAppImagePath ?? autoUpdaterInstance?.installerPath ?? null;
+    if (!source || !(await fileExists(source))) throw new Error("update-not-downloaded");
+    await installAppImage({ source, target: installTarget });
+    downloadedAppImagePath = null;
+    if (relaunch) {
+      // Started outside the AppImage and only once this process has exited,
+      // so the new copy never meets this instance's single-instance lock.
+      relaunchAppImage({
+        appImage: installTarget,
+        pid,
+        args: process.argv.slice(1),
+        env,
+        logPath: path.join(app.getPath("logs"), "update-install.log"),
+      });
+    }
+  }
+
+  // Package installs: show the downloaded package (the path is the one this
+  // process downloaded, never one the renderer names).
+  ipcMain.handle("omnirush:updater:showDownloaded", async () => {
+    if (!downloadedInstallerPath || !shell?.showItemInFolder) return { ok: false };
+    shell.showItemInFolder(downloadedInstallerPath);
+    return { ok: true };
+  });
+
   ipcMain.handle("omnirush:updater:installAndRestart", async () => queueUpdaterOperation(async () => {
     if (!updateDownloaded) return { ok: false, reason: "update-not-downloaded" };
     const updater = await ensureAutoUpdater();
@@ -1143,6 +1363,36 @@ export function registerUpdaterIpc({
     const installMode = await resolveInstallMode();
     const newest = await ensureNewestDownloaded(updater, installMode);
     if (!newest.ok) return newest;
+    if (installMode === "package") {
+      // Nothing to restart into: the package manager installs it.
+      return { ok: true, mode: "package", ...downloadedPackageDetails(installMode) };
+    }
+    if (installMode === "mac-swap" || installMode === "appimage") {
+      try {
+        await selfInstall(installMode, { relaunch: true });
+      } catch (error) {
+        const message = String(error?.message ?? error);
+        if (message === "update-not-downloaded") {
+          clearDownloadedUpdate();
+          return { ok: false, reason: "update-not-downloaded" };
+        }
+        if (installMode === "mac-swap") {
+          // Only here does the app send the user to the download page.
+          return {
+            ok: false,
+            fallback: "download-page",
+            reason: isAuthorizationCancelled(error)
+              ? `Updating needs an administrator to replace ${path.basename(installTarget ?? "the app")} in ${path.dirname(installTarget ?? "/Applications")}, and the request was cancelled. Download the new version and drag it into that folder instead.`
+              : `The update could not replace ${path.basename(installTarget ?? "the app")}: ${message}. Download the new version and drag it into ${path.dirname(installTarget ?? "/Applications")} instead.`,
+          };
+        }
+        return { ok: false, reason: `The update could not replace the AppImage: ${message}` };
+      }
+      installTriggered = true;
+      // Let the renderer show "Restarting…" before the window goes away.
+      setTimeout(() => app.quit(), restartDelayMs);
+      return { ok: true, mode: "in-place" };
+    }
     if (installMode === "manual-dmg") {
       if (!downloadedInstallerPath || !checkedInstallerArtifact) {
         return { ok: false, reason: "update-not-downloaded" };

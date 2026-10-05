@@ -149,12 +149,18 @@ export type RecoveryActionResult = {
 // ---------------------------------------------------------------------------
 
 /**
- * How the desktop shell applies a downloaded update. "in-place" is
- * electron-updater's swap (Squirrel.Mac, NSIS, AppImage); "manual-dmg" means
- * the running macOS app is not Developer ID signed, so the shell downloads
- * the DMG and opens it for a drag-to-Applications install instead.
+ * How the desktop shell applies a downloaded update. "in-place": it replaces
+ * itself and restarts (Squirrel.Mac, NSIS, the AppImage file, or the .app
+ * bundle of a macOS build without a Developer ID signature). "package": a
+ * .deb/.rpm/.pacman install the package manager owns; the shell downloads the
+ * package and the user runs the install command. "manual-dmg": a macOS copy
+ * that cannot be replaced (run from a translocated Downloads copy); the DMG
+ * is downloaded and opened.
  */
-export type UpdaterInstallMode = "in-place" | "manual-dmg";
+export type UpdaterInstallMode = "in-place" | "manual-dmg" | "package";
+
+/** The package a "package" install updates with (null: none in the feed, e.g. a tar.gz). */
+export type UpdaterPackageKind = "deb" | "rpm" | "pacman" | "appimage";
 
 declare global {
   interface Window {
@@ -222,6 +228,7 @@ declare global {
           feedUrl: string;
           currentVersion: string;
           installMode?: UpdaterInstallMode;
+          packageKind?: UpdaterPackageKind | null;
           alphaChannelSupported?: boolean;
         }>;
         setChannel?: (channel: "stable" | "alpha") => Promise<{
@@ -229,6 +236,7 @@ declare global {
           feedUrl: string;
           currentVersion: string;
           installMode?: UpdaterInstallMode;
+          packageKind?: UpdaterPackageKind | null;
           alphaChannelSupported?: boolean;
         }>;
         check?: (channel?: "stable" | "alpha", targetVersion?: string) => Promise<{
@@ -241,10 +249,28 @@ declare global {
           feedUrl?: string;
           reason?: string;
           installMode?: UpdaterInstallMode;
+          packageKind?: UpdaterPackageKind | null;
           alphaChannelSupported?: boolean;
         }>;
-        download?: () => Promise<{ ok: boolean; reason?: string; mode?: UpdaterInstallMode }>;
-        installAndRestart?: () => Promise<{ ok: boolean; reason?: string; mode?: UpdaterInstallMode; path?: string }>;
+        download?: () => Promise<{
+          ok: boolean;
+          reason?: string;
+          mode?: UpdaterInstallMode;
+          packageKind?: UpdaterPackageKind | null;
+          path?: string | null;
+          /** "package" mode: the command that installs the downloaded package. */
+          command?: string | null;
+        }>;
+        installAndRestart?: () => Promise<{
+          ok: boolean;
+          reason?: string;
+          mode?: UpdaterInstallMode;
+          path?: string | null;
+          command?: string | null;
+          /** The app could not replace itself (an administrator prompt was cancelled). */
+          fallback?: "download-page";
+        }>;
+        showDownloaded?: () => Promise<{ ok: boolean }>;
       };
       recovery?: {
         recordHealthy?: () => Promise<unknown>;

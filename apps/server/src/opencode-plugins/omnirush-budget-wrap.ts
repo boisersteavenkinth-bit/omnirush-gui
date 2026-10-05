@@ -8,7 +8,7 @@
  */
 const REQUIRED_HEADER = "x-omnirush-wrap-required";
 const WRAP_UP_HEADER = "x-omnirush-wrap-up";
-const pending = new Map<string, { inFlight: boolean }>();
+const pending = new Map<string, { inFlight: boolean; announced?: boolean }>();
 type BudgetFetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 type BudgetClient = {
   tui?: { showToast?: (input: { query?: { directory?: string }; body: { title: string; message: string; variant: string; duration: number } }) => Promise<unknown> };
@@ -65,7 +65,12 @@ export const OmniRushBudgetWrap = async (input: {
     const entry = pending.get(sessionID);
     if (!entry || entry.inFlight || !baseUrl) return;
     entry.inFlight = true;
-    await notify("Wrapping up", "Your token allowance is nearly exhausted. Saving a handoff now.", "warning");
+    // Once per wrap: a failed summarize retries on the next idle without
+    // showing the toast again.
+    if (!entry.announced) {
+      entry.announced = true;
+      await notify("Wrapping up", "Your token allowance is nearly exhausted. Saving a handoff now.", "warning");
+    }
     try {
       const response = await fetcher(
         baseUrl + "/session/" + encodeURIComponent(sessionID) + "/summarize",
@@ -107,7 +112,7 @@ export const OmniRushBudgetWrap = async (input: {
         pending.delete(sessionID);
         return;
       }
-      if (response.headers.get(REQUIRED_HEADER) === "1") {
+      if (response.headers.get(REQUIRED_HEADER) === "1" && !pending.has(sessionID)) {
         pending.set(sessionID, { inFlight: false });
       }
     },

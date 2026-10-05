@@ -10,24 +10,19 @@ import { omnirushAccountStatus, omnirushQualityDetails } from "../../../app/lib/
 import {
   CLIENT_GRADE_NOTE,
   REPLAY_READY_LABEL,
-  NOTICE_SEEN_STORAGE_KEY,
-  NUDGE_SEEN_STORAGE_KEY,
   canSpinNow,
   isCoachingNotice,
-  noticeToShow,
-  nudgeToShow,
   qualityTierLabel,
-  readPref,
   refreshAccountStatus,
   useAccountQuality,
   useQualityUiStore,
-  writePref,
   type AccountQuality,
   type QualityNotice,
 } from "../../../app/lib/quality";
 import type { OmniRushQualitySession } from "@omnirush/types/desktop-ipc";
 import { BiggestWinTicker, NextSpinHint, QualityTierBadge, StreakLine } from "./quality-parts";
 import { QualitySpinDialog } from "./quality-spin-dialog";
+import { useQualityPopups } from "./use-quality-popups";
 
 /** Used only when the server sends no `fail_labels` entry for a code. */
 const FALLBACK_FAIL_LABELS: Record<string, string> = {
@@ -242,16 +237,17 @@ export function QualityNudge(props: { text: string; onDismiss: () => void }) {
 const PROFILE_REFRESH_MS = 15 * 60_000;
 
 /**
- * Quality rewards over the app: the notice popup (once per notice id), the
- * panel the sidebar opens, the server's nudge (once per id) and the spin
- * dialog. Renders nothing while `quality` is null (the feature is off).
+ * Quality rewards over the app: a notice (once per id, never for spins
+ * earned, coaching at most once a day, only at a quiet moment), the panel
+ * the sidebar opens, the server's nudge (once per id, hides by itself) and
+ * the spin dialog. Renders nothing while `quality` is null (the feature is
+ * off).
  */
 export function QualityRewards() {
   const quality = useAccountQuality();
   const panelOpen = useQualityUiStore((store) => store.panelOpen);
   const spinOpen = useQualityUiStore((store) => store.spinOpen);
-  const [seenNotice, setSeenNotice] = useState(() => readPref(NOTICE_SEEN_STORAGE_KEY));
-  const [seenNudge, setSeenNudge] = useState(() => readPref(NUDGE_SEEN_STORAGE_KEY));
+  const { notice, nudge, dismissNotice, dismissNudge } = useQualityPopups(quality);
 
   useEffect(() => {
     const read = () => void refreshAccountStatus(omnirushAccountStatus);
@@ -260,24 +256,15 @@ export function QualityRewards() {
     return () => window.clearInterval(timer);
   }, []);
 
-  const notice = noticeToShow(quality, seenNotice);
-  const nudge = nudgeToShow(quality, seenNudge);
-
-  const markNoticeSeen = useCallback(() => {
-    if (!notice) return;
-    writePref(NOTICE_SEEN_STORAGE_KEY, notice.id);
-    setSeenNotice(notice.id);
-  }, [notice]);
-
   const dismiss = useCallback(() => {
-    markNoticeSeen();
+    dismissNotice();
     useQualityUiStore.getState().closePanel();
-  }, [markNoticeSeen]);
+  }, [dismissNotice]);
 
   const spin = useCallback(() => {
-    markNoticeSeen();
+    dismissNotice();
     useQualityUiStore.getState().openSpin();
-  }, [markNoticeSeen]);
+  }, [dismissNotice]);
 
   const loadSessions = useCallback(async (): Promise<QualitySessionReasons | null> => {
     const details = await omnirushQualityDetails();
@@ -291,13 +278,7 @@ export function QualityRewards() {
       {showCard ? (
         <QualityNoticeCard quality={quality} notice={notice} onSpin={spin} onDismiss={dismiss} loadSessions={loadSessions} />
       ) : nudge && !spinOpen ? (
-        <QualityNudge
-          text={nudge.text}
-          onDismiss={() => {
-            writePref(NUDGE_SEEN_STORAGE_KEY, nudge.id);
-            setSeenNudge(nudge.id);
-          }}
-        />
+        <QualityNudge text={nudge.text} onDismiss={dismissNudge} />
       ) : null}
       {spinOpen ? <QualitySpinDialog quality={quality} onClose={() => useQualityUiStore.getState().closeSpin()} /> : null}
     </>

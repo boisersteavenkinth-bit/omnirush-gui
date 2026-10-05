@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -96,9 +96,10 @@ async function registerFakeUpdaterIpc({ version, files = undefined, ...options }
       isDestroyed: () => false,
     }),
     loadAutoUpdater: async () => ({ autoUpdater: harness.updater }),
-    // The default harness models a Developer ID signed app (or a non-macOS
-    // platform): in-place installs through electron-updater.
+    // The default harness models a Developer ID signed app (or Windows):
+    // in-place installs through electron-updater.
     isDeveloperIdSigned: async () => true,
+    platform: "win32",
     ...options,
   });
   return { tempDir, handlers, sent, app, ...registered, ...harness };
@@ -673,6 +674,8 @@ describe("macOS code signature detection", () => {
   });
 });
 
+const RELEASE_123 = "https://github.com/omnirush-ai/omnirush-gui/releases/download/v1.2.3";
+
 describe("manual installer artifacts", () => {
   const files = [
     { url: "omnirush-mac-arm64-1.2.3.zip", sha512: "zip-checksum", size: 10 },
@@ -683,7 +686,8 @@ describe("manual installer artifacts", () => {
   it("selects the DMG for the running architecture relative to the feed directory", () => {
     assert.deepEqual(selectManualInstallerArtifact({ version: "1.2.3", files }, STABLE_FEED, "arm64"), {
       version: "1.2.3",
-      url: `${STABLE_FEED}/omnirush-mac-arm64-1.2.3.dmg`,
+      // From the release the manifest names, not whatever is latest at download time.
+      url: `${RELEASE_123}/omnirush-mac-arm64-1.2.3.dmg`,
       sha512: "arm64-checksum",
       size: 20,
       fileName: "omnirush-mac-arm64-1.2.3.dmg",
@@ -717,6 +721,9 @@ describe("macOS manual installer fallback", () => {
       platform: "darwin",
       arch: "arm64",
       isDeveloperIdSigned: async () => false,
+      // Gatekeeper runs a quarantined app opened from Downloads from a
+      // read-only translocated copy: replacing that would change nothing.
+      getAppPath: () => "/private/var/folders/x/T/AppTranslocation/ABCD/d/OmniRush.ai.app/Contents/Resources/app.asar",
       electronNet: { fetch: async (url) => {
         fetched.push(url);
         return new Response(bytes);
@@ -746,7 +753,7 @@ describe("macOS manual installer fallback", () => {
       assert.equal(checked.installMode, "manual-dmg");
 
       assert.deepEqual(await download(), { ok: true, mode: "manual-dmg" });
-      assert.deepEqual(fetched, [`${STABLE_FEED}/omnirush-mac-arm64-0.17.1.dmg`]);
+      assert.deepEqual(fetched, ["https://github.com/omnirush-ai/omnirush-gui/releases/download/v0.17.1/omnirush-mac-arm64-0.17.1.dmg"]);
       assert.deepEqual(calls, [], "electron-updater's zip download must not run");
       const progress = sent.filter((event) => event.channel === "omnirush:updater:download-progress");
       assert.equal(progress.at(-1)?.data.transferred, bytes.length);
@@ -804,7 +811,6 @@ describe("macOS manual installer fallback", () => {
   it("keeps the Squirrel path for Developer ID signed macOS apps and other platforms", async () => {
     for (const options of [
       { platform: "darwin", arch: "arm64", isDeveloperIdSigned: async () => true },
-      { platform: "linux", arch: "x64", isDeveloperIdSigned: async () => false },
       { platform: "win32", arch: "x64", isDeveloperIdSigned: async () => { throw new Error("not consulted"); } },
     ]) {
       const { tempDir, handlers, calls } = await registerFakeUpdaterIpc({ version: "0.17.1", ...options });
@@ -1154,5 +1160,302 @@ describe("dev update feed override", () => {
     assert.equal(loopbackDevFeedUrl(undefined), null);
     assert.equal(updaterFeedOptions({ devFeedUrl: "http://127.0.0.1:1/f" }).stableFeedUrl, "http://127.0.0.1:1/f");
     assert.equal(updaterFeedOptions({ devFeedUrl: "https://evil.example/f" }).stableFeedUrl, STABLE_FEED);
+  });
+});
+
+const RELEASE_0171 = "https://github.com/omnirush-ai/omnirush-gui/releases/download/v0.17.1";
+const sha512Of = (bytes) => createHash("sha512").update(bytes).digest("base64");
+const settle = (ms = 20) => new Promise((resolve) => setTimeout(resolve, ms));
+
+describe("macOS self-install without a Developer ID signature", () => {
+  const BUNDLE = "/Users/test/Applications/OmniRush.ai.app";
+  const macSwapHarness = async ({ writable = true, swap = null } = {}) => {
+    const zip = Buffer.from("zip-bytes-of-0.17.1");
+    const fetched = [];
+    const staged = [];
+    const swaps = [];
+    const harness = await registerFakeUpdaterIpc({
+      version: "0.17.1",
+      files: [
+        { url: "omnirush-mac-arm64-0.17.1.zip", sha512: sha512Of(zip), size: zip.length },
+        { url: "omnirush-mac-arm64-0.17.1.dmg", sha512: "dmg-checksum", size: 1 },
+      ],
+      platform: "darwin",
+      arch: "arm64",
+      isDeveloperIdSigned: async () => false,
+      getAppPath: () => `${BUNDLE}/Contents/Resources/app.asar`,
+      electronNet: { fetch: async (url) => {
+        fetched.push(url);
+        return new Response(zip);
+      } },
+      canReplace: async () => writable,
+      stageMacUpdate: async ({ zipPath, version, currentBundle }) => {
+        staged.push({ bytes: readFileSync(zipPath), version, currentBundle });
+        const directory = await mkdtemp(path.join(os.tmpdir(), "omnirush-staged-"));
+        await mkdir(path.join(directory, "OmniRush.ai.app"));
+        return { directory, bundle: path.join(directory, "OmniRush.ai.app"), version };
+      },
+      startMacSwap: async (request) => {
+        swaps.push(request);
+        if (swap) await swap(request);
+        return { elevated: !request.writable };
+      },
+      restartDelayMs: 0,
+    });
+    return { ...harness, zip, fetched, staged, swaps };
+  };
+
+  it("downloads the release zip, stages it and swaps the bundle on restart", async () => {
+    const { tempDir, handlers, calls, fetched, staged, swaps, zip } = await macSwapHarness();
+    try {
+      assert.equal((await handlers.get("omnirush:updater:getChannel")()).installMode, "in-place");
+      assert.equal((await handlers.get("omnirush:updater:check")(null, "stable")).available, true);
+      assert.deepEqual(await handlers.get("omnirush:updater:download")(), { ok: true, mode: "in-place" });
+      assert.deepEqual(fetched, [`${RELEASE_0171}/omnirush-mac-arm64-0.17.1.zip`]);
+      assert.deepEqual(staged, [{ bytes: zip, version: "0.17.1", currentBundle: BUNDLE }]);
+      assert.deepEqual(calls, [], "Squirrel never runs for an ad-hoc signed app");
+
+      assert.deepEqual(await handlers.get("omnirush:updater:installAndRestart")(), { ok: true, mode: "in-place" });
+      assert.equal(swaps.length, 1);
+      assert.equal(swaps[0].targetBundle, BUNDLE);
+      assert.equal(swaps[0].writable, true);
+      assert.equal(swaps[0].relaunch, true);
+      assert.match(swaps[0].stagedBundle, /OmniRush\.ai\.app$/);
+      await settle();
+      assert.deepEqual(calls, ["quit"]);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("asks for an administrator where the folder is not writable, and falls back to the download page only when that is cancelled", async () => {
+    const { tempDir, handlers, calls, swaps } = await macSwapHarness({
+      writable: false,
+      swap: async () => {
+        const error = new Error("Command failed: osascript\n0:12: execution error: User canceled. (-128)");
+        throw error;
+      },
+    });
+    try {
+      await handlers.get("omnirush:updater:check")(null, "stable");
+      await handlers.get("omnirush:updater:download")();
+      const result = await handlers.get("omnirush:updater:installAndRestart")();
+      assert.equal(result.ok, false);
+      assert.equal(result.fallback, "download-page");
+      assert.match(result.reason, /administrator/);
+      assert.match(result.reason, /cancelled/);
+      assert.equal(swaps[0].writable, false);
+      await settle();
+      assert.deepEqual(calls, [], "the app stays open when nothing was replaced");
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("installs on quit without relaunching, and never prompts for a password at quit", async () => {
+    for (const writable of [true, false]) {
+      const { tempDir, handlers, swaps, prepareInstallOnQuit } = await macSwapHarness({ writable });
+      try {
+        await handlers.get("omnirush:updater:check")(null, "stable");
+        await handlers.get("omnirush:updater:download")();
+        const installAndQuit = await prepareInstallOnQuit();
+        if (!writable) {
+          assert.equal(installAndQuit, null);
+          continue;
+        }
+        installAndQuit();
+        await settle();
+        assert.equal(swaps.length, 1);
+        assert.equal(swaps[0].relaunch, false);
+      } finally {
+        await rm(tempDir, { recursive: true, force: true });
+      }
+    }
+  });
+});
+
+describe("the swap helper script", { skip: process.platform === "win32" }, () => {
+  it("waits for the app to exit, swaps the bundle and cleans up", async () => {
+    const { MAC_SWAP_SCRIPT } = await import("./self-install.mjs");
+    const { spawn, execFile } = await import("node:child_process");
+    const root = await mkdtemp(path.join(os.tmpdir(), "omnirush-swap-"));
+    try {
+      const target = path.join(root, "Applications", "OmniRush.ai.app");
+      const staging = path.join(root, "staging");
+      const staged = path.join(staging, "OmniRush.ai.app");
+      await mkdir(path.join(target, "Contents"), { recursive: true });
+      await writeFile(path.join(target, "Contents", "version"), "old");
+      await mkdir(path.join(staged, "Contents"), { recursive: true });
+      await writeFile(path.join(staged, "Contents", "version"), "new");
+      const script = path.join(root, "swap.sh");
+      await writeFile(script, MAC_SWAP_SCRIPT, { mode: 0o755 });
+      const app = spawn("sleep", ["0.6"]);
+      const startedAt = Date.now();
+      // Async, so this process reaps the exited "app" (a zombie still answers kill -0).
+      await new Promise((resolve, reject) => {
+        execFile("/bin/sh", [script, String(app.pid), staged, target, "0"], (error) => (error ? reject(error) : resolve()));
+      });
+      assert.ok(Date.now() - startedAt >= 400, "the swap waited for the app to exit");
+      assert.equal(await readFile(path.join(target, "Contents", "version"), "utf8"), "new");
+      assert.equal(existsSync(staging), false, "the staging folder is removed");
+      const leftovers = readdirSync(path.dirname(target));
+      assert.deepEqual(leftovers, ["OmniRush.ai.app"], "no backup bundle is left behind");
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("Linux AppImage self-install", () => {
+  const appImageHarness = async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "omnirush-appimage-"));
+    const appImage = path.join(root, "Apps", "omnirush-linux-x86_64-0.17.0.AppImage");
+    await mkdir(path.dirname(appImage), { recursive: true });
+    await writeFile(appImage, "old-appimage", { mode: 0o755 });
+    const cache = path.join(root, "cache", "pending");
+    await mkdir(cache, { recursive: true });
+    const relaunches = [];
+    const harness = await registerFakeUpdaterIpc({
+      version: "0.17.1",
+      platform: "linux",
+      arch: "x64",
+      env: { APPIMAGE: appImage },
+      restartDelayMs: 0,
+      relaunchAppImage: (options) => relaunches.push(options),
+    });
+    harness.updater.downloadUpdate = async () => {
+      harness.calls.push("download");
+      const downloadedFile = path.join(cache, "omnirush-linux-x86_64-0.17.1.AppImage");
+      await writeFile(downloadedFile, "new-appimage");
+      harness.listeners.get("update-downloaded")({ version: "0.17.1", downloadedFile });
+    };
+    return { ...harness, root, appImage, relaunches };
+  };
+
+  it("replaces the AppImage file in place and relaunches it once this process exits", async () => {
+    const { tempDir, root, handlers, calls, appImage, relaunches } = await appImageHarness();
+    try {
+      assert.equal((await handlers.get("omnirush:updater:check")(null, "stable")).installMode, "in-place");
+      assert.deepEqual(await handlers.get("omnirush:updater:download")(), { ok: true, mode: "in-place" });
+      assert.deepEqual(await handlers.get("omnirush:updater:installAndRestart")(), { ok: true, mode: "in-place" });
+      assert.equal(await readFile(appImage, "utf8"), "new-appimage", "same path, new contents");
+      assert.equal(statSync(appImage).mode & 0o777, 0o755);
+      assert.deepEqual(readdirSync(path.dirname(appImage)), [path.basename(appImage)]);
+      assert.equal(relaunches.length, 1);
+      assert.equal(relaunches[0].appImage, appImage);
+      await settle();
+      assert.deepEqual(calls, ["download", "quit"], "electron-updater's quitAndInstall is not used");
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("replaces the AppImage on quit without relaunching", async () => {
+    const { tempDir, root, handlers, calls, appImage, relaunches, prepareInstallOnQuit } = await appImageHarness();
+    try {
+      await handlers.get("omnirush:updater:check")(null, "stable");
+      await handlers.get("omnirush:updater:download")();
+      (await prepareInstallOnQuit())();
+      await settle();
+      assert.equal(await readFile(appImage, "utf8"), "new-appimage");
+      assert.deepEqual(relaunches, []);
+      assert.deepEqual(calls, ["download", "quit"]);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("Linux package installs", () => {
+  it("downloads the .deb to Downloads and gives the install command instead of restarting", async () => {
+    const deb = Buffer.from("deb-bytes");
+    const resources = await mkdtemp(path.join(os.tmpdir(), "omnirush-resources-"));
+    await writeFile(path.join(resources, "package-type"), "deb\n");
+    const fetched = [];
+    const { tempDir, handlers, calls } = await registerFakeUpdaterIpc({
+      version: "0.17.1",
+      files: [
+        { url: "omnirush-linux-x86_64-0.17.1.AppImage", sha512: "appimage", size: 1 },
+        { url: "omnirush-linux-amd64-0.17.1.deb", sha512: sha512Of(deb), size: deb.length },
+        { url: "omnirush-linux-x86_64-0.17.1.rpm", sha512: "rpm", size: 1 },
+      ],
+      platform: "linux",
+      arch: "x64",
+      env: {},
+      resourcesPath: resources,
+      electronNet: { fetch: async (url) => {
+        fetched.push(url);
+        return new Response(deb);
+      } },
+    });
+    try {
+      const checked = await handlers.get("omnirush:updater:check")(null, "stable");
+      assert.equal(checked.installMode, "package");
+      assert.equal(checked.packageKind, "deb");
+      const expectedPath = path.join(tempDir, "downloads", "omnirush-linux-amd64-0.17.1.deb");
+      const downloaded = await handlers.get("omnirush:updater:download")();
+      assert.deepEqual(downloaded, {
+        ok: true,
+        mode: "package",
+        packageKind: "deb",
+        path: expectedPath,
+        command: `sudo apt install ${expectedPath}`,
+      });
+      assert.deepEqual(fetched, [`${RELEASE_0171}/omnirush-linux-amd64-0.17.1.deb`]);
+      assert.deepEqual(readFileSync(expectedPath), deb);
+      const installed = await handlers.get("omnirush:updater:installAndRestart")();
+      assert.equal(installed.ok, true);
+      assert.equal(installed.mode, "package");
+      await settle();
+      assert.deepEqual(calls, [], "nothing quits and electron-updater installs nothing");
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+      await rm(resources, { recursive: true, force: true });
+    }
+  });
+
+  it("reopens the AppImage from outside its mount once the old process exits", async () => {
+    const { relaunchAppImageAfterExit, environmentOutsideAppImage } = await import("./self-install.mjs");
+    const spawned = [];
+    relaunchAppImageAfterExit({
+      appImage: "/home/a/Apps/omnirush.AppImage",
+      pid: 4242,
+      runtimePid: 4241,
+      args: ["--no-sandbox"],
+      env: {
+        APPDIR: "/tmp/.mount_abc",
+        APPIMAGE: "/home/a/Apps/omnirush.AppImage",
+        LD_LIBRARY_PATH: "/tmp/.mount_abc/usr/lib",
+        PATH: "/tmp/.mount_abc:/usr/local/bin:/usr/bin",
+        HOME: "/home/a",
+        DISPLAY: ":0",
+        OMNIRUSH_ELECTRON_REMOTE_DEBUG_PORT: "9223",
+      },
+      spawnProcess: (command, args, options) => {
+        spawned.push({ command, args, options });
+        return { unref() {} };
+      },
+    });
+    assert.match(spawned[0].command, /^\/bin\/(ba)?sh$/);
+    assert.deepEqual(spawned[0].args.slice(3), ["4242", "4241", "/home/a/Apps/omnirush.AppImage", "--no-sandbox"]);
+    assert.equal(spawned[0].options.detached, true);
+    // Nothing points into the old mount, which is gone once the app exits.
+    assert.deepEqual(spawned[0].options.env, { PATH: "/usr/local/bin:/usr/bin", HOME: "/home/a", DISPLAY: ":0" });
+    assert.deepEqual(environmentOutsideAppImage({ PATH: "/usr/bin" }), { PATH: "/usr/bin" });
+  });
+
+  it("names the command for each package kind", async () => {
+    const { linuxInstallCommand, shellQuote } = await import("./self-install.mjs");
+    assert.equal(linuxInstallCommand("deb", "/home/a/Downloads/x.deb"), "sudo apt install /home/a/Downloads/x.deb");
+    assert.equal(linuxInstallCommand("rpm", "/home/a/Downloads/x.rpm"), "sudo dnf install /home/a/Downloads/x.rpm");
+    assert.equal(linuxInstallCommand("pacman", "/home/a/Downloads/x.pacman"), "sudo pacman -U /home/a/Downloads/x.pacman");
+    assert.equal(
+      linuxInstallCommand("appimage", "/home/a/Downloads/x.AppImage", "/opt/OmniRush/omnirush.AppImage"),
+      "sudo install -m 755 /home/a/Downloads/x.AppImage /opt/OmniRush/omnirush.AppImage",
+    );
+    assert.equal(linuxInstallCommand(null, "/x"), null);
+    assert.equal(shellQuote("/home/o'neil/My Downloads/x.deb"), "'/home/o'\\''neil/My Downloads/x.deb'");
   });
 });
