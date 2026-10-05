@@ -7,6 +7,28 @@ import { t } from "../../../../i18n";
 
 export type SessionActivityStatus = "idle" | "thinking" | "responding" | "error" | "compacting" | "waiting";
 
+const LIVE_ACTIVITY_STATUSES: SessionActivityStatus[] = [
+  "thinking",
+  "responding",
+  "compacting",
+  "waiting",
+];
+
+/**
+ * Real-time "anything in flight?" signal across all workspaces. The route
+ * session lists used for `activeSessions` refresh on a slower cadence, so
+ * the SSE-fed activity store is the authoritative gate before disposing the
+ * engine: it flips busy on task submit and also covers sessions waiting on
+ * permission/question prompts (a dispose would orphan those).
+ */
+export function hasLiveSessionActivity(
+  statusesByWorkspaceId: Record<string, Record<string, SessionActivityStatus>>,
+): boolean {
+  return Object.values(statusesByWorkspaceId).some((sessions) =>
+    Object.values(sessions).some((status) => LIVE_ACTIVITY_STATUSES.includes(status)),
+  );
+}
+
 type SessionMessageRole = "assistant" | "system" | "user";
 
 type SessionActivityRecord = {

@@ -13,8 +13,8 @@ import {
 import type { ReloadReason, ReloadTrigger } from "@/app/types";
 import { t } from "@/i18n";
 import {
+  hasLiveSessionActivity,
   useSessionActivityStore,
-  type SessionActivityStatus,
 } from "@/react-app/domains/session/status/session-activity-store";
 import { useSystemState } from "@/react-app/kernel/system-state";
 import { notifyAlert, notifyEvent } from "./notifications";
@@ -102,28 +102,6 @@ function describeApplied(trigger: ReloadTrigger | null): string {
       : `${label} '${trigger.name}' is now active.`;
   }
   return `${label} changes are now active.`;
-}
-
-const LIVE_ACTIVITY_STATUSES: SessionActivityStatus[] = [
-  "thinking",
-  "responding",
-  "compacting",
-  "waiting",
-];
-
-/**
- * Real-time "anything in flight?" signal across all workspaces. The route
- * session lists used for `activeSessions` refresh on a slower cadence, so
- * the SSE-fed activity store is the authoritative gate before disposing the
- * engine: it flips busy on task submit and also covers sessions waiting on
- * permission/question prompts (a dispose would orphan those).
- */
-function hasLiveSessionActivity(
-  statusesByWorkspaceId: Record<string, Record<string, SessionActivityStatus>>,
-): boolean {
-  return Object.values(statusesByWorkspaceId).some((sessions) =>
-    Object.values(sessions).some((status) => LIVE_ACTIVITY_STATUSES.includes(status)),
-  );
 }
 
 type ReloadSession = { id: string; title: string };

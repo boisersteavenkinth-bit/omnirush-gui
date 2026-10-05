@@ -74,4 +74,32 @@ describe("account budget wrap plugin", () => {
     await hooks.event!({ event: { type: "session.idle", properties: { sessionID: "ses_2" } } });
     expect(calls).toHaveLength(0);
   });
+
+  test("a failed wrap retries on the next idle without showing the toast again", async () => {
+    process.env.OMNIRUSH_ENGINE_ADAPTER_URL = "http://adapter.test";
+    const toasts: string[] = [];
+    let attempts = 0;
+    const hooks = await OmniRushBudgetWrap({
+      client: { tui: { showToast: async ({ body }) => { toasts.push(body.title); } } },
+      fetch: async () => {
+        attempts += 1;
+        return new Response(null, { status: attempts < 3 ? 500 : 204 });
+      },
+    });
+    const request = new Request("http://gateway.test/v1/responses", {
+      headers: { "x-omnirush-session-id": "ses_3" },
+    });
+    const required = () => hooks["omnirush.http.response"]!({
+      request,
+      response: new Response(null, { status: 200, headers: { "x-omnirush-wrap-required": "1" } }),
+    });
+    await required();
+    for (let idle = 0; idle < 3; idle += 1) {
+      // Every answer of the retried turns still asks for the wrap.
+      await required();
+      await hooks.event!({ event: { type: "session.idle", properties: { sessionID: "ses_3" } } });
+    }
+    expect(attempts).toBe(3);
+    expect(toasts).toEqual(["Wrapping up", "Wrap up complete"]);
+  });
 });
