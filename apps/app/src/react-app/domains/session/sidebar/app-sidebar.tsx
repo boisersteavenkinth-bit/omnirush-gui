@@ -13,6 +13,7 @@ import {
   Columns2,
   Copy,
   FolderPlus,
+  Gift,
   LayoutGrid,
   MoreHorizontal,
   Pencil,
@@ -41,7 +42,7 @@ import { omnirushAccountStatus, type WorkspaceInfo } from "../../../../app/lib/d
 import { omnirushUsageSummary } from "../../../../app/lib/omnirush-usage";
 import { isDesktopRuntime } from "../../../../app/lib/runtime-env";
 import { refreshAccountStatus, setQualitySessionId, useAccountStatusStore, useQualityUiStore, type AccountQuality } from "../../../../app/lib/quality";
-import { ProgressRing, QualityTierBadge, SpinButton } from "../../quality/quality-parts";
+import { ProgressRing, QualityTierBadge, SpinCounts, spinRowTitle } from "../../quality/quality-parts";
 import { OmniRushDenHelpLink } from "../../workspace/omnirush-den-help-link";
 import { NotificationBell } from "../../../shell/notification-center";
 import { useUiStateStore } from "../../../shell/ui-state-store";
@@ -979,34 +980,47 @@ function OmniRushWordmark({ className }: { className?: string }) {
 }
 
 /**
- * Quality rewards under the account: the spin button with the count of
- * ready spins, and the ring filling toward the next spin. Opens the quality
- * panel (tips, streak, coaching) or the spin dialog. Nothing while `quality`
- * is null.
+ * Quality rewards as a sidebar row: "Spin" with the ready count as a small
+ * badge, and a muted ring with the progress toward the next spin. Opens the
+ * spin dialog (or, without spins, the quality panel: tips, streak, coaching).
  */
-function QualityFooterStrip({ quality }: { quality: AccountQuality }) {
+function QualitySpinRow({ quality }: { quality: AccountQuality }) {
   const openPanel = useQualityUiStore((store) => store.openPanel);
   const openSpin = useQualityUiStore((store) => store.openSpin);
   const hint = quality.nextSpinHint;
+  const ready = quality.spinsAvailable;
+  const stars = Math.min(ready, quality.clientSpinsAvailable ?? 0);
+  const progress = hint ? `${Math.round(hint.progress * 100)}%` : null;
   return (
-    <div
-      className="flex items-center gap-1.5 px-2 pb-1 pt-0.5 group-data-[collapsible=icon]:hidden"
-      data-testid="quality-footer-strip"
-    >
-      <SpinButton quality={quality} onClick={quality.spinsAvailable > 0 ? openSpin : openPanel} />
-      <button
+    <SidebarMenuItem data-testid="quality-footer-strip">
+      <SidebarMenuButton
         type="button"
-        onClick={openPanel}
-        className="flex min-w-0 flex-1 items-center gap-1.5 rounded-md px-1 py-0.5 text-left text-[10.5px] text-muted-foreground transition hover:bg-sidebar-accent hover:text-foreground"
-        title={hint?.text ?? quality.nextTierHint ?? "Quality rewards"}
-        data-testid="quality-footer-next"
+        onClick={ready > 0 ? openSpin : openPanel}
+        tooltip={spinRowTitle(quality)}
+        aria-label={ready > 0 ? `Spin, ${ready} ready` : "How to earn spins"}
+        data-testid="quality-spin-button"
+        data-spins={ready}
+        data-client-spins={stars}
+        className={cn(progress && "pe-14")}
       >
-        {hint ? <ProgressRing progress={hint.progress} size={16} stroke={2.25} /> : null}
-        <span className="truncate">
-          {hint ? `${Math.round(hint.progress * 100)}%` : quality.streakDays > 0 ? `${quality.streakDays}-day streak` : "How to earn spins"}
-        </span>
-      </button>
-    </div>
+        <Gift className="size-4" />
+        <span className="truncate">{ready > 0 ? "Spin" : "Earn spins"}</span>
+        <SpinCounts quality={quality} />
+      </SidebarMenuButton>
+      {progress ? (
+        <button
+          type="button"
+          onClick={openPanel}
+          title={hint?.text ?? quality.nextTierHint ?? "Quality rewards"}
+          aria-label={`Next spin ${progress}`}
+          data-testid="quality-footer-next"
+          className="absolute inset-e-1 top-1.5 flex h-5 items-center gap-1 rounded-md px-1 text-[11px] text-muted-foreground tabular-nums transition hover:bg-sidebar-accent hover:text-foreground group-data-[collapsible=icon]:hidden"
+        >
+          <ProgressRing progress={hint!.progress} size={12} stroke={1.75} />
+          {progress}
+        </button>
+      ) : null}
+    </SidebarMenuItem>
   );
 }
 
@@ -1083,11 +1097,7 @@ function NativeAccountFooter({ onOpenAccountSettings }: { onOpenAccountSettings:
             </span>
           </SidebarMenuButton>
         </SidebarMenuItem>
-        {quality ? (
-          <SidebarMenuItem>
-            <QualityFooterStrip quality={quality} />
-          </SidebarMenuItem>
-        ) : null}
+        {quality ? <QualitySpinRow quality={quality} /> : null}
         <SidebarMenuItem>
           <SidebarMenuButton
             type="button"

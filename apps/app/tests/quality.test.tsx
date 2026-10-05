@@ -18,8 +18,7 @@ import {
   spinPayoutText,
   spinRefusalMessage,
   useAccountStatusStore,
-  wheelAngleAt,
-  wheelOvershoot,
+  wheelEaseOut,
   wheelSlices,
   wheelTargetRotation,
   writePref,
@@ -27,9 +26,10 @@ import {
   type QualitySpin,
   type QualityTier,
 } from "../src/app/lib/quality";
-import { QualityTierBadge, SpinButton, streakText } from "../src/react-app/domains/quality/quality-parts";
+import { QualityTierBadge, SpinCounts, streakText } from "../src/react-app/domains/quality/quality-parts";
 import { QualityNoticeCard, QualityRewards, SessionReasons, failLabel } from "../src/react-app/domains/quality/quality-notice";
-import { QualitySpinDialog, RecentSpins } from "../src/react-app/domains/quality/quality-spin-dialog";
+import { QualitySpinPanel, RecentSpins } from "../src/react-app/domains/quality/quality-spin-dialog";
+import { WHEEL_LANDED_FILL, wheelSliceFill } from "../src/react-app/domains/quality/quality-wheel";
 
 const quality: AccountQuality = {
   tier: "gold",
@@ -141,6 +141,9 @@ describe("notice: once per id", () => {
     expect(html).toContain("Spin (2)");
     expect(html).toContain("4-day streak");
     expect(html).toContain("Next spin · 60%");
+    // The app's toast style: theme surfaces, sentence case, no coloured bar or eyebrow.
+    expect(html).toContain("bg-popover");
+    expect(html).not.toMatch(/uppercase|tracking-\[|#a3e635|#0b1120|shadow-\[0_0/);
   });
 
   test("no Spin button without spins; a resting wheel says so", () => {
@@ -199,25 +202,23 @@ describe("wheel geometry", () => {
     expect(((-target % 360) + 360) % 360).toBeCloseTo(270, 6);
   });
 
-  test("the spin starts and ends where it should, and the overshoot stays in the slice", () => {
-    const to = wheelTargetRotation(DEFAULT_WHEEL_SEGMENTS, 5, 0, 6);
-    const overshoot = wheelOvershoot(DEFAULT_WHEEL_SEGMENTS, 5);
-    expect(wheelAngleAt(0, 0, to, overshoot)).toBe(0);
-    expect(wheelAngleAt(1, 0, to, overshoot)).toBeCloseTo(to, 6);
+  test("one ease-out: starts and ends where it should, never goes back, never overshoots", () => {
+    const to = wheelTargetRotation(DEFAULT_WHEEL_SEGMENTS, 5, 0, 4);
+    expect(wheelEaseOut(0, 0, to)).toBe(0);
+    expect(wheelEaseOut(1, 0, to)).toBe(to);
+    expect(wheelEaseOut(1.5, 0, to)).toBe(to);
+    expect(sliceAtPointer(slices, wheelEaseOut(1, 0, to))).toBe(5);
     let previous = 0;
-    let peak = 0;
-    let arrived = false;
+    let previousStep = Infinity;
     for (let step = 1; step <= 1_000; step += 1) {
-      const angle = wheelAngleAt(step / 1_000, 0, to, overshoot);
-      if (step / 1_000 <= 0.88) expect(angle).toBeGreaterThanOrEqual(previous);
+      const angle = wheelEaseOut(step / 1_000, 0, to);
+      expect(angle).toBeGreaterThanOrEqual(previous);
+      expect(angle).toBeLessThanOrEqual(to);
+      // Decelerates the whole way: every frame moves less than the one before.
+      expect(angle - previous).toBeLessThanOrEqual(previousStep + 1e-9);
+      previousStep = angle - previous;
       previous = angle;
-      peak = Math.max(peak, angle);
-      // Once the wheel reaches the stop it overshoots and settles without leaving the 10M slice.
-      arrived ||= angle >= to;
-      if (arrived) expect(sliceAtPointer(slices, angle)).toBe(5);
     }
-    expect(arrived).toBe(true);
-    expect(peak).toBeCloseTo(to + overshoot, 3);
   });
 });
 
@@ -240,12 +241,26 @@ describe("spin results", () => {
   });
 
   test("the dialog shows the wheel, the odds and the Spin button", () => {
-    const html = renderToStaticMarkup(<QualitySpinDialog quality={quality} onClose={() => undefined} />);
+    const html = renderToStaticMarkup(<QualitySpinPanel quality={quality} onClose={() => undefined} />);
     expect(html).toContain("data-testid=\"quality-wheel\"");
-    expect(html).toContain("10M · 1%");
-    expect(html).toContain("250K · 35%");
+    // The legend: each prize with its chance, one row per segment, the slice's tint as the swatch.
+    expect(html).toContain("data-testid=\"quality-wheel-legend\"");
+    expect(html).toMatch(/10M<\/span><\/td><td[^>]*>1%<\/td>/);
+    expect(html).toMatch(/250K<\/span><\/td><td[^>]*>35%<\/td>/);
+    expect(html).toContain("Spin for tokens");
+    // The app's theme only: no hardcoded navy, lime glow, confetti or all-caps.
+    expect(html).not.toMatch(/#0b1120|#a3e635|shadow-\[0_0|uppercase|<canvas/);
     expect(html).toContain("Spin (2 ready)");
-    expect(html).toContain("Today&#x27;s biggest win");
+    expect(html).toContain("Today&#x27;s biggest win: 10M tokens");
+  });
+
+  test("the wheel uses theme tints, and the accent only for the landed slice", () => {
+    expect(wheelSliceFill(0, 6)).toBe("var(--slate-4)");
+    expect(wheelSliceFill(5, 6)).toBe("var(--slate-9)");
+    expect(WHEEL_LANDED_FILL).toBe("var(--lime-9)");
+    const html = renderToStaticMarkup(<QualitySpinPanel quality={quality} onClose={() => undefined} />);
+    expect(html).not.toContain(WHEEL_LANDED_FILL);
+    expect(html).not.toContain("data-landed=");
   });
 });
 
@@ -269,17 +284,19 @@ describe("revision: fail labels, jackpot, open session", () => {
     );
     expect(html).toContain("Started in your home folder");
     expect(html).toContain("3 code files · 120 lines · no tests");
-    expect(html).toContain("reproducible ✓");
-    expect(html).not.toContain("replay-ready ★");
+    expect(html).toContain("Reproducible ✓");
+    expect(html).not.toContain("Replay-ready ★");
     expect(html).toContain("+2 spins on a richer wheel");
   });
 
-  test("the spin button shows a ★ count only for replay-ready spins", () => {
-    const plain = renderToStaticMarkup(<SpinButton quality={quality} onClick={() => undefined} />);
+  test("the sidebar row shows the ready count, and a ★ count only for replay-ready spins", () => {
+    const plain = renderToStaticMarkup(<SpinCounts quality={quality} />);
+    expect(plain).toContain("2 ready");
     expect(plain).not.toContain("quality-client-spins");
-    const starred = renderToStaticMarkup(<SpinButton quality={{ ...quality, clientSpinsAvailable: 1 }} onClick={() => undefined} />);
+    const starred = renderToStaticMarkup(<SpinCounts quality={{ ...quality, clientSpinsAvailable: 1 }} />);
     expect(starred).toContain("data-testid=\"quality-client-spins\"");
     expect(starred).toContain("★1");
+    expect(renderToStaticMarkup(<SpinCounts quality={{ ...quality, spinsAvailable: 0 }} />)).toBe("");
   });
 
   test("a replay-ready session shows the star instead of the check", () => {
@@ -294,8 +311,8 @@ describe("revision: fail labels, jackpot, open session", () => {
         }}
       />,
     );
-    expect(html).toContain("replay-ready ★");
-    expect(html).not.toContain("reproducible ✓");
+    expect(html).toContain("Replay-ready ★");
+    expect(html).not.toContain("Reproducible ✓");
   });
 
   test("the jackpot slice is the segment paying jackpot_tokens", () => {
@@ -325,9 +342,9 @@ describe("replay-ready wording, history and the count-up", () => {
     const starred = { ...quality, clientSpinsAvailable: 2, tier: "coaching" as const };
     const notice = { id: "c-1", kind: "tier-coaching", title: "Here is how to get spins", body: "" };
     const html = [
-      renderToStaticMarkup(<SpinButton quality={starred} onClick={() => undefined} />),
+      renderToStaticMarkup(<SpinCounts quality={starred} />),
       renderToStaticMarkup(<QualityNoticeCard quality={starred} notice={notice} onSpin={() => undefined} onDismiss={() => undefined} />),
-      renderToStaticMarkup(<QualitySpinDialog quality={starred} onClose={() => undefined} />),
+      renderToStaticMarkup(<QualitySpinPanel quality={starred} onClose={() => undefined} />),
       renderToStaticMarkup(
         <SessionReasons
           reasons={{
@@ -345,7 +362,7 @@ describe("replay-ready wording, history and the count-up", () => {
     const text = html.replace(/<[^>]*>/g, " ");
     expect(text.toLowerCase()).not.toContain("client");
     expect(text).toContain("old app version");
-    expect(text).toContain("replay-ready ★");
+    expect(text).toContain("Replay-ready ★");
     expect(text).toContain("Replay-ready sessions earn +2 spins on a richer wheel.");
   });
 

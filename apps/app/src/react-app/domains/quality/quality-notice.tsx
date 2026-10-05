@@ -1,7 +1,9 @@
 /** @jsxImportSource react */
 import { useCallback, useEffect, useState } from "react";
-import { ChevronDown, Gift, Lightbulb, Sparkles, X } from "lucide-react";
+import { ChevronDown, Gift, Lightbulb, X } from "lucide-react";
 
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 
 import { omnirushAccountStatus, omnirushQualityDetails } from "../../../app/lib/desktop";
@@ -56,35 +58,35 @@ function workSummary(work: OmniRushQualitySession["work"]): string | null {
 
 /** "See why": each recent session, with what earned spins and what held it back. */
 export function SessionReasons({ reasons }: { reasons: QualitySessionReasons | null }) {
-  if (reasons === null) return <div className="text-xs text-white/50">Loading your sessions…</div>;
+  if (reasons === null) return <div className="text-xs text-muted-foreground">Loading your sessions…</div>;
   const { sessions, failLabels } = reasons;
-  if (sessions === null) return <div className="text-xs text-white/50">Loading your sessions…</div>;
-  if (!sessions.length) return <div className="text-xs text-white/50">No sessions checked yet. They are checked about once an hour.</div>;
+  if (sessions === null) return <div className="text-xs text-muted-foreground">Loading your sessions…</div>;
+  if (!sessions.length) return <div className="text-xs text-muted-foreground">No sessions checked yet. They are checked about once an hour.</div>;
   return (
     <>
-    <p className="mb-2 text-[11px] text-amber-200/80" data-testid="quality-client-grade-note">{CLIENT_GRADE_NOTE}</p>
-    <ul className="space-y-2" data-testid="quality-session-reasons">
+    <p className="mb-2 text-xs text-muted-foreground" data-testid="quality-client-grade-note">{CLIENT_GRADE_NOTE}</p>
+    <ul className="flex flex-col gap-1.5" data-testid="quality-session-reasons">
       {sessions.slice(0, 6).map((session) => (
-        <li key={session.sessionId} className="rounded-xl border border-white/10 bg-black/20 px-3 py-2">
-          <div className="flex items-center justify-between gap-2 text-[11px] text-white/50">
+        <li key={session.sessionId} className="rounded-lg border border-border px-3 py-2">
+          <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
             <span className="truncate">{session.workspace ?? "session"}</span>
             {session.spins > 0 ? (
-              <span className="shrink-0 font-semibold text-[#bef264]">+{session.spins} spin{session.spins === 1 ? "" : "s"}</span>
+              <span className="shrink-0 font-medium text-foreground">+{session.spins} spin{session.spins === 1 ? "" : "s"}</span>
             ) : null}
           </div>
-          {session.why ? <div className="mt-0.5 text-xs leading-5 text-white/80">{session.why}</div> : null}
-          {workSummary(session.work) ? <div className="mt-0.5 text-[10.5px] text-white/45">{workSummary(session.work)}</div> : null}
+          {session.why ? <div className="mt-0.5 text-xs leading-5 text-foreground">{session.why}</div> : null}
+          {workSummary(session.work) ? <div className="mt-0.5 text-[11px] text-muted-foreground">{workSummary(session.work)}</div> : null}
           {session.fails.length || session.reproducible === "pass" || session.clientGrade ? (
-            <div className="mt-1 flex flex-wrap gap-1">
+            <div className="mt-1.5 flex flex-wrap gap-1">
               {session.clientGrade ? (
-                <span data-testid="quality-client-grade" className="rounded-full bg-amber-300/15 px-1.5 py-0.5 text-[10px] font-semibold text-amber-200">{REPLAY_READY_LABEL}</span>
+                <Badge variant="secondary" data-testid="quality-client-grade" className="h-4 px-1.5 text-[10px] font-normal text-muted-foreground">{REPLAY_READY_LABEL}</Badge>
               ) : session.reproducible === "pass" ? (
-                <span data-testid="quality-reproducible" className="rounded-full bg-[#a3e635]/15 px-1.5 py-0.5 text-[10px] text-[#d9f99d]">reproducible ✓</span>
+                <Badge variant="secondary" data-testid="quality-reproducible" className="h-4 px-1.5 text-[10px] font-normal text-muted-foreground">Reproducible ✓</Badge>
               ) : null}
               {session.fails.map((fail) => (
-                <span key={fail} data-fail={fail} className="rounded-full bg-white/[0.06] px-1.5 py-0.5 text-[10px] text-white/60">
+                <Badge key={fail} variant="outline" data-fail={fail} className="h-4 px-1.5 text-[10px] font-normal text-muted-foreground">
                   {failLabel(fail, failLabels)}
-                </span>
+                </Badge>
               ))}
             </div>
           ) : null}
@@ -105,10 +107,14 @@ export type QualityNoticeCardProps = {
   loadSessions?: () => Promise<QualitySessionReasons | null>;
 };
 
+/** The app's toast surface: popover colours, a hairline border, small radius. */
+const TOAST_SURFACE =
+  "rounded-2xl border border-border bg-popover/95 text-popover-foreground shadow-md ring-1 ring-popover-border/20 backdrop-blur-sm";
+
 /**
- * The quality popup, modelled on the update banner: fixed over the app,
- * with the notice, the tips and, when spins are ready, a Spin button.
- * Coaching reads as "here is how to get spins", never as a penalty.
+ * The quality popup, in the app's toast style: fixed over the app, with the
+ * notice, the tips and, when spins are ready, a Spin button. Coaching reads
+ * as "here is how to get spins", never as a penalty.
  */
 export function QualityNoticeCard(props: QualityNoticeCardProps) {
   const { quality, notice } = props;
@@ -118,6 +124,7 @@ export function QualityNoticeCard(props: QualityNoticeCardProps) {
   const title = notice?.title ?? `Quality: ${qualityTierLabel(quality.tier)}`;
   const body = notice?.body || (notice ? "" : quality.nextTierHint ?? "");
   const spinnable = canSpinNow(quality);
+  const Icon = coaching ? Lightbulb : Gift;
 
   const toggleWhy = () => {
     setWhyOpen((open) => !open);
@@ -134,53 +141,53 @@ export function QualityNoticeCard(props: QualityNoticeCardProps) {
       data-testid="quality-notice"
       data-notice-id={notice?.id ?? undefined}
       data-coaching={coaching ? "" : undefined}
-      className="fixed bottom-4 right-4 z-[65] w-[380px] max-w-[calc(100vw-2rem)] overflow-hidden rounded-3xl border border-white/10 bg-[#0b1120]/95 text-white shadow-2xl shadow-black/50 backdrop-blur"
+      className={cn("fixed bottom-4 right-4 z-[65] flex w-[360px] max-w-[calc(100vw-2rem)] flex-col gap-3 p-4", TOAST_SURFACE)}
     >
-      <div className={cn("h-1 w-full", coaching ? "bg-violet-300/70" : "bg-[#a3e635]")} />
-      <div className="p-5">
-        <div className="flex items-start justify-between gap-3">
-          <div className="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.2em] text-white/50">
-            {coaching ? <Lightbulb className="size-3.5 text-violet-300" /> : <Sparkles className="size-3.5 text-[#a3e635]" />}
-            {coaching ? "How to earn spins" : "Quality rewards"}
+      <div className="flex items-start gap-3">
+        <Icon className="mt-0.5 size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+        <div className="flex min-w-0 flex-1 flex-col gap-1">
+          <div className="flex min-w-0 items-center gap-2">
+            <p className="text-sm font-medium" data-testid="quality-notice-title">{title}</p>
             <QualityTierBadge quality={quality} />
           </div>
-          <button
-            type="button"
-            onClick={props.onDismiss}
-            aria-label="Dismiss"
-            data-testid="quality-notice-dismiss"
-            className="-me-1 -mt-1 flex size-7 items-center justify-center rounded-full text-white/50 transition hover:bg-white/10 hover:text-white"
-          >
-            <X className="size-4" />
-          </button>
+          {body ? <p className="text-sm text-muted-foreground" data-testid="quality-notice-body">{body}</p> : null}
         </div>
-        <h3 className="mt-3 text-lg font-semibold leading-6 tracking-[-0.01em]" data-testid="quality-notice-title">{title}</h3>
-        {body ? <p className="mt-1.5 text-sm leading-6 text-white/70" data-testid="quality-notice-body">{body}</p> : null}
+        <Button
+          type="button"
+          variant="ghost"
+          size="icon-xs"
+          onClick={props.onDismiss}
+          aria-label="Dismiss"
+          data-testid="quality-notice-dismiss"
+          className="-me-1 -mt-0.5 text-muted-foreground"
+        >
+          <X />
+        </Button>
+      </div>
 
-        <div className="mt-3 space-y-2.5">
-          <StreakLine quality={quality} />
-          <NextSpinHint quality={quality} />
-        </div>
+      <div className="flex flex-col gap-2 ps-7">
+        <StreakLine quality={quality} />
+        <NextSpinHint quality={quality} />
 
         {quality.tips.length ? (
-          <ul className="mt-3 space-y-1.5 rounded-2xl border border-white/10 bg-white/[0.03] p-3" data-testid="quality-notice-tips">
-            {quality.tips.map((tip) => (
-              <li key={tip} className="flex gap-2 text-xs leading-5 text-white/75">
-                <span className="mt-[7px] size-1.5 shrink-0 rounded-full bg-[#a3e635]" aria-hidden="true" />
-                <span>{tip}</span>
-              </li>
-            ))}
-          </ul>
+          <div data-testid="quality-notice-tips">
+            <p className="text-xs font-medium text-foreground">{coaching ? "How to earn spins" : "Tips"}</p>
+            <ul className="mt-1 list-disc space-y-1 ps-4 text-xs leading-5 text-muted-foreground marker:text-muted-foreground/60">
+              {quality.tips.map((tip) => <li key={tip}>{tip}</li>)}
+            </ul>
+          </div>
+        ) : coaching ? (
+          <p className="text-xs font-medium text-foreground">How to earn spins</p>
         ) : null}
 
         {coaching ? (
-          <div className="mt-3">
+          <div>
             <button
               type="button"
               onClick={toggleWhy}
               aria-expanded={whyOpen}
               data-testid="quality-see-why"
-              className="inline-flex items-center gap-1 text-xs font-medium text-violet-200 hover:text-violet-100"
+              className="inline-flex items-center gap-1 text-xs text-muted-foreground transition hover:text-foreground"
             >
               See why
               <ChevronDown className={cn("size-3.5 transition", whyOpen && "rotate-180")} />
@@ -189,30 +196,25 @@ export function QualityNoticeCard(props: QualityNoticeCardProps) {
           </div>
         ) : null}
 
-        <BiggestWinTicker quality={quality} className="mt-3 w-fit" />
+        <BiggestWinTicker quality={quality} />
 
-        <div className="mt-4 flex items-center gap-2">
+        <div className="mt-1 flex flex-wrap items-center gap-2">
           {quality.spinsAvailable > 0 ? (
-            <button
+            <Button
               type="button"
+              size="sm"
               onClick={props.onSpin}
               disabled={!spinnable}
               data-testid="quality-notice-spin"
-              className="inline-flex items-center gap-2 rounded-full bg-[#a3e635] px-4 py-2 text-sm font-bold text-[#1a2e05] shadow-[0_0_20px_rgba(163,230,53,0.4)] transition hover:bg-[#bef264] disabled:cursor-not-allowed disabled:opacity-60"
             >
-              <Gift className="size-4" aria-hidden="true" />
               Spin{quality.spinsAvailable > 1 ? ` (${quality.spinsAvailable})` : ""}
-            </button>
+            </Button>
           ) : null}
-          <button
-            type="button"
-            onClick={props.onDismiss}
-            className="rounded-full px-3 py-2 text-sm font-medium text-white/60 transition hover:bg-white/10 hover:text-white"
-          >
+          <Button type="button" size="sm" variant="outline" onClick={props.onDismiss}>
             Got it
-          </button>
+          </Button>
           {quality.spinsAvailable > 0 && !spinnable ? (
-            <span className="text-xs text-amber-200">The wheel is resting, back tomorrow.</span>
+            <span className="text-xs text-muted-foreground">The wheel is resting, back tomorrow.</span>
           ) : null}
         </div>
       </div>
@@ -226,13 +228,13 @@ export function QualityNudge(props: { text: string; onDismiss: () => void }) {
     <div
       role="status"
       data-testid="quality-nudge"
-      className="fixed bottom-4 right-4 z-[64] flex max-w-[360px] items-start gap-2 rounded-2xl border border-[#a3e635]/30 bg-[#0b1120]/95 px-4 py-3 text-sm text-white shadow-xl shadow-black/40"
+      className={cn("fixed bottom-4 right-4 z-[64] flex max-w-[360px] items-start gap-3 p-4 text-sm", TOAST_SURFACE)}
     >
-      <Sparkles className="mt-0.5 size-4 shrink-0 text-[#a3e635]" aria-hidden="true" />
-      <span className="leading-5 text-white/85">{props.text}</span>
-      <button type="button" onClick={props.onDismiss} aria-label="Dismiss" className="-me-1 text-white/50 hover:text-white">
-        <X className="size-4" />
-      </button>
+      <Gift className="mt-0.5 size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+      <span className="flex-1 text-muted-foreground">{props.text}</span>
+      <Button type="button" variant="ghost" size="icon-xs" onClick={props.onDismiss} aria-label="Dismiss" className="-me-1 -mt-0.5 text-muted-foreground">
+        <X />
+      </Button>
     </div>
   );
 }

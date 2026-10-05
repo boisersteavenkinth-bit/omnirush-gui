@@ -1,7 +1,10 @@
 /** @jsxImportSource react */
-import { useCallback, useEffect, useRef, useState } from "react";
-import { Loader2, Sparkles, Volume2, VolumeX, X } from "lucide-react";
+import { useCallback, useEffect, useState, type ComponentType, type ReactNode } from "react";
+import { Loader2, Volume2, VolumeX } from "lucide-react";
 
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogTitle } from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
 import type { OmniRushQualitySpinRecord, OmniRushQualitySpinTotals } from "@omnirush/types/desktop-ipc";
 
@@ -28,7 +31,7 @@ import {
   type WheelSegment,
 } from "../../../app/lib/quality";
 import { BiggestWinTicker, QualityTierBadge, StreakLine } from "./quality-parts";
-import { QualityWheel } from "./quality-wheel";
+import { QualityWheel, WHEEL_LANDED_FILL, wheelSliceFill } from "./quality-wheel";
 
 export function usePrefersReducedMotion(): boolean {
   const [reduced, setReduced] = useState(() =>
@@ -76,34 +79,75 @@ function useCountUp(value: number, active: boolean, reducedMotion: boolean, dura
 
 type Phase = "idle" | "requesting" | "spinning" | "result" | "error";
 
-/** The last spins (newest first), ★ on the replay-ready ones. */
+function recentSpinLabel(spin: OmniRushQualitySpinRecord): string {
+  if (spin.status === "spun") return spin.prizeTokens !== null ? compactTokenCount(spin.prizeTokens) : "spun";
+  return spin.status === "ready" ? "ready" : spin.status;
+}
+
+/** The last spins (newest first) as one muted line, ★ on the replay-ready ones. */
 export function RecentSpins({ spins }: { spins: OmniRushQualitySpinRecord[] }) {
   const shown = spins.slice(0, 10);
   if (!shown.length) return null;
   return (
-    <div className="mt-1 w-full" data-testid="quality-recent-spins">
-      <div className="mb-1 text-center text-[10px] font-semibold uppercase tracking-[0.18em] text-white/35">Recent spins</div>
-      <ul className="flex flex-wrap justify-center gap-1">
-        {shown.map((spin) => (
+    <div className="flex min-w-0 flex-wrap items-baseline gap-x-1.5 text-xs text-muted-foreground" data-testid="quality-recent-spins">
+      <span>Recent spins:</span>
+      <ul className="contents">
+        {shown.map((spin, index) => (
           <li
             key={spin.id}
             data-replay-ready={spin.clientGrade ? "" : undefined}
             title={spin.clientGrade ? REPLAY_READY_LABEL : spin.status}
-            className={cn(
-              "rounded-full border px-2 py-0.5 text-[10.5px] tabular-nums",
-              spin.clientGrade ? "border-amber-300/40 bg-amber-300/10 text-amber-200" : "border-white/10 text-white/55",
-            )}
+            className="tabular-nums"
           >
             {spin.clientGrade ? "★ " : ""}
-            {spin.status === "spun"
-              ? spin.prizeTokens !== null ? compactTokenCount(spin.prizeTokens) : "spun"
-              : spin.status === "ready" ? "ready" : spin.status}
+            {recentSpinLabel(spin)}
+            {index < shown.length - 1 ? <span aria-hidden="true">,</span> : null}
           </li>
         ))}
       </ul>
     </div>
   );
 }
+
+/** Each prize with its chance; the swatch is the slice's tint, the accent once landed. */
+function WheelLegend({ segments, landedIndex }: { segments: WheelSegment[]; landedIndex: number | null }) {
+  return (
+    <table className="w-full text-xs tabular-nums" data-testid="quality-wheel-legend">
+      <thead>
+        <tr className="text-muted-foreground">
+          <th className="pb-1 text-start font-normal">Prize</th>
+          <th className="pb-1 text-end font-normal">Chance</th>
+        </tr>
+      </thead>
+      <tbody>
+        {segments.map((segment, index) => {
+          const landed = index === landedIndex;
+          return (
+            <tr
+              key={index}
+              data-landed={landed ? "" : undefined}
+              className={cn("border-t border-border/60", landed ? "font-medium text-foreground" : "text-muted-foreground")}
+            >
+              <td className="py-1">
+                <span className="flex items-center gap-2">
+                  <span
+                    className="size-2.5 shrink-0 rounded-[3px] ring-1 ring-border ring-inset"
+                    style={{ background: landed ? WHEEL_LANDED_FILL : wheelSliceFill(index, segments.length) }}
+                    aria-hidden="true"
+                  />
+                  {compactTokenCount(segment.tokens)}
+                </span>
+              </td>
+              <td className="py-1 text-end">{segmentOdds(segments, index)}</td>
+            </tr>
+          );
+        })}
+      </tbody>
+    </table>
+  );
+}
+
+type SlotProps = { id?: string; className?: string; children?: ReactNode };
 
 export type QualitySpinDialogProps = {
   quality: AccountQuality;
@@ -112,13 +156,24 @@ export type QualitySpinDialogProps = {
   spin?: (input: { idempotencyKey: string }) => Promise<QualitySpinOutcome>;
 };
 
+export type QualitySpinPanelProps = QualitySpinDialogProps & {
+  /** The dialog's title and description parts; plain elements outside a dialog (tests). */
+  Title?: ComponentType<SlotProps>;
+  Description?: ComponentType<SlotProps>;
+};
+
+const PlainTitle = (props: SlotProps) => <h2 id={props.id} className={cn("font-heading text-base leading-none font-medium", props.className)}>{props.children}</h2>;
+const PlainDescription = (props: SlotProps) => <p className={cn("text-sm text-muted-foreground", props.className)}>{props.children}</p>;
+
 /**
- * The spin dialog: the wheel, the prizes with their odds, and the result.
- * The server picks the segment; the wheel animates to it, then the prize
- * counts up and the profile is read again.
+ * The spin dialog's content: the wheel, the prizes with their odds, and the
+ * result. The server picks the segment; the wheel animates to it, then the
+ * prize counts up and the profile is read again.
  */
-export function QualitySpinDialog(props: QualitySpinDialogProps) {
-  const { quality, onClose } = props;
+export function QualitySpinPanel(props: QualitySpinPanelProps) {
+  const { quality } = props;
+  const Title = props.Title ?? PlainTitle;
+  const Description = props.Description ?? PlainDescription;
   const reducedMotion = usePrefersReducedMotion();
   const [segments, setSegments] = useState<WheelSegment[]>(DEFAULT_WHEEL_SEGMENTS);
   const [expectedTokens, setExpectedTokens] = useState<number | null>(null);
@@ -133,9 +188,8 @@ export function QualitySpinDialog(props: QualitySpinDialogProps) {
   const spinsLeft = result ? result.spinsAvailable : quality.spinsAvailable;
   const count = useCountUp(result?.prizeTokens ?? 0, phase === "result", reducedMotion);
   const prize = count.shown;
-  // The final state (payout, chips, Spin again) waits for the count-up to land on the server's prize.
+  // The final state (payout, Spin again) waits for the count-up to land on the server's prize.
   const settled = phase === "result" && count.done;
-  const closeRef = useRef<HTMLButtonElement | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -153,15 +207,6 @@ export function QualitySpinDialog(props: QualitySpinDialogProps) {
       .catch(() => undefined);
     return () => { active = false; };
   }, []);
-
-  useEffect(() => {
-    closeRef.current?.focus();
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
 
   const runSpin = useCallback(async () => {
     if (phase === "requesting" || phase === "spinning") return;
@@ -210,180 +255,131 @@ export function QualitySpinDialog(props: QualitySpinDialogProps) {
   // waiting). From the answer on: the wheel the server actually used.
   const nextIsReplayReady = !result && quality.clientSpinsAvailable > 0 && clientSegments.length > 0;
   const shownSegments = result ? segments : nextIsReplayReady ? clientSegments : segments;
-  const goldHeader = result ? (result.clientGrade ? "★ replay-ready wheel" : null) : nextIsReplayReady ? "★ replay-ready wheel (next spin)" : null;
+  const replayWheel = result ? (result.clientGrade ? "Replay-ready ★ wheel" : null) : nextIsReplayReady ? "Replay-ready ★ wheel (next spin)" : null;
+  const resultLine = result
+    ? [
+        result.preview || result.capped ? spinPayoutText(result) : result.potBalance !== null ? `Pot: ${compactTokenCount(result.potBalance)} tokens` : "Added to your pot",
+        `${spinsLeft} spin${spinsLeft === 1 ? "" : "s"} left`,
+        result.alreadySpun ? "already counted" : null,
+      ].filter(Boolean).join(" · ")
+    : "";
 
   return (
-    <div className="fixed inset-0 z-[76] flex items-center justify-center bg-black/70 p-4 backdrop-blur-sm" data-testid="quality-spin-overlay">
-      <section
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="quality-spin-title"
-        data-testid="quality-spin-dialog"
-        data-phase={phase}
-        className="relative w-full max-w-[520px] overflow-hidden rounded-[28px] border border-white/10 bg-[radial-gradient(ellipse_at_top,#1a2e05_0%,#0b1120_45%,#05070c_100%)] p-6 text-white shadow-2xl shadow-black/60"
-      >
-        {goldHeader ? (
-          <div
-            data-testid="quality-client-grade-header"
-            className="-mx-6 -mt-6 mb-4 bg-gradient-to-r from-amber-500/30 via-amber-300/25 to-amber-500/30 px-6 py-2 text-center text-xs font-bold uppercase tracking-[0.24em] text-amber-200"
-          >
-            {goldHeader}
-          </div>
-        ) : null}
-        <div className="flex items-start justify-between gap-3">
-          <div className="min-w-0">
-            <div className="flex items-center gap-2">
-              <QualityTierBadge quality={quality} />
-              <span className="text-[11px] text-white/50">
-                {spinsLeft} spin{spinsLeft === 1 ? "" : "s"} ready
-                {!result && quality.clientSpinsAvailable > 0 ? (
-                  <span className="ms-1 font-semibold text-amber-200" data-testid="quality-dialog-client-spins">· ★{quality.clientSpinsAvailable} replay-ready</span>
-                ) : null}
-              </span>
-            </div>
-            <h2 id="quality-spin-title" className="mt-2 text-2xl font-semibold tracking-[-0.02em]">
-              Spin for tokens
-            </h2>
-          </div>
-          <div className="flex items-center gap-1">
-            <button
-              type="button"
-              onClick={toggleSound}
-              aria-pressed={soundEnabled}
-              aria-label={soundEnabled ? "Turn sound off" : "Turn sound on"}
-              data-testid="quality-sound-toggle"
-              className="flex size-8 items-center justify-center rounded-full text-white/60 transition hover:bg-white/10 hover:text-white"
-            >
-              {soundEnabled ? <Volume2 className="size-4" /> : <VolumeX className="size-4" />}
-            </button>
-            <button
-              ref={closeRef}
-              type="button"
-              onClick={onClose}
-              aria-label="Close"
-              className="flex size-8 items-center justify-center rounded-full text-white/60 transition hover:bg-white/10 hover:text-white"
-            >
-              <X className="size-4" />
-            </button>
-          </div>
+    <>
+      <div className="flex flex-col gap-1.5 pe-20">
+        <div className="flex min-w-0 items-center gap-2">
+          <Title id="quality-spin-title">Spin for tokens</Title>
+          <QualityTierBadge quality={quality} />
         </div>
-
-        <div className="mt-3 flex flex-wrap items-center gap-2">
-          <BiggestWinTicker quality={quality} />
-          <StreakLine quality={quality} />
-        </div>
-
-        <div className="relative mt-4">
-          <QualityWheel
-            segments={shownSegments}
-            targetIndex={result ? result.segmentIndex : null}
-            spinId={spinId}
-            onDone={landed}
-            celebrate={celebrate}
-            nearMiss={result?.nearMiss ?? false}
-            soundEnabled={soundEnabled}
-            reducedMotion={reducedMotion}
-            jackpotTokens={result?.jackpotTokens ?? jackpotTokens}
-            size={300}
-          />
-        </div>
-
-        <div className="mt-3 flex flex-wrap justify-center gap-1.5" data-testid="quality-wheel-legend">
-          {shownSegments.map((segment, index) => (
-            <span
-              key={index}
-              className={cn(
-                "rounded-full border px-2 py-0.5 text-[10.5px] tabular-nums",
-                result && settled && index === result.segmentIndex
-                  ? "border-[#a3e635] bg-[#a3e635]/20 text-[#ecfccb]"
-                  : "border-white/10 text-white/55",
-              )}
-            >
-              {compactTokenCount(segment.tokens)} · {segmentOdds(shownSegments, index)}
-            </span>
-          ))}
-        </div>
-
-        <div className="mt-4 min-h-[92px] text-center" aria-live="polite">
-          {phase === "result" && result ? (
-            <div data-testid="quality-spin-result" data-celebrate={celebrate}>
-              <div
-                className={cn(
-                  "font-semibold tabular-nums tracking-[-0.03em]",
-                  celebrate === "jackpot" ? "text-5xl text-amber-200" : celebrate === "big" ? "text-5xl text-[#d9f99d]" : "text-4xl text-white",
-                )}
-                data-testid="quality-spin-prize"
-              >
-                {prize.toLocaleString("en-US")}
-                <span className="ms-2 text-base font-medium text-white/60">tokens</span>
-              </div>
-              {celebrate === "jackpot" ? (
-                <div className="mt-1 text-sm font-semibold uppercase tracking-[0.3em] text-amber-300">Jackpot</div>
-              ) : null}
-              {settled ? (
-              <>
-              <div className={cn("mt-1 text-sm", result.preview || result.capped ? "text-amber-200" : "text-[#bef264]")} data-testid="quality-spin-payout">
-                {spinPayoutText(result)}
-              </div>
-              <div className="mt-2 flex flex-wrap items-center justify-center gap-2 text-[11px]">
-                {result.clientGrade ? (
-                  <span className="inline-flex items-center gap-1 rounded-full border border-amber-300/50 bg-amber-300/15 px-2 py-0.5 font-semibold text-amber-200">
-                    {REPLAY_READY_LABEL}
-                  </span>
-                ) : result.reproducible ? (
-                  <span className="inline-flex items-center gap-1 rounded-full border border-[#a3e635]/40 bg-[#a3e635]/10 px-2 py-0.5 text-[#d9f99d]">
-                    <Sparkles className="size-3" aria-hidden="true" /> reproducible ✓
-                  </span>
-                ) : null}
-                {result.alreadySpun ? <span className="text-white/50">This spin was already counted.</span> : null}
-                {result.potBalance !== null && !result.preview ? (
-                  <span className="text-white/50">Pot: {compactTokenCount(result.potBalance)} tokens</span>
-                ) : null}
-              </div>
-              {tease ? (
-                <div className="mt-2 text-sm font-semibold text-amber-300" data-testid="quality-near-miss">{tease}</div>
-              ) : null}
-              </>
-              ) : null}
-            </div>
-          ) : phase === "error" && error ? (
-            <div className="pt-4 text-sm text-amber-200" data-testid="quality-spin-error">{error}</div>
-          ) : phase === "spinning" ? (
-            <div className="pt-6 text-sm text-white/60">Good luck…</div>
-          ) : resting ? (
-            <div className="pt-4 text-sm text-amber-200">The wheel is resting, back tomorrow.</div>
-          ) : (
-            <div className="pt-4 text-sm text-white/60">
-              {quality.preview ? "Preview: spins show what you would win, and pay 0 tokens." : "The wheel decides. Every prize goes into your pot."}
-              {expectedTokens ? <span className="block text-white/40">Average spin: {compactTokenCount(expectedTokens)} tokens</span> : null}
-              <span className="mt-1 block text-[11px] text-amber-200/70" data-testid="quality-client-grade-note">{CLIENT_GRADE_NOTE}</span>
-            </div>
-          )}
-        </div>
-
-        <div className="mt-2 flex flex-col items-center gap-2">
-          {spinsLeft > 0 || busy ? (
-            <button
-              type="button"
-              onClick={() => void runSpin()}
-              disabled={!canSpin}
-              data-testid="quality-spin-go"
-              className="inline-flex min-w-[200px] items-center justify-center gap-2 rounded-full bg-[#a3e635] px-6 py-3 text-sm font-bold uppercase tracking-[0.12em] text-[#1a2e05] shadow-[0_0_30px_rgba(163,230,53,0.45)] transition hover:bg-[#bef264] disabled:cursor-not-allowed disabled:opacity-60"
-            >
-              {busy ? <Loader2 className="size-4 animate-spin" aria-hidden="true" /> : null}
-              {busy ? "Spinning" : settled ? `Spin again (${spinsLeft} left)` : spinsLeft > 1 ? `Spin (${spinsLeft} ready)` : "Spin"}
-            </button>
-          ) : (
-            <div className="text-xs text-white/50">No spins left. Good sessions earn more.</div>
-          )}
-          {totals && totals.spun > 0 ? (
-            <div className="text-[11px] text-white/40" data-testid="quality-spin-totals">
-              {totals.spun} spin{totals.spun === 1 ? "" : "s"} so far · {compactTokenCount(totals.paidTokens)} tokens won
-            </div>
+        <Description>
+          {spinsLeft} spin{spinsLeft === 1 ? "" : "s"} ready
+          {!result && quality.clientSpinsAvailable > 0 ? (
+            <span data-testid="quality-dialog-client-spins"> · ★{quality.clientSpinsAvailable} replay-ready</span>
           ) : null}
-          {totals ? <RecentSpins spins={totals.recent ?? []} /> : null}
+        </Description>
+      </div>
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon-sm"
+        onClick={toggleSound}
+        aria-pressed={soundEnabled}
+        aria-label={soundEnabled ? "Turn sound off" : "Turn sound on"}
+        title={soundEnabled ? "Sound on" : "Sound off"}
+        data-testid="quality-sound-toggle"
+        className="absolute top-4 inset-e-14 bg-secondary text-muted-foreground"
+      >
+        {soundEnabled ? <Volume2 /> : <VolumeX />}
+      </Button>
+
+      <div className="flex flex-col items-center gap-6 sm:flex-row sm:items-center" data-testid="quality-spin-dialog" data-phase={phase}>
+        <QualityWheel
+          segments={shownSegments}
+          targetIndex={result ? result.segmentIndex : null}
+          spinId={spinId}
+          onDone={landed}
+          celebrate={celebrate}
+          soundEnabled={soundEnabled}
+          reducedMotion={reducedMotion}
+          size={196}
+        />
+        <div className="flex w-full min-w-0 flex-1 flex-col gap-3">
+          {replayWheel ? (
+            <Badge variant="outline" className="h-5 font-normal text-muted-foreground" data-testid="quality-client-grade-header">
+              {replayWheel}
+            </Badge>
+          ) : null}
+          <WheelLegend segments={shownSegments} landedIndex={result && settled ? result.segmentIndex : null} />
+          <div className="flex flex-col gap-0.5">
+            <StreakLine quality={quality} />
+            <BiggestWinTicker quality={quality} />
+          </div>
         </div>
-      </section>
-    </div>
+      </div>
+
+      <div className="flex min-h-14 flex-col justify-center gap-1" aria-live="polite">
+        {phase === "result" && result ? (
+          <div data-testid="quality-spin-result" data-celebrate={celebrate} className="flex flex-col gap-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-xl font-semibold tabular-nums" data-testid="quality-spin-prize" data-value={prize}>
+                +{compactTokenCount(prize)} tokens
+              </span>
+              {settled && celebrate === "jackpot" ? <Badge variant="secondary" className="font-normal">Jackpot</Badge> : null}
+              {settled && result.clientGrade ? (
+                <Badge variant="secondary" className="font-normal text-muted-foreground">{REPLAY_READY_LABEL}</Badge>
+              ) : settled && result.reproducible ? (
+                <Badge variant="secondary" className="font-normal text-muted-foreground">Reproducible</Badge>
+              ) : null}
+            </div>
+            {settled ? (
+              <p className="text-sm text-muted-foreground" data-testid="quality-spin-payout">{resultLine}</p>
+            ) : null}
+            {tease ? <p className="text-xs text-muted-foreground" data-testid="quality-near-miss">{tease}</p> : null}
+          </div>
+        ) : phase === "error" && error ? (
+          <p className="text-sm text-destructive" data-testid="quality-spin-error">{error}</p>
+        ) : phase === "spinning" || phase === "requesting" ? (
+          <p className="text-sm text-muted-foreground">Spinning…</p>
+        ) : resting ? (
+          <p className="text-sm text-muted-foreground">The wheel is resting, back tomorrow.</p>
+        ) : (
+          <>
+            <p className="text-sm text-muted-foreground">
+              {quality.preview ? "Preview: spins show what you would win, and pay 0 tokens." : "The wheel decides. Every prize goes into your pot."}
+              {expectedTokens ? ` Average spin: ${compactTokenCount(expectedTokens)} tokens.` : null}
+            </p>
+            <p className="text-xs text-muted-foreground" data-testid="quality-client-grade-note">{CLIENT_GRADE_NOTE}</p>
+          </>
+        )}
+        {totals ? <RecentSpins spins={totals.recent ?? []} /> : null}
+      </div>
+
+      <DialogFooter className="sm:items-center sm:justify-between">
+        <p className="text-xs text-muted-foreground" data-testid="quality-spin-totals">
+          {totals && totals.spun > 0
+            ? `${totals.spun} spin${totals.spun === 1 ? "" : "s"} so far · ${compactTokenCount(totals.paidTokens)} tokens won`
+            : null}
+        </p>
+        {spinsLeft > 0 || busy ? (
+          <Button type="button" onClick={() => void runSpin()} disabled={!canSpin} data-testid="quality-spin-go">
+            {busy ? <Loader2 className="animate-spin" aria-hidden="true" /> : null}
+            {busy ? "Spinning" : settled ? `Spin again (${spinsLeft} left)` : spinsLeft > 1 ? `Spin (${spinsLeft} ready)` : "Spin"}
+          </Button>
+        ) : (
+          <p className="text-sm text-muted-foreground">No spins left. Good sessions earn more.</p>
+        )}
+      </DialogFooter>
+    </>
+  );
+}
+
+/** The spin dialog: the app's standard dialog around the spin panel. */
+export function QualitySpinDialog(props: QualitySpinDialogProps) {
+  return (
+    <Dialog open onOpenChange={(open) => { if (!open) props.onClose(); }}>
+      <DialogContent className="w-full max-w-lg sm:max-w-lg lg:max-w-lg" data-testid="quality-spin-overlay">
+        <QualitySpinPanel {...props} Title={DialogTitle} Description={DialogDescription} />
+      </DialogContent>
+    </Dialog>
   );
 }
