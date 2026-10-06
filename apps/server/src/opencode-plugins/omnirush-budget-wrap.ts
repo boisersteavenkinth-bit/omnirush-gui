@@ -1,14 +1,21 @@
 /** Automatically finish an account-level quota wrap in the desktop GUI.
  *
  * The backend decides when a grant needs wrapping and publishes a private
- * response header. This plugin waits until the engine reports the session
- * idle, then asks the local engine to compact. The compaction record itself
- * contains the generated handoff summary; no warning or synthetic prompt is
- * written to the session trace.
+ * response header on the model response. The engine sends model requests
+ * through the global fetch, which this plugin wraps to read that header on
+ * requests it marked (`chat.headers`). Once the engine reports the session
+ * idle it asks the engine to compact the session on the model it last ran on.
+ * The compaction record itself contains the generated handoff summary; no
+ * warning or synthetic prompt is written to the session trace.
  */
 const REQUIRED_HEADER = "x-omnirush-wrap-required";
 const WRAP_UP_HEADER = "x-omnirush-wrap-up";
+const SESSION_HEADER = "x-omnirush-session-id";
+type ModelRef = { providerID: string; modelID: string };
 const pending = new Map<string, { inFlight: boolean; announced?: boolean }>();
+/** The model each session last sent a request on (the compaction runs on it). */
+const models = new Map<string, ModelRef>();
+const MAX_TRACKED_SESSIONS = 256;
 type BudgetFetch = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 type BudgetClient = {
   tui?: { showToast?: (input: { query?: { directory?: string }; body: { title: string; message: string; variant: string; duration: number } }) => Promise<unknown> };
@@ -26,13 +33,56 @@ function sessionIDFromEvent(event: unknown): string {
   return typeof properties.sessionID === "string" ? properties.sessionID : "";
 }
 
+function remember<T>(map: Map<string, T>, key: string, value: T): void {
+  map.delete(key);
+  map.set(key, value);
+  while (map.size > MAX_TRACKED_SESSIONS) map.delete(map.keys().next().value as string);
+}
+
+/** Records what a model response says about the session's wrap. */
+function noteBudgetResponse(sessionID: string, headers: Headers): void {
+  if (!sessionID) return;
+  if (headers.get(WRAP_UP_HEADER) === "1") {
+    pending.delete(sessionID);
+    return;
+  }
+  if (headers.get(REQUIRED_HEADER) === "1" && !pending.has(sessionID)) remember(pending, sessionID, { inFlight: false });
+}
+
+let installed = false;
+
+/** Wraps the global fetch once: a marked model request's response headers are read, nothing else changes. */
+function install(): void {
+  if (installed) return;
+  installed = true;
+  const base = globalThis.fetch;
+  const patched = async (input: Parameters<typeof fetch>[0], init?: RequestInit): Promise<Response> => {
+    const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
+    const sessionID = headers.get(SESSION_HEADER)?.trim() ?? "";
+    const response = await base(input, init);
+    if (sessionID) noteBudgetResponse(sessionID, response.headers);
+    return response;
+  };
+  globalThis.fetch = Object.assign(patched, base);
+}
+
+function basicAuthorization(): string {
+  const password = process.env.OPENCODE_SERVER_PASSWORD?.trim() ?? "";
+  if (!password) return "";
+  const username = process.env.OPENCODE_SERVER_USERNAME?.trim() || "opencode";
+  return `Basic ${Buffer.from(`${username}:${password}`).toString("base64")}`;
+}
+
 export const OmniRushBudgetWrap = async (input: {
   directory?: string;
+  /** The engine's own server (the plugin input's `serverUrl`). */
+  serverUrl?: URL | string;
   fetch?: BudgetFetch;
   client?: BudgetClient;
 }) => {
-  const baseUrl = (process.env.OMNIRUSH_ENGINE_ADAPTER_URL?.trim() ?? "").replace(/\/+$/, "");
-  const authorization = process.env.OMNIRUSH_ENGINE_ADAPTER_AUTHORIZATION?.trim() ?? "";
+  install();
+  const baseUrl = String(input.serverUrl ?? "").replace(/\/+$/, "");
+  const authorization = basicAuthorization();
   const fetcher = input.fetch ?? globalThis.fetch;
 
   async function notify(title: string, message: string, variant: "info" | "warning"): Promise<void> {
@@ -63,7 +113,8 @@ export const OmniRushBudgetWrap = async (input: {
 
   async function compact(sessionID: string): Promise<void> {
     const entry = pending.get(sessionID);
-    if (!entry || entry.inFlight || !baseUrl) return;
+    const model = models.get(sessionID);
+    if (!entry || entry.inFlight || !baseUrl || !model) return;
     entry.inFlight = true;
     // Once per wrap: a failed summarize retries on the next idle without
     // showing the toast again.
@@ -81,7 +132,7 @@ export const OmniRushBudgetWrap = async (input: {
             ...(authorization ? { authorization } : {}),
             ...(input.directory ? { "x-opencode-directory": encodeURIComponent(input.directory) } : {}),
           },
-          body: "{}",
+          body: JSON.stringify({ providerID: model.providerID, modelID: model.modelID }),
         },
       );
       if (!response.ok) throw new Error("automatic budget wrap returned " + response.status);
@@ -99,22 +150,12 @@ export const OmniRushBudgetWrap = async (input: {
   }
 
   return {
-    "chat.headers": async (input: { sessionID?: string; model?: { providerID?: string } }, output: { headers: Record<string, string> }) => {
+    "chat.headers": async (input: { sessionID?: string; model?: { providerID?: string; id?: string; modelID?: string } }, output: { headers: Record<string, string> }) => {
       const sessionID = input?.sessionID?.trim() ?? "";
-      if (sessionID && input.model?.providerID === "omnirush") output.headers["x-omnirush-session-id"] = sessionID;
-    },
-    "omnirush.http.response": async (event: { request?: Request; response?: Response }) => {
-      const request = event?.request;
-      const response = event?.response;
-      const sessionID = request?.headers.get("x-omnirush-session-id")?.trim() ?? "";
-      if (!sessionID || !response) return;
-      if (response.headers.get(WRAP_UP_HEADER) === "1") {
-        pending.delete(sessionID);
-        return;
-      }
-      if (response.headers.get(REQUIRED_HEADER) === "1" && !pending.has(sessionID)) {
-        pending.set(sessionID, { inFlight: false });
-      }
+      if (!sessionID || input.model?.providerID !== "omnirush") return;
+      output.headers[SESSION_HEADER] = sessionID;
+      const modelID = input.model.id ?? input.model.modelID;
+      if (modelID) remember(models, sessionID, { providerID: input.model.providerID, modelID });
     },
     event: async ({ event }: { event: unknown }) => {
       if (!record(event) || event.type !== "session.idle") return;
@@ -123,6 +164,7 @@ export const OmniRushBudgetWrap = async (input: {
     },
     dispose: async () => {
       pending.clear();
+      models.clear();
     },
   };
 };

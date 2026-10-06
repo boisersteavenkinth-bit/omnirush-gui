@@ -1,14 +1,14 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 /**
  * Full MCP OAuth flow e2e:
  *
- *   real opencode engine (sidecar binary, started as the app starts it: the
- *   2.x engine behind the 1.x engine adapter, managed-opencode.ts)
+ *   real opencode engine (sidecar binary, started as the app starts it,
+ *   managed-opencode.ts)
  *     -> mock OAuth MCP server (scripts/mock-oauth-mcp-server.mjs)
  *     -> discovery + dynamic client registration + PKCE (S256)
  *     -> authorization redirect ("the browser")
@@ -89,14 +89,9 @@ describeMaybe("mcp oauth flow against mock provider", () => {
     return fetch(url, { ...init, headers });
   }
 
-  /** The OAuth credential the engine stored for the server (2.x keeps it with the server's integration). */
-  async function storedCredentials(): Promise<Array<{ id: string }>> {
-    const servers = (await (await engineFetch("/api/mcp")).json()) as { data: Array<{ name: string; integrationID?: string }> };
-    const integrationID = servers.data.find((server) => server.name === MCP_NAME)?.integrationID;
-    if (!integrationID) return [];
-    const integration = (await (await engineFetch(`/api/integration/${encodeURIComponent(integrationID)}`)).json()) as { data?: { connections?: Array<{ type: string; id: string }> } };
-    return (integration.data?.connections ?? []).filter((connection) => connection.type === "credential");
-  }
+  /** Where the engine keeps MCP OAuth tokens (OmniRush.ai's engine build keeps its data in `<data>/omnirush`). */
+  const authFile = () => join(dataDir, "xdg-data", "omnirush", "mcp-auth.json");
+  type SavedAuth = Record<string, { tokens?: { accessToken?: string; refreshToken?: string } }>;
 
   beforeAll(async () => {
     mockPort = await getFreePort();
@@ -136,8 +131,6 @@ describeMaybe("mcp oauth flow against mock provider", () => {
         XDG_CACHE_HOME: join(dataDir, "xdg-cache"),
         OPENCODE_DISABLE_AUTOUPDATE: "1",
         OPENCODE_DISABLE_MODELS_FETCH: "1",
-        OMNIRUSH_ENGINE_PLUGINS: "0",
-        OMNIRUSH_ENGINE2_CONFIG_DIR: join(dataDir, "engine2"),
       },
     });
     await waitFor(
@@ -220,8 +213,10 @@ describeMaybe("mcp oauth flow against mock provider", () => {
       );
       expect(connected[MCP_NAME].status).toBe("connected");
 
-      // Tokens are persisted for reuse across restarts (a credential of the server's integration).
-      expect((await storedCredentials()).length).toBeGreaterThan(0);
+      // Tokens are persisted for reuse across restarts.
+      expect(existsSync(authFile())).toBe(true);
+      const saved = JSON.parse(readFileSync(authFile(), "utf8")) as SavedAuth;
+      expect(saved[MCP_NAME]?.tokens?.accessToken).toStartWith("mock-access-");
 
       // The mock saw the full, authenticated MCP handshake.
       const log = (await (await fetch(`${mockUrl()}/requests`)).json()) as {
@@ -239,8 +234,10 @@ describeMaybe("mcp oauth flow against mock provider", () => {
   test(
     "engine silently refreshes an expired access token without re-authorization",
     async () => {
-      const before = await storedCredentials();
-      expect(before.length).toBeGreaterThan(0);
+      const before = JSON.parse(readFileSync(authFile(), "utf8")) as SavedAuth;
+      const beforeAccess = before[MCP_NAME]?.tokens?.accessToken;
+      expect(beforeAccess).toStartWith("mock-access-");
+      expect(before[MCP_NAME]?.tokens?.refreshToken).toStartWith("mock-refresh-");
 
       // Only assert on traffic that happens after this point.
       const markLog = (await (await fetch(`${mockUrl()}/requests`)).json()) as { requests: Array<unknown> };
@@ -289,7 +286,10 @@ describeMaybe("mcp oauth flow against mock provider", () => {
       expect(afterMark.some((r) => r.method === "POST" && r.path === "/register")).toBe(false);
 
       // The rotated tokens were persisted for the next restart.
-      expect((await storedCredentials()).length).toBeGreaterThan(0);
+      const after = JSON.parse(readFileSync(authFile(), "utf8")) as SavedAuth;
+      expect(after[MCP_NAME]?.tokens?.accessToken).toStartWith("mock-access-");
+      expect(after[MCP_NAME]?.tokens?.accessToken).not.toBe(beforeAccess);
+      expect(after[MCP_NAME]?.tokens?.refreshToken).not.toBe(before[MCP_NAME]?.tokens?.refreshToken);
     },
     60_000,
   );
@@ -297,6 +297,8 @@ describeMaybe("mcp oauth flow against mock provider", () => {
   test("logout removes stored tokens and drops the connection", async () => {
     const remove = await engineFetch(`/mcp/${MCP_NAME}/auth`, { method: "DELETE" });
     expect(remove.ok).toBe(true);
-    expect(await storedCredentials()).toEqual([]);
+
+    const saved = JSON.parse(readFileSync(authFile(), "utf8")) as Record<string, unknown>;
+    expect(saved[MCP_NAME]).toBeUndefined();
   }, 30_000);
 });

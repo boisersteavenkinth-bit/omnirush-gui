@@ -1,14 +1,11 @@
 /**
- * The 2.x engine's records in the 1.x shapes the app, the session uploader and the
- * uploaded traces are written against.
+ * Sessions the opencode 2.x engine stored, in the 1.x shapes.
  *
- * OmniRush.ai bundles the opencode 2.x engine but keeps talking the 1.x
- * dialect everywhere above the engine: the renderer's SDK client, the
- * server's own engine reads, the turn observer and the trace upload
- * ("omnirush.trace.v1", shared with the CLI and read by the admin
- * converter). This module is the single place where a 2.x session,
- * message, tool call, permission, question, agent, command or catalog entry
- * becomes its 1.x counterpart, field for field:
+ * OmniRush.ai desktop 2.2.0 – 3.x bundled the opencode 2.x engine; the app
+ * now bundles the 1.x engine again (OmniRush.ai's build of 1.18.32), which
+ * cannot read the 2.x session store. engine2/import.ts copies each 2.x
+ * session into the 1.x engine's store once, through `opencode import`; this
+ * module turns the 2.x records into the 1.x records it takes, field for field:
  *
  *   - a 2.x `user` message becomes `{info:{role:"user", agent, model}, parts:[text, file…]}`;
  *   - a 2.x `assistant` message (one model step) becomes `{info:{role:"assistant", parentID,
@@ -17,14 +14,13 @@
  *   - 2.x tool names and inputs take their 1.x names (`shell`→`bash`, `subagent`→`task`,
  *     `path`→`filePath`, `agent`→`subagent_type`, `patch`→`apply_patch`), results become
  *     `output`/`title`/`metadata` with the 1.x metadata keys (`sessionId`, `filediff`, …);
+ *     a tool's result text is kept exactly as the 2.x engine wrote it;
  *   - context-only records (system, instruction, agent/model switches, idle markers) are left out,
  *     as the 1.x engine never listed them.
  *
  * Part ids are derived from the message id and the part's place (`prt_<msg>_r0`, `_t1`,
- * `_c<callID>`, …) so a part read from a message list and the same part built from live events
- * (engine2/events.ts) agree.
+ * `_c<callID>`, …), so importing a session twice writes the same records.
  */
-import { withNativeFields } from "./native.js";
 import { arr, isRecord, num, omitUndefined, promptFileUrl, record, str, unwrap, type JsonRecord } from "./util.js";
 
 export type V1Message = { info: JsonRecord; parts: JsonRecord[] };
@@ -41,14 +37,6 @@ const TOOL_NAMES_V1: Record<string, string> = {
 /** A 2.x tool name in its 1.x spelling. */
 export function v1ToolName(name: string): string {
   return TOOL_NAMES_V1[name] ?? name;
-}
-
-/** A 1.x tool name in its 2.x spelling (permission actions, plugin tool filters). */
-export function v2ToolName(name: string): string {
-  if (name === "bash") return "shell";
-  if (name === "task") return "subagent";
-  if (name === "apply_patch") return "patch";
-  return name;
 }
 
 function parseInput(value: unknown): JsonRecord {
@@ -80,26 +68,6 @@ export function v1ToolInput(name: string, raw: unknown): JsonRecord {
       if (typeof withoutBackground.agent !== "string" || "subagent_type" in withoutBackground) return withoutBackground;
       const { agent, ...rest } = withoutBackground;
       return { subagent_type: agent, ...rest };
-    }
-    default:
-      return input;
-  }
-}
-
-/** A 1.x tool input with the 2.x key names (used where a plugin or the swarm rewrites a call). */
-export function v2ToolInput(name: string, input: JsonRecord): JsonRecord {
-  switch (name) {
-    case "read":
-    case "write":
-    case "edit": {
-      if (typeof input.filePath !== "string" || "path" in input) return input;
-      const { filePath, ...rest } = input;
-      return { path: filePath, ...rest };
-    }
-    case "task": {
-      if (typeof input.subagent_type !== "string" || "agent" in input) return input;
-      const { subagent_type, ...rest } = input;
-      return { agent: subagent_type, ...rest };
     }
     default:
       return input;
@@ -140,8 +108,6 @@ type ToolContext = {
   directory?: string;
   root?: string;
   parentModel?: { providerID: string; modelID: string };
-  /** The child session a sub-agent call's progress named (MessageContext.childSessionOf). */
-  childSessionOf?: (callID: string) => string | undefined;
 };
 
 function v1ToolTitle(name: string, input: JsonRecord, ctx: ToolContext): string {
@@ -349,10 +315,7 @@ export function v1ToolPart(
     return { ...base, state: { status: "pending", input, raw: typeof state.input === "string" ? state.input : JSON.stringify(state.input ?? {}) } };
   }
   const { __title: pluginTitle, ...stored } = record(state, "metadata") ?? {};
-  // The engine's read of a running sub-agent call leaves out its child session (only the
-  // call's progress events name it): the child the progress named, so the card can open it.
-  const child = name === "subagent" && typeof stored.sessionID !== "string" ? ctx.childSessionOf?.(callID) : undefined;
-  const metadata: JsonRecord = child ? { ...stored, sessionID: child } : stored;
+  const metadata: JsonRecord = stored;
   const title = (fallback: string) => (typeof pluginTitle === "string" && pluginTitle ? pluginTitle : fallback);
   if (status === "running") {
     const runningTitle = title(v1ToolTitle(name, rawInput, ctx));
@@ -471,11 +434,6 @@ export type MessageContext = {
   model?: { providerID: string; modelID: string; variant?: string };
   /** Whether the session is a sub-agent's (its first user message then has the 2.x task preamble). */
   child?: boolean;
-  /**
-   * The child session of one of this session's sub-agent calls, as its progress events named it
-   * (EventTranslator.childSessionOf): a read of a running call does not carry it.
-   */
-  childSessionOf?: (callID: string) => string | undefined;
 };
 
 type ModelRef = { providerID: string; modelID: string; variant?: string };
@@ -499,7 +457,7 @@ export function v1AssistantMessage(message: JsonRecord, ctx: MessageContext, par
   const model = modelRef(message.model) ?? ctx.model;
   const agent = str(message, "agent") ?? ctx.agent ?? "build";
   const ids = { messageID: id, sessionID: ctx.sessionID };
-  const toolCtx: ToolContext = { sessionID: ctx.sessionID, directory: ctx.directory, root: ctx.root, parentModel: model, childSessionOf: ctx.childSessionOf };
+  const toolCtx: ToolContext = { sessionID: ctx.sessionID, directory: ctx.directory, root: ctx.root, parentModel: model };
   const tokens = v1Tokens(message.tokens);
   const cost = num(message, "cost") ?? 0;
   const finish = str(message, "finish");
@@ -758,9 +716,7 @@ function v1CompactionMessages(message: JsonRecord, ctx: MessageContext, model: M
 export function v1Messages(messages: unknown[], ctx: MessageContext): V1Message[] {
   const list = messages.filter(isRecord);
   const out: V1Message[] = [];
-  const mappedFrom = new Map<JsonRecord, V1Message[]>();
-  const emit = (message: JsonRecord, mapped: V1Message[]) => {
-    mappedFrom.set(message, mapped);
+  const emit = (_message: JsonRecord, mapped: V1Message[]) => {
     out.push(...mapped);
   };
   let agent = ctx.agent ?? "build";
@@ -833,7 +789,7 @@ export function v1Messages(messages: unknown[], ctx: MessageContext): V1Message[
         return;
     }
   });
-  return withNativeFields(out, list, mappedFrom, ctx.sessionID);
+  return out;
 }
 
 export type SessionShapeOptions = {
@@ -890,239 +846,4 @@ export function v1Session(value: unknown, options: SessionShapeOptions): JsonRec
     permission: parentID ? permissionRules(source.permissions) : undefined,
     revert: revert && str(revert, "messageID") ? omitUndefined({ messageID: str(revert, "messageID"), partID: str(revert, "partID"), snapshot: str(revert, "snapshot") }) : undefined,
   });
-}
-
-/** A 2.x permission request as a 1.x one (`permission` = the 1.x tool/permission name). */
-export function v1PermissionRequest(value: unknown): JsonRecord | null {
-  if (!isRecord(value)) return null;
-  const id = str(value, "id");
-  const sessionID = str(value, "sessionID");
-  const action = str(value, "action");
-  if (!id || !sessionID || !action) return null;
-  const resources = arr(value, "resources").filter((item): item is string => typeof item === "string");
-  const save = arr(value, "save").filter((item): item is string => typeof item === "string");
-  const source = record(value, "source");
-  const messageID = str(source, "messageID");
-  const callID = str(source, "id");
-  return omitUndefined({
-    id,
-    sessionID,
-    permission: v1ToolName(action),
-    patterns: resources,
-    metadata: record(value, "metadata") ?? {},
-    always: save.length > 0 ? save : resources,
-    tool: messageID && callID ? { messageID, callID } : undefined,
-  });
-}
-
-/** A 2.x permission request in the 1.x engine's own `/api` (PermissionV2Request) shape. */
-export function v1PermissionV2Request(value: unknown): JsonRecord | null {
-  if (!isRecord(value)) return null;
-  const id = str(value, "id");
-  const sessionID = str(value, "sessionID");
-  const action = str(value, "action");
-  if (!id || !sessionID || !action) return null;
-  return omitUndefined({
-    id,
-    sessionID,
-    action: v1ToolName(action),
-    resources: arr(value, "resources"),
-    save: isRecord(value) && Array.isArray(value.save) ? value.save : undefined,
-    metadata: record(value, "metadata"),
-    source: record(value, "source") ? omitUndefined({ type: "tool", messageID: str(record(value, "source"), "messageID"), callID: str(record(value, "source"), "id") }) : undefined,
-  });
-}
-
-export type QuestionMapping = { request: JsonRecord; fields: Array<{ key: string; multiple: boolean; options: Array<{ value: string; label: string }> }> };
-
-/** A 2.x form that asks questions (the question tool's form) as a 1.x question request. */
-export function v1QuestionRequest(value: unknown): QuestionMapping | null {
-  if (!isRecord(value)) return null;
-  const id = str(value, "id");
-  const sessionID = str(value, "sessionID");
-  if (!id || !sessionID) return null;
-  const fields = arr(value, "fields").filter(isRecord);
-  if (fields.length === 0) return null;
-  const mapped: QuestionMapping["fields"] = [];
-  const questions: JsonRecord[] = [];
-  for (const field of fields) {
-    const key = str(field, "key") ?? str(field, "id") ?? String(mapped.length);
-    const type = str(field, "type");
-    const options = arr(field, "options").filter(isRecord).map((option) => ({
-      value: str(option, "value") ?? str(option, "label") ?? "",
-      label: str(option, "label") ?? str(option, "value") ?? "",
-      description: str(option, "description") ?? "",
-    }));
-    mapped.push({ key, multiple: type === "multiselect", options });
-    questions.push(omitUndefined({
-      question: str(field, "description") ?? str(field, "title") ?? "",
-      header: str(field, "title") ?? "",
-      options: options.map(({ label, description }) => ({ label, description })),
-      multiple: type === "multiselect" || undefined,
-      custom: field.custom === true || type === "string" || undefined,
-    }));
-  }
-  const source = record(value, "source") ?? record(record(value, "metadata"), "source");
-  const messageID = str(source, "messageID");
-  const callID = str(source, "id") ?? str(source, "callID");
-  return {
-    request: omitUndefined({ id, sessionID, questions, tool: messageID && callID ? { messageID, callID } : undefined }),
-    fields: mapped,
-  };
-}
-
-/** 1.x question answers (labels per question) as a 2.x form answer keyed by field. */
-export function v2FormAnswer(mapping: QuestionMapping["fields"], answers: unknown[]): JsonRecord {
-  const answer: JsonRecord = {};
-  mapping.forEach((field, index) => {
-    const raw = answers[index];
-    const labels = Array.isArray(raw) ? raw.filter((item): item is string => typeof item === "string") : typeof raw === "string" ? [raw] : [];
-    const values = labels.map((label) => field.options.find((option) => option.label === label)?.value ?? label);
-    answer[field.key] = field.multiple ? values : values[0] ?? "";
-  });
-  return answer;
-}
-
-/** A 2.x agent as a 1.x agent record. */
-export function v1Agent(value: unknown): JsonRecord | null {
-  if (!isRecord(value)) return null;
-  const name = str(value, "id") ?? str(value, "name");
-  if (!name) return null;
-  const model = record(value, "model");
-  const request = record(value, "request");
-  const body = record(request, "body") ?? {};
-  const permissions = arr(value, "permissions").filter(isRecord);
-  return omitUndefined({
-    name,
-    description: str(value, "description"),
-    mode: str(value, "mode") ?? "all",
-    native: value.native === true || undefined,
-    hidden: value.hidden === true || undefined,
-    color: str(value, "color"),
-    temperature: typeof body.temperature === "number" ? body.temperature : undefined,
-    topP: typeof body.top_p === "number" ? body.top_p : undefined,
-    permission: permissions.map((rule) => ({ permission: v1ToolName(str(rule, "action") ?? "*"), pattern: str(rule, "resource") ?? "*", action: str(rule, "effect") ?? "ask" })),
-    model: model && str(model, "providerID") ? { providerID: str(model, "providerID"), modelID: str(model, "id") ?? str(model, "model") ?? "" } : undefined,
-    variant: str(model, "variant"),
-    prompt: typeof value.system === "string" ? value.system : undefined,
-    options: {},
-    steps: num(value, "steps"),
-  });
-}
-
-/** A 2.x command as a 1.x command record. */
-export function v1Command(value: unknown): JsonRecord | null {
-  if (!isRecord(value)) return null;
-  const name = str(value, "id") ?? str(value, "name");
-  if (!name) return null;
-  const model = record(value, "model");
-  return omitUndefined({
-    name,
-    description: str(value, "description"),
-    agent: str(value, "agent"),
-    model: model && str(model, "providerID") ? `${str(model, "providerID")}/${str(model, "id") ?? str(model, "model") ?? ""}` : str(value, "model"),
-    source: str(value, "source") === "mcp" ? "mcp" : str(value, "source") === "skill" ? "skill" : "command",
-    template: str(value, "template") ?? "",
-    subtask: value.subagent === true || undefined,
-    hints: Array.isArray(value.hints) ? value.hints : [],
-  });
-}
-
-function modelStatus(value: unknown): string {
-  return value === "alpha" || value === "beta" || value === "deprecated" ? value : "active";
-}
-
-/** A 2.x catalog model as a 1.x provider model. */
-export function v1Model(value: unknown): JsonRecord | null {
-  if (!isRecord(value)) return null;
-  const id = str(value, "id");
-  const providerID = str(value, "providerID");
-  if (!id || !providerID) return null;
-  const capabilities = record(value, "capabilities") ?? {};
-  const input = arr(capabilities, "input").filter((item): item is string => typeof item === "string");
-  const output = arr(capabilities, "output").filter((item): item is string => typeof item === "string");
-  const cost = arr(value, "cost").filter(isRecord);
-  const base = cost.find((tier) => !isRecord(tier.tier)) ?? cost[0];
-  const limit = record(value, "limit") ?? {};
-  const settings = record(value, "settings") ?? {};
-  const variants = arr(value, "variants").filter(isRecord);
-  const compatibility = record(value, "compatibility");
-  const reasoningField = str(compatibility, "reasoningField");
-  return omitUndefined({
-    id,
-    providerID,
-    api: { id: str(value, "modelID") ?? id, url: str(settings, "baseURL") ?? "", npm: str(value, "package") ?? "" },
-    name: str(value, "name") ?? id,
-    family: str(value, "family"),
-    capabilities: {
-      temperature: true,
-      reasoning: variants.length > 0 || Boolean(reasoningField),
-      attachment: input.some((kind) => kind !== "text"),
-      toolcall: capabilities.tools !== false,
-      input: { text: true, audio: input.includes("audio"), image: input.includes("image"), video: input.includes("video"), pdf: input.includes("pdf") },
-      output: { text: true, audio: output.includes("audio"), image: output.includes("image"), video: output.includes("video"), pdf: output.includes("pdf") },
-      interleaved: reasoningField ? { field: reasoningField } : false,
-    },
-    cost: {
-      input: num(base, "input") ?? 0,
-      output: num(base, "output") ?? 0,
-      cache: { read: num(record(base, "cache"), "read") ?? 0, write: num(record(base, "cache"), "write") ?? 0 },
-    },
-    limit: omitUndefined({ context: num(limit, "context") ?? 0, input: num(limit, "input"), output: num(limit, "output") ?? 0 }),
-    status: modelStatus(value.status),
-    options: {},
-    headers: {},
-    release_date: num(record(value, "time"), "released") ? new Date(num(record(value, "time"), "released")!).toISOString().slice(0, 10) : "",
-    variants: Object.fromEntries(variants.map((variant) => [str(variant, "id") ?? "", record(variant, "settings") ?? {}]).filter(([key]) => key)),
-  });
-}
-
-/** The 2.x provider and model catalog as the 1.x `/provider` answer `{all, default, connected}`. */
-export function v1ProviderList(providers: unknown[], models: unknown[], defaults: Record<string, string>): JsonRecord {
-  const byProvider = new Map<string, JsonRecord>();
-  for (const provider of providers) {
-    if (!isRecord(provider)) continue;
-    const id = str(provider, "id");
-    if (!id) continue;
-    byProvider.set(id, {
-      id,
-      name: str(provider, "name") ?? id,
-      source: "config",
-      env: arr(provider, "env").filter((item) => typeof item === "string"),
-      options: {},
-      models: {},
-    });
-  }
-  for (const model of models) {
-    const mapped = v1Model(model);
-    if (!mapped) continue;
-    if (isRecord(model) && model.enabled === false) continue;
-    const providerID = String(mapped.providerID);
-    const provider = byProvider.get(providerID) ?? { id: providerID, name: providerID, source: "config", env: [], options: {}, models: {} };
-    (provider.models as JsonRecord)[String(mapped.id)] = mapped;
-    byProvider.set(providerID, provider);
-  }
-  const all = [...byProvider.values()].filter((provider) => Object.keys(provider.models as JsonRecord).length > 0);
-  return { all, default: defaults, connected: all.map((provider) => provider.id) };
-}
-
-/** A 2.x MCP server entry (`GET /api/mcp`: `{name, status: {status, error?}}`) as the 1.x status map value. */
-export function v1McpStatus(value: unknown): JsonRecord {
-  const nested = record(value, "status");
-  const status = str(nested, "status") ?? str(value, "status") ?? "failed";
-  const error = str(nested, "error") ?? str(value, "error");
-  switch (status) {
-    case "connected":
-      return { status: "connected" };
-    case "disabled":
-      return { status: "disabled" };
-    case "needs_auth":
-      return { status: "needs_auth" };
-    case "needs_client_registration":
-      return { status: "needs_client_registration", error: error ?? "" };
-    case "pending":
-      return { status: "failed", error: "The MCP server is still connecting." };
-    default:
-      return { status: "failed", error: error ?? status };
-  }
 }

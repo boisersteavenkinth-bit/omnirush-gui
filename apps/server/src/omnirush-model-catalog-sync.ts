@@ -10,11 +10,9 @@
  * rewrites it from the new cache (keepOmniRushRuntimeConfigFileFresh), so its
  * `changed` flag may already be spent by the time the sync writes.
  *
- * An engine that re-reads its config while running (the 2.x engine) gets the
- * change live: no restart, no reload, so a turn in flight is never cut off.
- * Only an engine that cannot (1.x) is reloaded, and only once no session
- * runs. The engine pool rewrites the file before a rollover and skips an
- * unchanged fingerprint, so an extra reload costs nothing.
+ * The engine is reloaded only once no session runs, so a turn in flight is
+ * never cut off. The engine pool rewrites the file before a rollover and
+ * skips an unchanged fingerprint, so an extra reload costs nothing.
  *
  * A prompt sent before the first sync has settled waits for it (briefly, see
  * awaitOmniRushModelCatalogSettled): on a fresh profile the engine starts on
@@ -41,12 +39,6 @@ export type OmniRushModelCatalogSyncOptions = {
   config: ServerConfig;
   fetchCatalog: () => Promise<Response>;
   reloadEngine: () => Promise<void>;
-  /**
-   * Applies the change without an engine reload when the engine supports it.
-   * Must run `write` (rewrites the runtime config file) exactly once, and
-   * resolve true only when the engine took the change live.
-   */
-  applyLive?: (write: () => Promise<void>) => Promise<boolean>;
   /** A busy engine defers the reload; unknown activity never blocks it. */
   engineBusy?: () => Promise<boolean>;
   log?: SyncLog;
@@ -173,26 +165,6 @@ export class OmniRushModelCatalogSync {
 
   private async reload(): Promise<void> {
     if (!this.reloadPending || this.stopped) return;
-    const write = async () => {
-      await writeOmniRushRuntimeConfigFile(this.options.config);
-    };
-    if (this.options.applyLive) {
-      try {
-        // Live first: nothing restarts, so it never waits for idle and never
-        // cuts off a run in flight.
-        if (await this.options.applyLive(write)) {
-          this.reloadPending = false;
-          this.options.log?.("info", "omnirush.ai model catalog applied to the running engine");
-          return;
-        }
-      } catch (error) {
-        this.options.log?.("warn", "omnirush.ai model catalog live apply failed; retrying", {
-          error: error instanceof Error ? error.message : "unknown",
-        });
-        this.scheduleReload();
-        return;
-      }
-    }
     if (await this.engineBusy()) {
       this.scheduleReload();
       return;
@@ -200,7 +172,7 @@ export class OmniRushModelCatalogSync {
     try {
       // An engine without a rollover pool reloads in place and reads the file
       // as it stands; the pool rewrites it itself before comparing.
-      if (!this.options.applyLive) await write();
+      await writeOmniRushRuntimeConfigFile(this.options.config);
       await this.options.reloadEngine();
       this.reloadPending = false;
     } catch (error) {
@@ -239,7 +211,6 @@ export function startOmniRushModelCatalogSync(input: {
   config: ServerConfig;
   broker: Pick<OmniRushGatewayBroker, "enabled" | "modelCatalog">;
   reloadEngine: () => Promise<void>;
-  applyLive?: (write: () => Promise<void>) => Promise<boolean>;
   engineBusy?: () => Promise<boolean>;
   log?: SyncLog;
   initialDelayMs?: number;
@@ -252,7 +223,6 @@ export function startOmniRushModelCatalogSync(input: {
     config: input.config,
     fetchCatalog: () => input.broker.modelCatalog(),
     reloadEngine: input.reloadEngine,
-    applyLive: input.applyLive,
     engineBusy: input.engineBusy,
     log: input.log,
     initialDelayMs: input.initialDelayMs,

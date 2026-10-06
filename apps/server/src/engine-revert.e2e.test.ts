@@ -4,12 +4,12 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
-import { createManagedOpencodeServer, type ManagedOpencodeServer } from "../managed-opencode.js";
+import { createManagedOpencodeServer, type ManagedOpencodeServer } from "./managed-opencode.js";
 
 /**
- * Revert, undo revert and a prompt after a revert on the real 2.x engine
- * (the bundled sidecar behind the 1.x adapter) against a mock provider whose
- * turns edit a file in a git project:
+ * Revert, undo revert and a prompt after a revert on the real engine (the
+ * bundled sidecar, started as the app starts it) against a mock provider
+ * whose turns edit a file in a git project:
  *
  *   - revert restores the files to the chosen point and reports the revert
  *     point on the session, keeping the later messages until it is final;
@@ -21,7 +21,7 @@ import { createManagedOpencodeServer, type ManagedOpencodeServer } from "../mana
  * Skipped when the sidecar binary is not present (prepare:sidecar not run).
  */
 
-const repoRoot = resolve(import.meta.dir, "../../../..");
+const repoRoot = resolve(import.meta.dir, "../../..");
 const sidecarDir = join(repoRoot, "apps/desktop/resources/sidecars");
 function findSidecar(): string | null {
   const arch = process.arch === "arm64" ? "aarch64" : "x86_64";
@@ -55,7 +55,7 @@ const callTool = (id: string, name: string, args: object) => sse([
   { index: 0, delta: {}, finish_reason: "tool_calls" },
 ]);
 
-describeMaybe("revert on the 2.x engine (mock provider, real files)", () => {
+describeMaybe("revert on the bundled engine (mock provider, real files)", () => {
   let engine: ManagedOpencodeServer;
   let provider: ReturnType<typeof Bun.serve>;
   let work = "";
@@ -132,7 +132,7 @@ describeMaybe("revert on the 2.x engine (mock provider, real files)", () => {
         const n = Number(/EDIT (\d+)/.exec(text(lastUser?.content))?.[1] ?? "0");
         if (list.at(-1)?.role === "tool") return say(`ok ${n}`);
         const write = body.tools.find((tool) => tool.function.name === "write") ? "write" : body.tools[0]!.function.name;
-        return callTool(`call_${n}_${seen.length}`, write, { path: join(work, "a.txt"), content: `v${n}\n` });
+        return callTool(`call_${n}_${seen.length}`, write, { filePath: join(work, "a.txt"), content: `v${n}\n` });
       },
     });
     const base = `http://127.0.0.1:${provider.port}`;
@@ -150,7 +150,6 @@ describeMaybe("revert on the 2.x engine (mock provider, real files)", () => {
       env: {
         OPENCODE_CONFIG: configPath,
         OPENCODE_DISABLE_MODELS_FETCH: "1",
-        OMNIRUSH_ENGINE2_CONFIG_DIR: join(data, "engine2"),
         OMNIRUSH_SERVER_URL: base,
         OMNIRUSH_POLICY_TOKEN: "policy",
         OMNIRUSH_SERVER_TOKEN: "server",

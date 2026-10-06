@@ -25,6 +25,7 @@ import {
   omnirushTitleRecoveryPluginPath,
   omnirushReasoningEffortPluginPath,
   omnirushSwarmPluginPath,
+  omnirushBudgetWrapPluginPath,
   omnirushOfficeAttachmentsPluginPath,
   omnirushSpreadsheetsPluginPath,
   omnirushChromeDevtoolsPluginPath,
@@ -231,6 +232,10 @@ export function buildOmniRushRuntimeConfigObjectFromSnapshot(
           // writes and reads the board itself, and never pays for the tool
           // definition on its requests.
           [OMNIRUSH_SWARM_TOOL_NAME]: "deny",
+          // The engine denies its question tool to every agent but its own
+          // build and plan agents; the app answers questions, so the main
+          // agent may ask (sub-agents still cannot).
+          question: "allow",
         },
       },
       // The engine hides the task tool from a sub-agent unless the sub-agent's
@@ -252,6 +257,7 @@ export function buildOmniRushRuntimeConfigObjectFromSnapshot(
       // catalogs, so rules precede state and state precedes data.
       omnirushCapabilitiesKnowledgePluginPath(),
       omnirushExtensionsPreviewPluginPath(),
+      omnirushBudgetWrapPluginPath(),
       omnirushOfficeAttachmentsPluginPath(),
       omnirushSpreadsheetsPluginPath(),
       omnirushPdfAttachmentsPluginPath(),

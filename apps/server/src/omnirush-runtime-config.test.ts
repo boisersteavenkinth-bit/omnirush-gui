@@ -36,7 +36,6 @@ import {
 import { gitWorkflowPermissionRules } from "./git-command-policy.js";
 import { OMNIRUSH_AGENT_PROMPT } from "./omnirush-agent-prompt.js";
 import { BestPracticesEngineReloads, OMNIRUSH_BEST_PRACTICES, omnirushBestPracticesSkillsDir, waitForBestPracticesReady } from "./best-practices.js";
-import { buildEngine2Config } from "./engine2/config.js";
 import type { ServerConfig } from "./types.js";
 
 const roots: string[] = [];
@@ -328,7 +327,7 @@ describe("omnirush runtime config file", () => {
     expect(prompt).toContain("## OmniRush.ai Artifacts");
     expect(prompt).toContain("## Connected work");
     expect(prompt).toContain("Split real work: for a task of more than a few tool calls, start one sub-agent per independent part in one message");
-    expect(prompt).toContain("make exactly that many subagent calls, no more and no fewer, and start them all in one message");
+    expect(prompt).toContain("make exactly that many task-tool calls, no more and no fewer, and start them all in one message");
     expect(prompt).toContain("Never paste the user's whole message, or the user's instructions about sub-agents, into a sub-agent's prompt");
     expect(prompt).toContain("Never replace an explicit delegation request with a simulated multi-role answer");
     expect(prompt).toContain("Wait for every delegated task");
@@ -438,14 +437,12 @@ describe("omnirush runtime config file", () => {
     for (const skill of OMNIRUSH_BEST_PRACTICES.skills) {
       expect(await readFile(join(bestDir, skill.name, "SKILL.md"), "utf8")).toBe(skill.content);
     }
-    expect(buildEngine2Config({ v1: on })).toMatchObject({ skills: [swarmDir, bestDir], agents: { omnirush: { system: prompt } } });
 
     await writeGlobalRuntimeOpencodeConfig(config, (current) => ({ ...current, bestPractices: false }));
     await writeOmniRushRuntimeConfigFile(config);
     const off = await readConfigFile(config);
     expect(off).toMatchObject({ skills: { paths: [swarmDir] }, agent: { omnirush: { prompt: OMNIRUSH_AGENT_PROMPT } } });
     expect(off.bestPractices).toBeUndefined();
-    expect(buildEngine2Config({ v1: off })).toMatchObject({ skills: [swarmDir], agents: { omnirush: { system: OMNIRUSH_AGENT_PROMPT } } });
     // A fresh config object, as on startup, still reads the local persisted choice.
     expect(JSON.parse(await buildOmniRushRuntimeConfig({ ...config }))).toEqual(off);
     expect(await readFile(join(swarmDir, OMNIRUSH_SWARM_SKILL_NAME, "SKILL.md"), "utf8")).toBe(omnirushSwarmSkillMarkdown());

@@ -102,7 +102,7 @@ describeMaybe("authorization-required MCP tool error pass-through", () => {
   let modelRequests: Array<{ hasToolError: boolean; toolNames: Array<string | undefined> }> = [];
   let engineLogs = "";
 
-  // The engine as the app runs it: the bundled 2.x engine behind the 1.x engine adapter.
+  // The engine as the app runs it (managed-opencode.ts).
   const engineFetch = (path: string, init?: RequestInit) => {
     const url = new URL(`${engine.url}${path}`);
     url.searchParams.set("directory", workspace);
@@ -226,8 +226,6 @@ describeMaybe("authorization-required MCP tool error pass-through", () => {
         OPENCODE_CONFIG: configPath,
         OPENCODE_DISABLE_AUTOUPDATE: "1",
         OPENCODE_DISABLE_MODELS_FETCH: "1",
-        OMNIRUSH_ENGINE_PLUGINS: "0",
-        OMNIRUSH_ENGINE2_CONFIG_DIR: join(dataDir, "engine2"),
         XDG_DATA_HOME: join(dataDir, "data"),
         XDG_CONFIG_HOME: join(dataDir, "config"),
         XDG_STATE_HOME: join(dataDir, "state"),
