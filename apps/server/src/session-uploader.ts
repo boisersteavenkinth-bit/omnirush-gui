@@ -27,6 +27,7 @@ import { writeFileAtomic } from "./atomic-write.js";
 import { XCODE_CLT_MISSING, gitSkipReason } from "./command-guard.js";
 import { ExcludedFiles, listGitIgnored, type HashCache } from "./excluded-files.js";
 import { ToolchainCache, type CollectOptions as ToolchainOptions, type UploadToolchain } from "./toolchain.js";
+import { engine2ImportedFrom } from "./engine2/imported.js";
 import { ContextCapture, captureContextEnabled, type ContextOptions } from "./context/index.js";
 import bundledBestPractices from "./bundled-best-practices.json" with { type: "json" };
 
@@ -231,6 +232,11 @@ export type UploadEnvironment = {
   git_version: string | null;
   /** Exact toolchain versions of the session's project (toolchain.ts); absent on older clients. */
   toolchain?: UploadToolchain;
+  /**
+   * A session imported from the opencode 2.x engine's store and continued
+   * here: its earlier turns are the 2.x engine's ("opencode 2.0.18").
+   */
+  imported_from?: string;
 };
 
 type TraceEvent = {
@@ -4453,11 +4459,16 @@ export class SessionUploader {
     return excluded.finish(maxBytes);
   }
 
-  /** The environment block plus the toolchain of the session's project root, when one was captured. */
-  private async sessionEnvironment(root: string, waitMs?: number): Promise<UploadEnvironment> {
+  /**
+   * The environment block plus the toolchain of the session's project root,
+   * when one was captured, and where the session came from when it was
+   * imported from the opencode 2.x engine (engine2/imported.ts).
+   */
+  private async sessionEnvironment(root: string, sessionId: string, waitMs?: number): Promise<UploadEnvironment> {
     const environment = await this.environment();
     const toolchain = this.toolchains ? await this.toolchains.get(root, waitMs).catch(() => null) : null;
-    return toolchain ? { ...environment, toolchain } : environment;
+    const importedFrom = engine2ImportedFrom(sessionId);
+    return { ...environment, ...(toolchain ? { toolchain } : {}), ...(importedFrom ? { imported_from: importedFrom } : {}) };
   }
 
   private negotiatedTraceSchema(force = false): Promise<2 | 3> {
@@ -5764,7 +5775,7 @@ export class SessionUploader {
       const ignoredListing = !(targeted && previous !== null) ? await listGitIgnored(state.root) : null;
       const deniedCount = scan.deniedCount + (ignoredListing ?? []).filter((path) => isUploadPathDenied(path.replace(/\/$/, ""))).length;
       // The last snapshot waits briefly for a collection still running (toolchain.ts).
-      const environment = await this.sessionEnvironment(state.root, type === "end" ? FINAL_TOOLCHAIN_WAIT_MS : undefined);
+      const environment = await this.sessionEnvironment(state.root, state.id, type === "end" ? FINAL_TOOLCHAIN_WAIT_MS : undefined);
       const rootName = workspaceRootName(state.root);
       const touchedPaths = this.touchedPathsForUpload(state);
       const metadata = JSON.stringify({
@@ -5905,8 +5916,15 @@ export class SessionUploader {
     }
   }
 
-  private async uploadTrace(state: SessionState, traceEvents: TraceEvent[]): Promise<void> {
-    if (traceEvents.length === 0) return;
+  private async uploadTrace(state: SessionState, events: TraceEvent[]): Promise<void> {
+    if (events.length === 0) return;
+    // A session imported from the opencode 2.x engine's store says so in each
+    // trace upload (an opaque event type: kept as sent), so a reader can tell
+    // why its earlier turns look like 2.x (engine2/imported.ts).
+    const importedFrom = engine2ImportedFrom(state.id);
+    const traceEvents: TraceEvent[] = importedFrom
+      ? [{ at: events[0]!.at, type: "session.imported", data: { from: importedFrom } }, ...events]
+      : events;
     let schemaVersion = await this.negotiatedTraceSchema();
     let downgraded = false;
     const batches = boundedTraceBatches(state, traceEvents, MAX_TRACE_BYTES);
@@ -5915,7 +5933,7 @@ export class SessionUploader {
           schemaVersion: version,
           extras: {
             workspace: { root_name: workspaceRootName(state.root), git: null, ...(await gitSkippedField()) },
-            environment: await this.sessionEnvironment(state.root),
+            environment: await this.sessionEnvironment(state.root, state.id),
             touched_paths: this.touchedPathsForUpload(state),
             files_scope: "full",
           },

@@ -41,7 +41,7 @@ import { migrateWorkspaceRuntimeConfigToEngineGlobal } from "./runtime-opencode-
 import { migrateLegacyOmniRushUiMcpCommand, type OmniRushUiMcpLaunch } from "./omnirush-ui-mcp-migration.js";
 import { resolveOpencodeModelsEnv } from "./opencode-models-url.js";
 import { assertOpencodeConfigCompat } from "./opencode-config-compat.js";
-import { resolveEngineIdentity } from "./engine2/launch.js";
+import { adoptOpencodeCredentials, startEngine2SessionImport } from "./engine2/import.js";
 import type { ServeResult } from "./serve-node.js";
 import type { CaptureFileUpload, LocalManagedMcpVaultKeyProvider, OmniRushGatewayCredentials, ServerConfig } from "./types.js";
 
@@ -274,26 +274,30 @@ export async function startEmbeddedServer(options: EmbeddedServerOptions): Promi
           return [...new Set([config.port, ...poolPorts, startupPort].filter((port) => port > 0))];
         },
       };
-      // A 1.x engine (1.18.32+) refuses user-owned config files that carry a
-      // V2 `permissions` key: a global file exits the engine at boot, a
-      // workspace file breaks that workspace's instance. Name the file and
+      // The bundled engine (1.18.32+) refuses user-owned config files that
+      // carry a V2 `permissions` key: a global file exits the engine at boot,
+      // a workspace file breaks that workspace's instance. Name the file and
       // the keys here, before the spawn, instead of surfacing an opaque exit.
-      // The bundled 2.x engine reads both spellings, so it needs no check.
-      if ((await resolveEngineIdentity(opencodeBin?.trim() || "opencode", { ...process.env, ...engineEnv })).dialect === "v1") {
-        await duringStartup(() => assertOpencodeConfigCompat({
-          workspaceRoots: config.workspaces
-            .filter((entry) => entry.workspaceType !== "remote")
-            .map((entry) => entry.path),
-          env: { ...process.env, ...engineEnv },
-          logger,
-        }));
-      }
+      await duringStartup(() => assertOpencodeConfigCompat({
+        workspaceRoots: config.workspaces
+          .filter((entry) => entry.workspaceType !== "remote")
+          .map((entry) => entry.path),
+        env: { ...process.env, ...engineEnv },
+        logger,
+      }));
+      adoptOpencodeCredentials({ ...process.env, ...engineEnv }, (level, message, attributes) => logger.log(level, message, attributes));
       managedOpencode = await duringStartup(() => createManagedOpencodeServer({
         bin: opencodeBin,
         cwd,
         excludedPorts: [config.port],
         env: engineEnv,
       }));
+      // Sessions the 2.x engine of OmniRush.ai 2.2.0 – 3.x stored: copied once into this engine's store.
+      void startEngine2SessionImport({
+        bin: opencodeBin?.trim() || "opencode",
+        env: { ...process.env, ...engineEnv },
+        log: (level, message, attributes) => logger.log(level, message, attributes),
+      });
 
       config.opencodeBaseUrl = managedOpencode.url;
       config.opencodeUsername = managedOpencode.username;

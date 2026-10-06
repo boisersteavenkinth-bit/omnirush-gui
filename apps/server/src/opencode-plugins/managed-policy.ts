@@ -18,6 +18,10 @@ export default async function managedPolicy(input?: { directory?: string }) {
     },
     "shell.env": async (_event: { cwd: string }, output: { env: Record<string, string> }) => {
       if (enginePath) output.env.PATH = enginePath;
+      // The engine runs with a data home of its own (engine-data-home.ts);
+      // commands the agent runs get the user's back.
+      const userDataHome = process.env.OMNIRUSH_USER_XDG_DATA_HOME?.trim();
+      if (userDataHome) output.env.XDG_DATA_HOME = userDataHome;
     },
     "chat.params": async (input: { model: { providerID: string; id: string } }) => { await check("model", input.model); },
   };

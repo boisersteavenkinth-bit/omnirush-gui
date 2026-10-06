@@ -11,6 +11,7 @@ on:
     paths:
       - apps/desktop/electron-builder*.yml
       - apps/desktop/scripts/prepare-sidecar.mjs
+      - apps/desktop/scripts/engine-release.json
       - packaging/aur/**
       - scripts/aur/**
       - .github/workflows/release-desktop.yml

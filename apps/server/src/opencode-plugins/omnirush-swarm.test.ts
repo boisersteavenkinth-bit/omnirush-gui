@@ -144,7 +144,7 @@ describe("omnirush swarm plugin", () => {
     expect(await system("ses_grand")).toContain("layer 2 of at most 3");
     const great = await system("ses_great");
     expect(great).toContain("You cannot delegate further");
-    expect(great).not.toContain("Start sub-agents with the subagent tool");
+    expect(great).not.toContain("Start sub-agents with the task tool");
     // Same text on every step (prompt cache).
     expect(await system("ses_child")).toBe(child);
   });

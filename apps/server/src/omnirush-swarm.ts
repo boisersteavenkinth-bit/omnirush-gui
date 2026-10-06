@@ -8,10 +8,9 @@
  * coordinating through one `.omnirush/swarm.md` board. Only a swarm gets a
  * board: the procedure is the on-demand omnirush-swarm skill, and the
  * always-on prompt only says when to load it. The bundled engine (opencode
- * 2.x) counts sub-agent layers from the main session through `parentID` and
- * refuses the subagent tool (the 1.x task tool) at
- * `experimental.subagent_depth`; it has no fan-out limit of its own, so the
- * plugin adds one.
+ * 1.18.32) counts sub-agent layers from the main session through `parentID`
+ * and refuses the task tool at `subagent_depth`; it has no fan-out limit of
+ * its own, so the plugin adds one.
  *
  * Kept dependency-free: the engine plugin bundle imports it.
  */
@@ -151,14 +150,14 @@ Before you start ${OMNIRUSH_SWARM_MIN_AGENTS} or more sub-agents for implementat
 /** The body of the omnirush-swarm skill (without frontmatter). */
 export const OMNIRUSH_SWARM_SKILL = `# Sub-agent swarm
 
-Use this only for a real implementation swarm: ${OMNIRUSH_SWARM_MIN_AGENTS} or more sub-agents working in parallel, or the user asked for a swarm or for ${OMNIRUSH_SWARM_MIN_AGENTS}+ agents. For 1-2 sub-agents, stop here: call the subagent tool directly and do not create or touch a board.
+Use this only for a real implementation swarm: ${OMNIRUSH_SWARM_MIN_AGENTS} or more sub-agents working in parallel, or the user asked for a swarm or for ${OMNIRUSH_SWARM_MIN_AGENTS}+ agents. For 1-2 sub-agents, stop here: call the task tool directly and do not create or touch a board.
 
 The board is \`${OMNIRUSH_SWARM_FILE}\` in the workspace, never a file in the project root. It is a short status board, not a report: every agent re-reads it, so keep it small. omnirush.ai keeps it out of git and clears it when your turn ends. Ignore any \`swarm.md\` in the project root: it is not this swarm's board.
 
 1. Before delegating, create \`${OMNIRUSH_SWARM_FILE}\` (replace it if one exists) with: \`# Goal\` (at most 3 sentences), \`## Tasks\` (a table: id, task, owner, status, result; ids like T1, T2, and T1.1 for a sub-task of T1; status is todo, running, done or blocked; every cell one short line), \`## Findings\` (empty) and \`## Decisions\` (choices every agent must follow, one line each).
-2. Give each sub-agent one task id. Its subagent-tool prompt names the id and only its own part of the work (never the user's whole message or instructions about sub-agents), and says: use the \`${OMNIRUSH_SWARM_TOOL_NAME}\` tool with your task id (it shows your row and the Decisions, and sets your status, one-line result and at most ${OMNIRUSH_SWARM_FINDINGS_PER_TASK} one-line findings); do not read or edit the board file; report back briefly.
+2. Give each sub-agent one task id. Its task-tool prompt names the id and only its own part of the work (never the user's whole message or instructions about sub-agents), and says: use the \`${OMNIRUSH_SWARM_TOOL_NAME}\` tool with your task id (it shows your row and the Decisions, and sets your status, one-line result and at most ${OMNIRUSH_SWARM_FINDINGS_PER_TASK} one-line findings); do not read or edit the board file; report back briefly.
 3. Sub-agents do their own task themselves, even long ones. Split a task further only when the user explicitly asked for nested sub-agents: then its prompt tells that sub-agent to add sub-task rows (T1.1, T1.2) with \`${OMNIRUSH_SWARM_TOOL_NAME}\` and gives the same instructions to its own sub-agents. Sub-agents nest at most ${OMNIRUSH_SUBAGENT_DEPTH} layers deep. Start as many sub-agents as the work needs, and no more.
-4. Launch independent tasks in parallel (several subagent calls in one message); give tasks that edit the same files to one agent.
+4. Launch independent tasks in parallel (several task calls in one message); give tasks that edit the same files to one agent.
 5. When every task is done, read \`${OMNIRUSH_SWARM_FILE}\` once, check the results against the task reports, and answer the user. Do not move, copy or archive the board: omnirush.ai does that when the turn ends. Board cells over ${OMNIRUSH_SWARM_CELL_MAX_CHARS} characters, lines over ${OMNIRUSH_SWARM_LINE_MAX_CHARS} and findings past ${OMNIRUSH_SWARM_FINDINGS_PER_TASK} per task are cut.`;
 
 /** The omnirush-swarm skill's SKILL.md. */
@@ -185,7 +184,7 @@ export function omnirushSubagentNote(depth: number): string {
     `You are a sub-agent (layer ${depth} of at most ${OMNIRUSH_SUBAGENT_DEPTH}). Do your task yourself.`,
     "Instructions about sub-agents that the user wrote (how many agents to use, what to delegate) were meant for the main session, which already carried them out: do not repeat them.",
     depth < OMNIRUSH_SUBAGENT_DEPTH
-      ? "Start sub-agents with the subagent tool only if your task explicitly tells you to implement a part; otherwise do the whole task yourself, even when it is long. Never re-delegate your whole task."
+      ? "Start sub-agents with the task tool only if your task explicitly tells you to implement a part; otherwise do the whole task yourself, even when it is long. Never re-delegate your whole task."
       : "You cannot delegate further: do the work yourself.",
   ].join("\n");
 }
@@ -209,7 +208,7 @@ export function omnirushSwarmSubagentNote(depth: number): string {
 }
 
 /**
- * Appended to the engine's subagent tool (the 1.x task tool) description
+ * Appended to the engine's task tool description
  * (every agent that has the tool, main or sub-agent). The engine's own text
  * asks for detailed prompts and parallel launches; this bounds both.
  */

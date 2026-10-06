@@ -90,14 +90,23 @@ describe("workspace root preparation", () => {
 });
 
 describe("bundled OpenCode runtime", () => {
-  it("pins the 2.x engine release the desktop bundles", async () => {
-    const constantsPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../constants.json");
-    const constants = JSON.parse(await readFile(constantsPath, "utf8"));
+  it("pins the 1.x engine build the CLI bundles", async () => {
+    const here = path.dirname(fileURLToPath(import.meta.url));
+    const constants = JSON.parse(await readFile(path.resolve(here, "../../../constants.json"), "utf8"));
+    const release = JSON.parse(await readFile(path.resolve(here, "../scripts/engine-release.json"), "utf8"));
 
-    // The bundled engine moved from the 1.x line (last pin 1.18.32) to the
-    // 2.x rewrite: 2.0.18 (2026-09-25), published on npm as @opencode/cli.
-    // The server speaks to it through the 1.x engine adapter (engine2/).
-    assert.equal(constants.opencodeVersion, "v2.0.18");
+    // OmniRush.ai's build of opencode 1.18.32 (engine-1.18.32-r2 of
+    // omnirush-ai/omnirush-cli), the engine the CLI ships; the 2.x engine
+    // bundled from 2.2.0 is gone (its sessions are imported, engine2/import.ts).
+    assert.equal(constants.opencodeVersion, "v1.18.32");
+    assert.equal(release.version, "1.18.32");
+    // A public pre-release of this repo, never marked latest: no token needed.
+    assert.equal(release.repo, "omnirush-ai/omnirush-gui");
+    assert.equal(release.tag, "engine-1.18.32-r2");
+    for (const target of ["aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]) {
+      assert.match(release.assets[target].name, /^omnirush-engine-[a-z0-9-]+-1\.18\.32\.tar\.gz$/);
+      assert.match(release.assets[target].sha256, /^[0-9a-f]{64}$/);
+    }
   });
 });
 

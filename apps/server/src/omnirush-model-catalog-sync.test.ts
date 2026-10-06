@@ -264,95 +264,6 @@ describe("omnirush model catalog sync", () => {
   });
 });
 
-describe("omnirush model catalog sync on an engine that re-reads its config (2.x)", () => {
-  test("the catalog is applied live: no reload, no wait for idle, even while a turn runs", async () => {
-    const config = await setup();
-    await writeOmniRushRuntimeConfigFile(config);
-    const live: string[][] = [];
-    let busyChecks = 0;
-    let reloads = 0;
-    const sync = new OmniRushModelCatalogSync({
-      config,
-      fetchCatalog: async () => Response.json(backendCatalogBody()),
-      applyLive: async (write) => {
-        await write();
-        // The engine re-reads the file it was handed: it sees the new models.
-        live.push(await engineModelIds(config));
-        return true;
-      },
-      reloadEngine: async () => { reloads += 1; },
-      engineBusy: async () => {
-        busyChecks += 1;
-        return true;
-      },
-      reloadRetryMs: 10,
-    });
-    cleanups.push(() => sync.stop());
-
-    expect(await sync.run()).toBe("applied");
-    expect(live).toEqual([MUSE_ENGINE_IDS]);
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    expect(reloads).toBe(0);
-    expect(busyChecks).toBe(0);
-    expect(await sync.run()).toBe("unchanged");
-    expect(live).toHaveLength(1);
-  });
-
-  test("an engine that cannot take it live (1.x) still waits for idle and reloads once", async () => {
-    const config = await setup();
-    let busy = true;
-    let writes = 0;
-    const reloads: string[][] = [];
-    const sync = new OmniRushModelCatalogSync({
-      config,
-      fetchCatalog: async () => Response.json(backendCatalogBody()),
-      applyLive: async (write) => {
-        writes += 1;
-        await write();
-        return false;
-      },
-      reloadEngine: async () => { reloads.push(await engineModelIds(config)); },
-      engineBusy: async () => busy,
-      reloadRetryMs: 10,
-    });
-    cleanups.push(() => sync.stop());
-
-    expect(await sync.run()).toBe("applied");
-    await waitFor(() => writes >= 3);
-    expect(reloads).toEqual([]);
-    busy = false;
-    await waitFor(() => reloads.length > 0);
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    expect(reloads).toEqual([MUSE_ENGINE_IDS]);
-  });
-
-  test("a failed live apply is retried and never falls back to a restart", async () => {
-    const config = await setup();
-    let failures = 2;
-    let applied = 0;
-    let reloads = 0;
-    const sync = new OmniRushModelCatalogSync({
-      config,
-      fetchCatalog: async () => Response.json(backendCatalogBody()),
-      applyLive: async (write) => {
-        await write();
-        if (failures-- > 0) throw new Error("engine config write failed");
-        applied += 1;
-        return true;
-      },
-      reloadEngine: async () => { reloads += 1; },
-      reloadRetryMs: 10,
-    });
-    cleanups.push(() => sync.stop());
-
-    expect(await sync.run()).toBe("applied");
-    await waitFor(() => applied > 0);
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    expect(applied).toBe(1);
-    expect(reloads).toBe(0);
-  });
-});
-
 describe("a prompt before the first catalog sync", () => {
   test("starts the first pass at once instead of after the initial delay, and waits for it to land", async () => {
     const config = await setup();
@@ -363,12 +274,9 @@ describe("a prompt before the first catalog sync", () => {
         await new Promise((resolve) => setTimeout(resolve, 30));
         return Response.json(backendCatalogBody());
       },
-      applyLive: async (write) => {
-        await write();
+      reloadEngine: async () => {
         live.push(await engineModelIds(config));
-        return true;
       },
-      reloadEngine: async () => undefined,
       initialDelayMs: 60_000,
       intervalMs: 60_000,
     });
@@ -406,7 +314,6 @@ describe("a prompt before the first catalog sync", () => {
     const handle = startOmniRushModelCatalogSync({
       config,
       broker: { enabled: true, modelCatalog: async () => { fetches += 1; return Response.json(backendCatalogBody()); } },
-      applyLive: async (write) => { await write(); return true; },
       reloadEngine: async () => undefined,
       initialDelayMs: 60_000,
     });

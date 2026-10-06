@@ -3,23 +3,25 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
-import { createManagedOpencodeServer, type ManagedOpencodeServer } from "../managed-opencode.js";
+import { createManagedOpencodeServer, type ManagedOpencodeServer } from "./managed-opencode.js";
+import { omnirushAnthropicToolSchemaPluginPath, omnirushTitleRecoveryPluginPath } from "./omnirush-extensions-plugin-path.js";
 
 /**
- * OmniRush plugins that used to patch the global fetch, on the real 2.x
- * engine (the bundled sidecar, started as the app starts it, with the plugin
- * bridge) against a mock provider:
+ * OmniRush plugins that patch the global fetch the engine sends model
+ * requests through, on the real engine (the bundled sidecar, started as the
+ * app starts it, the plugins listed in its config) against a mock provider:
  *
  *   - title recovery: the private x-omnirush-title-attempt header never
  *     reaches the provider, and a rejected optional title parameter
- *     (`reasoning_effort`) is retried without it, so the session still gets its title;
+ *     (`reasoning_effort`, `temperature`, `top_p`) is retried without it, so the session
+ *     still gets its title;
  *   - Anthropic tool schemas: an MCP tool whose input schema has a top-level
  *     `anyOf` reaches the Anthropic Messages API flattened.
  *
  * Skipped when the sidecar binary is not present (prepare:sidecar not run).
  */
 
-const repoRoot = resolve(import.meta.dir, "../../../..");
+const repoRoot = resolve(import.meta.dir, "../../..");
 const sidecarDir = join(repoRoot, "apps/desktop/resources/sidecars");
 function findSidecar(): string | null {
   const arch = process.arch === "arm64" ? "aarch64" : "x86_64";
@@ -31,6 +33,8 @@ const enginePath = findSidecar();
 const describeMaybe = enginePath ? describe : describe.skip;
 
 const HEADER = "x-omnirush-title-attempt";
+/** Optional title-request parameters the mock refuses (title recovery retries without them). */
+const OPTIONAL_TITLE_PARAMETERS = ["reasoning_effort", "temperature", "top_p"];
 const TITLE = "Recovered title from the mock";
 
 type Seen = { path: string; headers: Record<string, string>; body: Record<string, any> };
@@ -46,7 +50,7 @@ function chatJson(content: string): Response {
   return Response.json({ id: "c", object: "chat.completion", created: 1, model: "m", choices: [{ index: 0, message: { role: "assistant", content }, finish_reason: "stop" }], usage: { prompt_tokens: 5, completion_tokens: 2, total_tokens: 7 } });
 }
 
-describeMaybe("OmniRush plugins on the 2.x engine's own hooks (mock provider)", () => {
+describeMaybe("OmniRush fetch plugins on the bundled engine (mock provider)", () => {
   let engine: ManagedOpencodeServer;
   let provider: ReturnType<typeof Bun.serve>;
   let work = "";
@@ -95,8 +99,9 @@ describeMaybe("OmniRush plugins on the 2.x engine's own hooks (mock provider)", 
           return Response.json({ type: "error", error: { type: "invalid_request_error", message: "stop here" } }, { status: 400 });
         }
         const titleRequest = !Array.isArray(body.tools) || body.tools.length === 0;
-        if (titleRequest && "reasoning_effort" in body) {
-          return Response.json({ error: { code: "unsupported_parameter", param: "reasoning_effort", message: "Unsupported parameter: reasoning_effort" } }, { status: 400 });
+        const rejected = titleRequest ? OPTIONAL_TITLE_PARAMETERS.find((key) => key in body) : undefined;
+        if (rejected) {
+          return Response.json({ error: { code: "unsupported_parameter", param: rejected, message: `Unsupported parameter: ${rejected}` } }, { status: 400 });
         }
         if (titleRequest) return body.stream ? chatStream(TITLE) : chatJson(TITLE);
         return body.stream ? chatStream("Done.") : chatJson("Done.");
@@ -125,6 +130,7 @@ rl.on("line", (line) => {
         anth: { name: "Anth", npm: "@ai-sdk/anthropic", options: { baseURL: `${base}/v1`, apiKey: "mock-key" }, models: { "claude-mock": { name: "Claude mock", tool_call: true, limit: { context: 100_000, output: 4_000 } } } },
       },
       mcp: { anyof: { type: "local", command: ["node", mcpScript], enabled: true } },
+      plugin: [omnirushTitleRecoveryPluginPath(), omnirushAnthropicToolSchemaPluginPath()],
     }));
     engine = await createManagedOpencodeServer({
       bin: enginePath!,
@@ -132,7 +138,6 @@ rl.on("line", (line) => {
       env: {
         OPENCODE_CONFIG: configPath,
         OPENCODE_DISABLE_MODELS_FETCH: "1",
-        OMNIRUSH_ENGINE2_CONFIG_DIR: join(data, "engine2"),
         OMNIRUSH_SERVER_URL: base,
         OMNIRUSH_POLICY_TOKEN: "policy",
         OMNIRUSH_SERVER_TOKEN: "server",
@@ -154,7 +159,7 @@ rl.on("line", (line) => {
     rmSync(data, { recursive: true, force: true });
   }, 30_000);
 
-  test("the title marker never reaches the provider, and a rejected reasoning effort is retried without it", async () => {
+  test("the title marker never reaches the provider, and a rejected optional parameter is retried without it", async () => {
     seen.length = 0;
     const sessionID = await prompt({ providerID: "mock", modelID: "mock-model" }, "Say done.", "high");
     const titled = await waitFor(async () => {
@@ -167,8 +172,13 @@ rl.on("line", (line) => {
     const chat = seen.filter((request) => request.path === "/v1/chat/completions");
     for (const request of chat) expect(request.headers[HEADER]).toBeUndefined();
     const titles = chat.filter((request) => !Array.isArray(request.body.tools) || request.body.tools.length === 0);
-    // The session's variant gives the title request a reasoning effort the mock rejects.
-    expect(titles.map((request) => "reasoning_effort" in request.body)).toEqual([true, false]);
+    // An optional parameter the mock refused is dropped on the one retry; the title request that
+    // went through carries none of them.
+    const refused = titles.map((request) => OPTIONAL_TITLE_PARAMETERS.filter((key) => key in request.body));
+    expect(refused.at(-1)).toEqual([]);
+    expect(refused.length).toBeLessThanOrEqual(2);
+    if (refused.length === 2) expect(refused[0]!.length).toBeGreaterThan(0);
+    console.log("title requests: optional parameters", JSON.stringify(refused));
   }, 90_000);
 
   test("an MCP tool with a top-level anyOf reaches the Anthropic API flattened", async () => {

@@ -13,70 +13,18 @@ runs:
       with:
         version: 11.4.0
 
+    # The engine is OmniRush.ai's build of opencode 1.18.32, on this repo's
+    # public engine pre-release (sha256-pinned in
+    # apps/desktop/scripts/engine-release.json).
     - name: Install OpenCode CLI
       shell: bash
       run: |
         set -euo pipefail
-
-        version="$(node -e "const fs=require('fs'); const parsed=JSON.parse(fs.readFileSync('constants.json','utf8')); process.stdout.write(String(parsed.opencodeVersion||'').trim().replace(/^v/,''));")"
-        version="$(echo "$version" | tr -d '\r\n' | sed 's/^v//')"
-
-        if [ -z "$version" ]; then
-          echo "Unable to resolve OpenCode version from constants.json." >&2
-          exit 1
-        fi
-
-        # The 2.x engine is published per platform on npm (@opencode/cli-<platform>),
-        # not as GitHub release assets.
-        arch="$(uname -m)"
-        case "${RUNNER_OS}" in
-          Linux)
-            if [ "$arch" = "aarch64" ] || [ "$arch" = "arm64" ]; then
-              opencode_pkg="cli-linux-arm64"
-            else
-              opencode_pkg="cli-linux-x64-baseline"
-            fi
-            ;;
-          macOS)
-            if [ "$arch" = "arm64" ]; then
-              opencode_pkg="cli-darwin-arm64"
-            else
-              opencode_pkg="cli-darwin-x64-baseline"
-            fi
-            ;;
-          *)
-            echo "Unsupported OS: ${RUNNER_OS}" >&2
-            exit 1
-            ;;
-        esac
-
-        registry="${OPENCODE_NPM_REGISTRY:-https://registry.npmjs.org}"
-        url="${registry}/@opencode/${opencode_pkg}/-/${opencode_pkg}-${version}.tgz"
-        tmp_dir="$RUNNER_TEMP/opencode"
-        extract_dir="$tmp_dir/extracted"
-        rm -rf "$tmp_dir"
-        mkdir -p "$extract_dir"
-
-        integrity="$(curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 "${registry}/@opencode/${opencode_pkg}/${version}" | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>process.stdout.write(JSON.parse(s).dist.integrity))")"
-        curl -fsSL --retry 5 --retry-all-errors --retry-delay 2 -o "$tmp_dir/opencode.tgz" "$url"
-        actual="sha512-$(openssl dgst -sha512 -binary "$tmp_dir/opencode.tgz" | base64 | tr -d '\n')"
-        if [ "$actual" != "$integrity" ]; then
-          echo "OpenCode package integrity mismatch: expected $integrity, got $actual" >&2
-          exit 1
-        fi
-        tar -xzf "$tmp_dir/opencode.tgz" -C "$extract_dir"
-
-        if [ -f "$extract_dir/package/bin/opencode" ]; then
-          bin_path="$extract_dir/package/bin/opencode"
-        else
-          echo "OpenCode binary not found in package" >&2
-          ls -laR "$extract_dir"
-          exit 1
-        fi
-
+        sidecar_dir="$RUNNER_TEMP/opencode-sidecar"
+        node apps/desktop/scripts/prepare-sidecar.mjs --outdir "$sidecar_dir"
         install_dir="$HOME/.opencode/bin"
         mkdir -p "$install_dir"
-        cp "$bin_path" "$install_dir/opencode"
+        cp "$sidecar_dir/opencode" "$install_dir/opencode"
         chmod 755 "$install_dir/opencode"
         echo "$install_dir" >> "$GITHUB_PATH"
 

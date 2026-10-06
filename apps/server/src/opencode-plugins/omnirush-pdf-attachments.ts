@@ -604,10 +604,9 @@ function stepModel(messages: unknown[]): StepModel | null {
 }
 
 /**
- * The step's model from the hook input. The 2.x engine bridge
- * (omnirush-engine2.ts) passes `{sessionID, model}` there and hands the hook
- * messages whose `info` is only `{id, role}`, so `stepModel` finds nothing in
- * them; the 1.x engine passes an empty input and full message infos.
+ * The step's model from the hook input, when the engine passes
+ * `{sessionID, model}` there; the 1.x engine passes an empty input and full
+ * message infos, which `stepModel` reads.
  */
 function hookModel(input: unknown): StepModel | null {
   if (!isRecord(input) || !isRecord(input.model)) return null;

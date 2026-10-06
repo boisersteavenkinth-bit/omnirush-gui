@@ -202,7 +202,7 @@ import type { ArchiveApiRequestInit } from "./session-archive/upload.js";
 import { runtimeStorageDir } from "./runtime-db.js";
 import pkg from "../package.json" with { type: "json" };
 import constants from "../../../constants.json" with { type: "json" };
-import { BestPracticesEngineReloads, waitForBestPracticesReady } from "./best-practices.js";
+import { BestPracticesEngineReloads } from "./best-practices.js";
 
 export {
   isSupportedWorkspaceTextFilePath,
@@ -1462,19 +1462,10 @@ export async function startServer(config: ServerConfig): Promise<ServeResult> {
 
   engineInstanceReaper.start();
   // The account's model catalog (omnirush-model-catalog-sync.ts): a change
-  // reaches an engine that re-reads its config (2.x) live, with no restart;
-  // any other engine reloads like a cloud provider sync, without stopping a run.
+  // reloads the engine like a cloud provider sync, without stopping a run.
   const modelCatalogSync = startOmniRushModelCatalogSync({
     config,
     broker: gatewayBroker,
-    applyLive: async (write) => {
-      const pool = enginePoolForConfig(config);
-      if (!pool) {
-        await write();
-        return false;
-      }
-      return pool.applyConfigLive(write);
-    },
     reloadEngine: async () => {
       if (config.workspaces.length === 0) return;
       await reloadOpencodeEngine(config, resolveEngineRuntimeWorkspace(config), engineMcpServerState, {
@@ -3616,32 +3607,7 @@ function createRoutes(
     // Return a separate application status so the UI never calls it applied early.
     try {
       const pool = enginePoolForConfig(config);
-      const write = async () => { await writeOmniRushRuntimeConfigFile(config); };
-      if (pool && await pool.applyConfigLive(write)) {
-        const primary = primaryManagedEngineConnection(config);
-        if (!primary) throw new Error("Managed engine is unavailable");
-        const authorization = buildEngineAuthProbeHeader(primary.username, primary.password);
-        const baseUrl = primary.baseUrl.replace(/\/+$/, "");
-        const directories = [...new Set(config.workspaces
-          .filter((workspace) => resolveWorkspaceOpencodeConnection(config, workspace).baseUrl?.trim().replace(/\/+$/, "") === baseUrl)
-          .map(resolveOpencodeDirectory).filter((directory): directory is string => directory !== null))];
-        await waitForBestPracticesReady({
-          config, enabled,
-          read: async (signal) => await Promise.all(directories.map(async (directory) => {
-            const read = async (path: string): Promise<unknown> => {
-              const url = new URL(path, primary.baseUrl);
-              url.searchParams.set("directory", directory);
-              const response = await loopbackFetch(url, { headers: authorization ? { Authorization: authorization } : {}, signal });
-              if (!response.ok) throw new Error("Managed engine metadata is unavailable");
-              return await response.json();
-            };
-            const [agents, skills] = await Promise.all([read("/agent"), read("/skill")]);
-            return { agents, skills };
-          })),
-        });
-        return jsonResponse({ ok: true, enabled, changed: result.changed, engine: { status: "applied" } });
-      }
-      if (!pool) await write();
+      await writeOmniRushRuntimeConfigFile(config);
       const workspaces = config.workspaces.filter((workspace) => resolveWorkspaceOpencodeConnection(config, workspace).baseUrl?.trim());
       const workspace = findManagedEngineWorkspace(workspaces) ?? workspaces[0];
       if (!workspace) {

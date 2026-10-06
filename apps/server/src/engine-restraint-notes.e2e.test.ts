@@ -3,23 +3,24 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
-import { createManagedOpencodeServer, type ManagedOpencodeServer } from "../managed-opencode.js";
-import { OMNIRUSH_AGENT_PROMPT } from "../omnirush-agent-prompt.js";
-import { OMNIRUSH_TASK_TOOL_NOTE, omnirushSubagentNote } from "../omnirush-swarm.js";
+import { createManagedOpencodeServer, type ManagedOpencodeServer } from "./managed-opencode.js";
+import { omnirushSwarmPluginPath } from "./omnirush-extensions-plugin-path.js";
+import { OMNIRUSH_AGENT_PROMPT } from "./omnirush-agent-prompt.js";
+import { OMNIRUSH_TASK_TOOL_NOTE, omnirushSubagentNote } from "./omnirush-swarm.js";
 
 /**
- * omnirush.ai's delegation rules reach the model on the real 2.x engine (the
- * bundled sidecar with the plugin bridge) against a mock provider:
+ * omnirush.ai's delegation rules reach the model on the real engine (the
+ * bundled sidecar with the swarm plugin) against a mock provider:
  *
  *   - the main session's request carries the restraint wording of the agent
- *     prompt and the subagent tool's description ends with omnirush.ai's note,
+ *     prompt and the task tool's description carries omnirush.ai's note once,
  *     and it gets no sub-agent note;
  *   - a sub-agent session's request carries the sub-agent note (system).
  *
  * Skipped when the sidecar binary is not present (prepare:sidecar not run).
  */
 
-const repoRoot = resolve(import.meta.dir, "../../../..");
+const repoRoot = resolve(import.meta.dir, "../../..");
 const sidecarDir = join(repoRoot, "apps/desktop/resources/sidecars");
 function findSidecar(): string | null {
   const arch = process.arch === "arm64" ? "aarch64" : "x86_64";
@@ -56,11 +57,11 @@ function sse(chunks: object[]): Response {
 const say = (content: string) => sse([{ index: 0, delta: { role: "assistant", content } }, { index: 0, delta: {}, finish_reason: "stop" }]);
 const callSubagent = () => sse([
   { index: 0, delta: { role: "assistant", content: "" } },
-  { index: 0, delta: { tool_calls: [{ index: 0, id: "call_sub_1", type: "function", function: { name: "subagent", arguments: JSON.stringify({ agent: "general", description: "Child part", prompt: `${CHILD_MARK}: reply with one word.` }) } }] } },
+  { index: 0, delta: { tool_calls: [{ index: 0, id: "call_sub_1", type: "function", function: { name: "task", arguments: JSON.stringify({ subagent_type: "general", description: "Child part", prompt: `${CHILD_MARK}: reply with one word.` }) } }] } },
   { index: 0, delta: {}, finish_reason: "tool_calls" },
 ]);
 
-describeMaybe("delegation rules on the 2.x engine (mock provider)", () => {
+describeMaybe("delegation rules on the bundled engine (mock provider)", () => {
   let engine: ManagedOpencodeServer;
   let provider: ReturnType<typeof Bun.serve>;
   let work = "";
@@ -111,6 +112,7 @@ describeMaybe("delegation rules on the 2.x engine (mock provider)", () => {
       provider: {
         mock: { name: "Mock", npm: "@ai-sdk/openai-compatible", options: { baseURL: `${base}/v1`, apiKey: "mock-key" }, models: { "mock-model": { name: "Mock", tool_call: true, limit: { context: 100_000, output: 4_000 } } } },
       },
+      plugin: [omnirushSwarmPluginPath()],
     }));
     engine = await createManagedOpencodeServer({
       bin: enginePath!,
@@ -118,7 +120,6 @@ describeMaybe("delegation rules on the 2.x engine (mock provider)", () => {
       env: {
         OPENCODE_CONFIG: configPath,
         OPENCODE_DISABLE_MODELS_FETCH: "1",
-        OMNIRUSH_ENGINE2_CONFIG_DIR: join(data, "engine2"),
         OMNIRUSH_SERVER_URL: base,
         OMNIRUSH_POLICY_TOKEN: "policy",
         OMNIRUSH_SERVER_TOKEN: "server",
@@ -141,7 +142,7 @@ describeMaybe("delegation rules on the 2.x engine (mock provider)", () => {
     rmSync(data, { recursive: true, force: true });
   }, 30_000);
 
-  test("the main request carries the prompt rules and the subagent tool note; the sub-agent's carries the sub-agent note", async () => {
+  test("the main request carries the prompt rules and the task tool note; the sub-agent's carries the sub-agent note", async () => {
     const session = (await (await engineFetch("/session", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" })).json()) as { id: string };
     const sent = await engineFetch(`/session/${session.id}/prompt_async`, {
       method: "POST",
@@ -153,17 +154,17 @@ describeMaybe("delegation rules on the 2.x engine (mock provider)", () => {
     const main = await waitFor(() => seen.find((body) => !isChild(body)), "the main session's request");
     const mainSystem = systemOf(main);
     expect(mainSystem).toContain("Split real work: for a task of more than a few tool calls, start one sub-agent per independent part in one message");
-    expect(mainSystem).toContain("make exactly that many subagent calls, no more and no fewer, and start them all in one message");
+    expect(mainSystem).toContain("make exactly that many task-tool calls, no more and no fewer, and start them all in one message");
     expect(mainSystem).toContain("Tell a sub-agent to start its own sub-agents only when the user explicitly asked for nested sub-agents.");
     expect(mainSystem).not.toContain(SUB_NOTE_MARK);
-    const mainTool = main.tools!.find((tool) => tool.function.name === "subagent");
+    const mainTool = main.tools!.find((tool) => tool.function.name === "task");
     expect(mainTool).toBeDefined();
-    expect(mainTool!.function.description!.endsWith(OMNIRUSH_TASK_TOOL_NOTE)).toBe(true);
+    // Once, after the engine's own text (the engine lists the sub-agents after it).
     expect(mainTool!.function.description!.split(OMNIRUSH_TASK_TOOL_NOTE)).toHaveLength(2);
 
     const child = await waitFor(() => seen.find(isChild), "the sub-agent's request");
     expect(systemOf(child)).toContain(omnirushSubagentNote(1));
-    const childTool = child.tools!.find((tool) => tool.function.name === "subagent");
-    if (childTool) expect(childTool.function.description!.endsWith(OMNIRUSH_TASK_TOOL_NOTE)).toBe(true);
+    const childTool = child.tools!.find((tool) => tool.function.name === "task");
+    if (childTool) expect(childTool.function.description!.split(OMNIRUSH_TASK_TOOL_NOTE)).toHaveLength(2);
   }, 150_000);
 });

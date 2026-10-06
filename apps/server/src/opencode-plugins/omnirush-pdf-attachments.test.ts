@@ -491,9 +491,8 @@ describe("OmniRush.ai PDF attachments plugin", () => {
     });
   }, 30_000);
 
-  test("on the 2.x engine the step's model comes from the hook input, since the bridge's messages carry no model", async () => {
-    // omnirush-engine2.ts messagesForV1 gives each message only {id, role} and
-    // passes {sessionID, model} as the hook input.
+  test("the step's model comes from the hook input when the messages carry no model", async () => {
+    // Messages whose info is only {id, role}, with {sessionID, model} as the hook input.
     await withWorkspace(async (root) => {
       await mkdir(join(root, "docs"), { recursive: true });
       await writeFile(join(root, "docs", "spec.pdf"), buildTestPdf(["Spec page one", "Spec page two"]));
