@@ -292,7 +292,10 @@ const EDIT_TOOLS = new Set([
 const SHELL_TOOLS = new Set(["bash", "shell", "run", "exec", "terminal", "execute", "bash_output"]);
 const PATCH_FILE = /^\*\*\* (?:Add|Update|Delete) File: (.+)$|^\*\*\* Move to: (.+)$/gm;
 
-type ToolCall = { tool: string; input: Record<string, unknown>; state: string; failed: boolean };
+type ToolCall = { tool: string; input: Record<string, unknown>; state: string; failed: boolean; notRun: boolean };
+
+/** A call the engine or the user refused, so nothing ran (bad arguments, an unknown tool, a denied permission). */
+const NOT_RUN = /invalid arguments|no tool named|unknown tool|tool .{0,40}not (found|available)|permission .{0,20}(denied|rejected)|user (rejected|denied|dismissed)/i;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -310,11 +313,13 @@ function toolCalls(message: UIMessage): ToolCall[] {
     if (part.type === "dynamic-tool") tool = str(record.toolName);
     else if (part.type.startsWith("tool-")) tool = part.type.slice(5);
     else continue;
+    const failed = record.state === "output-error";
     calls.push({
       tool: tool.toLowerCase().replace(/^.*[.:]/, ""),
       input: isRecord(record.input) ? record.input : {},
       state: str(record.state),
-      failed: record.state === "output-error",
+      failed,
+      notRun: failed && NOT_RUN.test(str(record.errorText)),
     });
   }
   return calls;
@@ -374,6 +379,7 @@ export function goodSessionChecklist(input: GoodSessionInput): GoodSessionCheckl
   const dbBuilt = calls.some((call) => SHELL_TOOLS.has(call.tool) && DB_SETUP.test(shellCommand(call.input)));
 
   for (const call of calls) {
+    if (call.notRun) continue;
     if (EDIT_TOOLS.has(call.tool)) {
       for (const path of editedPaths(call.input)) {
         if (outsideProject(path, input.workspaceRoot)) {

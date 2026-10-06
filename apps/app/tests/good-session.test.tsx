@@ -144,6 +144,25 @@ describe("the live checklist", () => {
     expect(states(transcript([tool("write", { filePath: "README.md" })])).by.code).toBe("fail");
   });
 
+  test("calls the engine refused never ran: bad arguments, unknown tool, denied permission", () => {
+    const refused = (toolName: string, input: Record<string, unknown>, errorText: string) =>
+      ({ type: "dynamic-tool", toolName, toolCallId: `r${toolName}`, state: "output-error", input, errorText });
+    const messages = transcript([
+      refused("write", { content: "x" }, 'Invalid arguments for tool "write": - path: Missing key'),
+      refused("bash", { command: "npm test" }, 'No tool named "bash" is currently available.'),
+      refused("bash", { command: "cd /etc && make" }, "The user rejected permission to use this specific tool call."),
+    ]);
+    const { by } = states(messages);
+    expect(by.code).toBe("fail");
+    expect(by.ran).toBe("fail");
+    expect(by.project).toBe("pass");
+  });
+
+  test("the v2 engine's shell tool and path key", () => {
+    const { result } = states(transcript([tool("write", { path: "src/a.ts", content: "x" }), tool("shell", { command: "npm test" })]));
+    expect(result.good).toBe(true);
+  });
+
   test("a failing test run still counts as running something", () => {
     expect(states(transcript([tool("bash", { command: "pytest" }, "output-error")])).by.ran).toBe("pass");
   });

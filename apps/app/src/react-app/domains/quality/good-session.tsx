@@ -125,14 +125,14 @@ export function GoodSessionChecklistBar(props: GoodSessionChecklistBarProps) {
   useEffect(() => {
     const previous = wasRunning.current;
     wasRunning.current = { sessionId: props.sessionId, running: props.turnRunning };
-    if (previous.sessionId !== props.sessionId) return;
+    if (previous.sessionId !== props.sessionId || !hasPrompt) return;
     const alreadyNudged = nudgedSessions().includes(props.sessionId);
     if (!shouldNudge({ wasRunning: previous.running, running: props.turnRunning, checklist, alreadyNudged })) return;
     const nudge = goodSessionNudge(checklist);
     if (!nudge) return;
     rememberNudged(props.sessionId);
     toast(nudge.title, { id: `good-session-nudge:${props.sessionId}`, description: nudge.body, duration: 12_000 });
-  }, [checklist, props.sessionId, props.turnRunning]);
+  }, [checklist, hasPrompt, props.sessionId, props.turnRunning]);
 
   if (!hasPrompt) return null;
   return (
