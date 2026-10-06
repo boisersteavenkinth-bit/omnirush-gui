@@ -2,12 +2,56 @@
 // running (`__setTurnRunning`); closing the window or quitting the app while
 // one runs asks first, because a cut-off last turn keeps the session from
 // counting as a Good session ★. "Wait for it" is the default (and Escape);
-// "Quit anyway" goes ahead.
+// "Quit anyway" goes ahead. A second close or quit request, while the dialog
+// is up or after "Wait for it" in the same turn, quits without asking; the
+// guard re-arms when the turn ends. OS shutdown, updater installs and
+// relaunches call `allowQuit()` first and are never asked.
+//
+// `createQuitGuard` is the CLI's and the renderer's state machine
+// (apps/app/src/app/lib/good-session.ts, the CLI's good-session-lib.js).
 
 export const TURN_GUARD_TITLE = "A turn is still running.";
 export const TURN_GUARD_DETAIL = "Quit now and this session won't count as a Good session ★.";
 export const TURN_GUARD_BUTTONS = Object.freeze(["Wait for it", "Quit anyway"]);
-const QUIT_ANYWAY = 1;
+const WAIT = 0;
+
+/**
+ * `request({ running, interactive, hangup })` answers "quit" (go ahead) or
+ * "ask" (show TURN_GUARD_MESSAGE with "Wait for it" / "Quit anyway"). The
+ * first quit request while a turn runs asks; a second one, whatever the
+ * answer, quits. `answer(wait)` takes the user's choice; `turnEnded()`
+ * re-arms the guard for the next turn and says whether the user was waiting.
+ * Headless runs and a closed terminal (hangup) never ask.
+ */
+export function createQuitGuard() {
+  let state = "idle"; // idle | asking | waiting
+  return {
+    get state() {
+      return state;
+    },
+    request({ running = false, interactive = true, hangup = false } = {}) {
+      if (!interactive || hangup || !running) return "quit";
+      if (state === "idle") {
+        state = "asking";
+        return "ask";
+      }
+      return "quit";
+    },
+    answer(wait) {
+      if (state !== "asking") return wait ? "wait" : "quit";
+      if (wait) {
+        state = "waiting";
+        return "wait";
+      }
+      return "quit";
+    },
+    turnEnded() {
+      const was = state;
+      state = "idle";
+      return was === "waiting" || was === "asking";
+    },
+  };
+}
 
 /**
  * @param {{
@@ -17,72 +61,83 @@ const QUIT_ANYWAY = 1;
  * }} deps
  */
 export function createTurnGuard(deps) {
+  const guard = createQuitGuard();
   let turnRunning = false;
-  let quitConfirmed = false;
-  /** @type {Promise<boolean> | null} */
-  let asking = null;
+  let allowed = false;
+  /** @type {AbortController | null} */
+  let open = null;
 
-  async function confirmLeave() {
-    if (!turnRunning || quitConfirmed) return true;
-    // A second close or quit while the dialog is open waits for the same answer.
-    asking ??= deps.showMessageBox(deps.getWindow() ?? null, {
+  function closeDialog() {
+    if (!open) return;
+    const controller = open;
+    open = null;
+    controller.abort();
+  }
+
+  /**
+   * One close or quit request. Returns true when it may go on now; otherwise
+   * it has prevented the event and calls `proceed` once the user picks
+   * "Quit anyway".
+   */
+  function decide(event, proceed) {
+    if (allowed) return true;
+    if (guard.request({ running: turnRunning }) === "quit") {
+      // The second request: it quits, and the open dialog goes with it.
+      closeDialog();
+      return true;
+    }
+    event.preventDefault();
+    const controller = new AbortController();
+    open = controller;
+    void deps.showMessageBox(deps.getWindow() ?? null, {
       type: "warning",
       title: deps.appName ?? "OmniRush.ai",
       message: TURN_GUARD_TITLE,
       detail: TURN_GUARD_DETAIL,
       buttons: [...TURN_GUARD_BUTTONS],
-      defaultId: 0,
-      cancelId: 0,
+      defaultId: WAIT,
+      cancelId: WAIT,
       noLink: true,
+      signal: controller.signal,
     })
-      .then((result) => result.response === QUIT_ANYWAY)
-      .catch(() => true)
-      .finally(() => {
-        asking = null;
+      .then((result) => result.response === WAIT)
+      .catch(() => false)
+      .then((wait) => {
+        // Closed by a second request, which already went ahead.
+        if (controller.signal.aborted) return;
+        open = null;
+        if (guard.answer(wait) === "quit") proceed();
       });
-    return asking;
+    return false;
   }
 
   return {
     setTurnRunning(value) {
-      turnRunning = value === true;
+      const running = value === true;
+      // The turn ended: the next turn asks again. An open dialog stays;
+      // either answer is fine now.
+      if (turnRunning && !running) guard.turnEnded();
+      turnRunning = running;
       return turnRunning;
     },
     isTurnRunning() {
       return turnRunning;
     },
-    /**
-     * `before-quit`: returns true when the quit may go on now. Otherwise it
-     * has prevented the event and quits again (`quit`) once the user picks
-     * "Quit anyway".
-     */
+    /** `before-quit`: true when the quit may go on now; `quit` quits again after "Quit anyway". */
     guardQuit(event, quit) {
-      if (!turnRunning || quitConfirmed) return true;
-      event.preventDefault();
-      void confirmLeave().then((leave) => {
-        if (!leave) return;
-        quitConfirmed = true;
-        quit();
-      });
-      return false;
+      return decide(event, quit);
     },
-    /**
-     * The window's `close`: the same question; "Quit anyway" closes it
-     * (`close`), which quits the app where closing the last window does.
-     */
+    /** The window's `close`: the same question; "Quit anyway" closes it (`close`). */
     guardClose(event, close) {
-      if (!turnRunning || quitConfirmed) return true;
-      event.preventDefault();
-      void confirmLeave().then((leave) => {
-        if (!leave) return;
-        quitConfirmed = true;
-        close();
-      });
-      return false;
+      return decide(event, close);
     },
-    /** A window opened again (macOS keeps the app running): ask next time too. */
-    reset() {
-      quitConfirmed = false;
+    /** OS shutdown or logout, an updater install, a relaunch, a reset: never ask again. */
+    allowQuit() {
+      allowed = true;
+      closeDialog();
+    },
+    get state() {
+      return guard.state;
     },
   };
 }

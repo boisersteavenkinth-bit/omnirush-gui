@@ -492,6 +492,8 @@ export function preventPendingUpdaterInstall(updater) {
 export function registerUpdaterIpc({
   app,
   ipcMain,
+  // Called before the updater quits or restarts the app (the turn guard lets it through).
+  allowQuit = () => {},
   getMainWindow,
   loadAutoUpdater = () => import("electron-updater"),
   manifestChannel = "latest",
@@ -524,6 +526,10 @@ export function registerUpdaterIpc({
   relaunchAppImage = relaunchAppImageAfterExit,
   restartDelayMs = 300,
 }) {
+  const quitApp = () => {
+    allowQuit();
+    app.quit();
+  };
   const feedOptions = updaterFeedOptions({
     manifestChannel,
     alphaFeedUrl,
@@ -713,7 +719,7 @@ export function registerUpdaterIpc({
               // update; quitAndInstall reports a descriptive failure if it is gone.
               console.warn("[updater] error", err);
               // A failed quit-time install must not leave the app running.
-              if (quitInstallInProgress) app.quit();
+              if (quitInstallInProgress) quitApp();
             });
             autoUpdaterInstance.on("update-downloaded", (info) => {
               updateDownloaded = true;
@@ -989,6 +995,7 @@ export function registerUpdaterIpc({
         updater.autoInstallOnAppQuit = true;
         await updater.downloadUpdate();
         installTriggered = true;
+        allowQuit();
         updater.quitAndInstall(false, true);
         return { ok: true, action: "install" };
       } catch (error) {
@@ -1288,7 +1295,7 @@ export function registerUpdaterIpc({
           installTriggered = true;
           void selfInstall(installMode, { relaunch: false })
             .catch((error) => console.warn("[updater] install on quit failed", error?.message ?? error))
-            .finally(() => app.quit());
+            .finally(() => quitApp());
         };
       }
       return () => {
@@ -1296,12 +1303,13 @@ export function registerUpdaterIpc({
         quitInstallInProgress = true;
         // Quit means quit: install silently without relaunching.
         updater.autoRunAppAfterInstall = false;
-        setTimeout(() => app.quit(), quitInstallFallbackMs);
+        setTimeout(() => quitApp(), quitInstallFallbackMs);
         try {
+          allowQuit();
           updater.quitAndInstall(true, false);
         } catch (error) {
           console.warn("[updater] install on quit failed", error?.message ?? error);
-          app.quit();
+          quitApp();
         }
       };
     } catch (error) {
@@ -1390,7 +1398,7 @@ export function registerUpdaterIpc({
       }
       installTriggered = true;
       // Let the renderer show "Restarting…" before the window goes away.
-      setTimeout(() => app.quit(), restartDelayMs);
+      setTimeout(() => quitApp(), restartDelayMs);
       return { ok: true, mode: "in-place" };
     }
     if (installMode === "manual-dmg") {
@@ -1407,7 +1415,7 @@ export function registerUpdaterIpc({
         if (openError) return { ok: false, reason: openError };
         // Let the renderer show its instructions and Finder mount the image
         // before this copy quits; the user replaces it from the DMG.
-        setTimeout(() => app.quit(), quitDelayMs);
+        setTimeout(() => quitApp(), quitDelayMs);
         return { ok: true, mode: "manual-dmg", path: downloadedInstallerPath };
       } catch (error) {
         return { ok: false, reason: String(error?.message ?? error) };
@@ -1418,6 +1426,7 @@ export function registerUpdaterIpc({
       // defaults domain may have been wiped when stale state was cleaned.
       await enableSquirrelDirectContentsWrite();
       installTriggered = true;
+      allowQuit();
       updater.quitAndInstall(false, true);
       return { ok: true, mode: "in-place" };
     } catch (error) {

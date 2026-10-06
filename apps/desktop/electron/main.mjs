@@ -1452,6 +1452,8 @@ const wakeAutomationRunner = (wakeEvent) => {
   }
 };
 powerMonitor.on("resume", () => wakeAutomationRunner("resume"));
+// OS shutdown or logout never waits on the turn guard (a prevented quit would block it).
+powerMonitor.on("shutdown", () => turnGuard.allowQuit());
 powerMonitor.on("unlock-screen", () => wakeAutomationRunner("unlock-screen"));
 
 let runtimeDisposedForQuit = false;
@@ -2138,6 +2140,7 @@ const desktopCommandHandlers = {
         runtimeManager,
         uiControlServer,
         removeWindowsBrandShortcut,
+        allowQuit: () => turnGuard.allowQuit(),
       }, {
         preserveBootstrap: args[0]?.preserveBootstrap !== false,
         input: {
@@ -2566,6 +2569,7 @@ if (isDevMode) {
       // Best effort — never block the relaunch on a flush failure.
     }
     setTimeout(() => {
+      turnGuard.allowQuit();
       app.relaunch();
       // Graceful quit (not app.exit) so before-quit teardown runs and managed
       // sidecars are stopped — a hard exit orphans them and they can hold
@@ -2730,8 +2734,9 @@ async function createMainWindow() {
     flushPendingDeepLinks();
   });
 
+  // Windows logout or shutdown never waits on the turn guard.
+  mainWindow.on("session-end", () => turnGuard.allowQuit());
   // A turn still running: ask before the window goes (turn-guard.mjs).
-  turnGuard.reset();
   mainWindow.on("close", (event) => {
     const win = mainWindow;
     turnGuard.guardClose(event, () => {
@@ -2758,6 +2763,8 @@ async function createMainWindow() {
     },
   });
   mainWindow.webContents.on("render-process-gone", (_event, details) => {
+    // The renderer that said a turn runs is gone; a reload says it again.
+    turnGuard.setTurnRunning(false);
     recoverRendererCrash(details);
   });
 
@@ -2847,6 +2854,7 @@ ipcMain.handle("omnirush:update-gate:refresh", async () => {
   setInterval(readProfile, 30 * 60_000).unref?.();
 }
 ipcMain.handle("omnirush:shell:relaunch", async () => {
+  turnGuard.allowQuit();
   app.relaunch();
   app.quit();
 });
@@ -2934,6 +2942,7 @@ registerMigrationIpc({ app, ipcMain });
 const { ensureAutoUpdater, prepareInstallOnQuit } = registerUpdaterIpc({
   app,
   ipcMain,
+  allowQuit: () => turnGuard.allowQuit(),
   getMainWindow: () => mainWindow,
   // All distributions intentionally share one application identifier, so they also
   // share Squirrel's ShipIt domain. Keep the shared default rather than
