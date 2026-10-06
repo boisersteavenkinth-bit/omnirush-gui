@@ -1353,7 +1353,8 @@ const omnirushAccountStore = createDesktopOmniRushAccountStore({
   // Sign-in, device code, token refresh, profile and sign-out.
   fetchImpl: desktopExternalFetch,
   loadSafeStorage: () => require("electron").safeStorage,
-  // Linux without a usable keyring only; unencrypted at rest, owner-only.
+  // Only while no keyring is usable (none on Linux, or one that refuses to
+  // encrypt); unencrypted at rest, owner-only.
   fallbackFilePath: path.join(app.getPath("userData"), "private-credentials", "omnirush-account.json"),
   onKeyringSealed: recordKeyringSealed("omnirush-account.bin"),
   onClientUpdate: (clientUpdate) => updateGate.signal({ kind: "profile", clientUpdate }),
@@ -1398,7 +1399,8 @@ const runtimeManager = createRuntimeManager({
     : createDesktopVaultKeyProvider({
         filePath: path.join(app.getPath("userData"), "local-managed-mcp-vault-key.bin"),
         loadSafeStorage: () => require("electron").safeStorage,
-        // Linux without a usable keyring only; unencrypted at rest, owner-only.
+        // Only while no keyring is usable (none on Linux, or one that refuses to
+        // encrypt); unencrypted at rest, owner-only.
         fallbackFilePath: path.join(app.getPath("userData"), "private-credentials", "local-managed-mcp-vault-key.json"),
         onKeyringSealed: recordKeyringSealed("local-managed-mcp-vault-key.bin"),
       }),

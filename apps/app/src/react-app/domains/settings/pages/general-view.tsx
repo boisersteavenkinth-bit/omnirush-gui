@@ -297,7 +297,7 @@ export function GeneralSettingsView(props: GeneralSettingsViewProps) {
               </div>
               {account.connected && account.credentialStorage === "file" ? (
                 <div className="mt-0.5 text-[11px] text-dls-secondary" data-testid="account-credential-storage">
-                  Signed in. Your system has no keyring, so the sign-in is kept in a private file on this computer.
+                  Signed in. No system keyring is available, so the sign-in is kept in a private file on this computer.
                 </div>
               ) : null}
               {usage ? (

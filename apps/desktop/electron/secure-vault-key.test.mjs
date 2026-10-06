@@ -201,20 +201,63 @@ describe("desktop managed MCP vault key", () => {
       }
     });
 
+    const REFUSED = "Error while encrypting the text provided to safeStorage.encryptStringAsync.";
+
     for (const platform of /** @type {const} */ (["darwin", "win32"])) {
-      it(`${platform}: unavailable secure storage still fails closed and writes no private file`, async () => {
+      it(`${platform}: unavailable secure storage keeps the key in the private file`, async () => {
         const root = await mkdtemp(path.join(os.tmpdir(), "omnirush-vault-key-"));
         const { filePath, fallbackFilePath } = paths(root);
         try {
-          const provider = createDesktopVaultKeyProvider({
+          const options = {
             filePath,
             fallbackFilePath,
             platform,
             log: quiet,
             loadSafeStorage: () => fakeSafeStorage({ isAsyncEncryptionAvailable: async () => false }),
-          });
-          await assert.rejects(provider(), /secure storage is unavailable/);
+          };
+          const key = await createDesktopVaultKeyProvider(options)();
+          assert.equal(key.byteLength, 32);
+          assert.equal(await exists(fallbackFilePath), true);
+          assert.equal(await exists(filePath), false);
+          assert.deepEqual(await createDesktopVaultKeyProvider(options)(), key);
+        } finally {
+          await rm(root, { recursive: true, force: true });
+        }
+      });
+
+      it(`${platform}: a keyring that refuses to encrypt keeps the key in the private file`, async () => {
+        const root = await mkdtemp(path.join(os.tmpdir(), "omnirush-vault-key-"));
+        const { filePath, fallbackFilePath } = paths(root);
+        const logs = [];
+        try {
+          const refusing = () => fakeSafeStorage({ encryptStringAsync: async () => { throw new Error(REFUSED); } });
+          const options = { filePath, fallbackFilePath, platform, log: (line) => logs.push(line), loadSafeStorage: refusing };
+          const key = await createDesktopVaultKeyProvider(options)();
+          assert.equal(key.byteLength, 32);
+          assert.equal(JSON.parse(await readFile(fallbackFilePath, "utf8")).key, key.toString("base64"));
+          assert.equal(await exists(filePath), false);
+          assert.equal(logs.some((line) => line.includes("could not encrypt")), true);
+          // A later launch whose keyring works again seals the same key and drops the file.
+          const healed = await createDesktopVaultKeyProvider({ ...options, loadSafeStorage: () => fakeSafeStorage() })();
+          assert.deepEqual(healed, key);
           assert.equal(await exists(fallbackFilePath), false);
+          assert.equal(await exists(filePath), true);
+        } finally {
+          await rm(root, { recursive: true, force: true });
+        }
+      });
+
+      it(`${platform}: without a private file path a refusing keyring still fails with its own error`, async () => {
+        const root = await mkdtemp(path.join(os.tmpdir(), "omnirush-vault-key-"));
+        const { filePath } = paths(root);
+        try {
+          const provider = createDesktopVaultKeyProvider({
+            filePath,
+            platform,
+            log: quiet,
+            loadSafeStorage: () => fakeSafeStorage({ encryptStringAsync: async () => { throw new Error(REFUSED); } }),
+          });
+          await assert.rejects(provider(), /safeStorage\.encryptStringAsync/);
           assert.equal(await exists(filePath), false);
         } finally {
           await rm(root, { recursive: true, force: true });

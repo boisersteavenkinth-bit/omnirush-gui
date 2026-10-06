@@ -3,13 +3,15 @@ import { constants } from "node:fs";
 import { chmod, mkdir, open, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-// Linux fallback for systems without a usable keyring (Electron's safeStorage
-// reports the "basic_text" backend or no encryption at all). The secrets kept
-// here are NOT encrypted at rest: they are protected only by owner-only file
-// permissions (0600 file inside a 0700 folder under the app's userData), like
-// an SSH key or a CLI tool's token file. The account store and the vault key
-// provider use these files only on Linux, only while no keyring is reachable,
-// and move their contents into safeStorage once one is.
+// Fallback for systems without a usable keyring: Linux where Electron's
+// safeStorage reports the "basic_text" backend or no encryption at all, and
+// any platform whose keyring refuses to encrypt (a macOS keychain entry the
+// updated app is denied, a DPAPI failure). The secrets kept here are NOT
+// encrypted at rest: they are protected only by owner-only file permissions
+// (0600 file inside a 0700 folder under the app's userData), like an SSH key
+// or a CLI tool's token file. The account store and the vault key provider
+// use these files only while no keyring is usable, and move their contents
+// into safeStorage once one is.
 
 const loggedKinds = new Set();
 
@@ -21,7 +23,7 @@ const loggedKinds = new Set();
 export function logPlaintextCredentialsOnce(kind, log = console.warn) {
   if (loggedKinds.has(kind)) return;
   loggedKinds.add(kind);
-  log(`[omnirush] No system keyring is available: the ${kind} is kept unencrypted at rest in an owner-only (0600) file in the app data folder.`);
+  log(`[omnirush] No usable system keyring: the ${kind} is kept unencrypted at rest in an owner-only (0600) file in the app data folder.`);
 }
 
 /**
@@ -31,10 +33,15 @@ export function logPlaintextCredentialsOnce(kind, log = console.warn) {
  * @param {NodeJS.Platform} platform
  */
 export async function usableSafeStorage(loadSafeStorage, platform) {
-  const storage = loadSafeStorage();
-  if (!storage || !(await storage.isAsyncEncryptionAvailable())) return null;
-  if (platform === "linux" && storage.getSelectedStorageBackend() === "basic_text") return null;
-  return storage;
+  try {
+    const storage = loadSafeStorage();
+    if (!storage || !(await storage.isAsyncEncryptionAvailable())) return null;
+    if (platform === "linux" && storage.getSelectedStorageBackend() === "basic_text") return null;
+    return storage;
+  } catch {
+    // Called before `ready`, or the keyring failed to start: not usable.
+    return null;
+  }
 }
 
 /**
