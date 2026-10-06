@@ -1244,14 +1244,15 @@ test("sign-out deletes the private file and stays signed out", async () => {
 });
 
 for (const platform of /** @type {const} */ (["darwin", "win32"])) {
-  test(`${platform}: unavailable secure storage still refuses to store the sign-in, with no private file`, async () => {
+  test(`${platform}: unavailable secure storage keeps the sign-in in the private file`, async () => {
     const { options } = await fallbackOptions(linuxStorage("unknown", { available: false }), { platform });
     const store = createDesktopOmniRushAccountStore(options);
-    await assert.rejects(store.save(FAKE_CREDENTIALS), /Secure desktop credential storage is unavailable/);
-    assert.equal(await exists(options.fallbackFilePath), false);
-    const status = await store.status();
-    assert.equal(status.connected, false);
-    assert.equal("credentialStorage" in status, false);
+    await store.save(FAKE_CREDENTIALS);
+    assert.equal(await exists(options.fallbackFilePath), true);
+    assert.equal(await exists(options.filePath), false);
+    const status = await createDesktopOmniRushAccountStore(options).status();
+    assert.equal(status.connected, true);
+    assert.equal(status.credentialStorage, "file");
   });
 
   test(`${platform}: available secure storage is used exactly as before`, async () => {
@@ -1263,6 +1264,144 @@ for (const platform of /** @type {const} */ (["darwin", "win32"])) {
     assert.equal("credentialStorage" in await store.status(), false);
   });
 }
+
+// Electron's exact rejection when the encryptor started but the keyring gave
+// it no key (a denied macOS keychain entry after the app's signature changed).
+const ENCRYPT_REFUSED = "Error while encrypting the text provided to safeStorage.encryptStringAsync.";
+
+/** A keyring that reports encryption available, then refuses to encrypt; it counts its attempts. */
+function refusingStorage(backend = "unknown") {
+  const storage = {
+    ...linuxStorage(backend),
+    encryptCalls: 0,
+    encryptStringAsync: async () => {
+      storage.encryptCalls += 1;
+      throw new Error(ENCRYPT_REFUSED);
+    },
+  };
+  return storage;
+}
+
+for (const platform of /** @type {const} */ (["darwin", "win32", "linux"])) {
+  test(`${platform}: a keyring that refuses to encrypt never fails the sign-in`, async () => {
+    const storage = refusingStorage(platform === "linux" ? "gnome_libsecret" : "unknown");
+    const { options, logs } = await fallbackOptions(storage, {
+      platform,
+      fetchImpl: async (url) => {
+        const pathname = new URL(url).pathname;
+        if (pathname.endsWith("/device/authorize")) {
+          return Response.json({ device_code: "code", user_code: "ABCD", verification_uri_complete: "https://omnirush.ai/console?code=ABCD", interval: 0, expires_in: 60 });
+        }
+        if (pathname.endsWith("/device/token")) return Response.json({ gateway_url: FAKE_GATEWAY_URL, access_token: "fake-access", refresh_token: "fake-refresh" });
+        if (pathname.endsWith("/device/me")) return Response.json({ email: "person@example.com", status: "active" });
+        throw new Error(`Unexpected request ${pathname}`);
+      },
+    });
+    const store = createDesktopOmniRushAccountStore(options);
+    const result = await store.authorize({ gatewayUrl: undefined, deviceName: "Test", openVerification: async () => undefined });
+    assert.equal(result.connected, true);
+
+    const saved = JSON.parse(await readFile(options.fallbackFilePath, "utf8"));
+    assert.equal(saved.credentials.refreshToken, "fake-refresh");
+    if (process.platform !== "win32") assert.equal((await stat(options.fallbackFilePath)).mode & 0o777, 0o600);
+    assert.equal(await exists(options.filePath), false);
+    assert.equal(logs.filter((line) => line.includes(ENCRYPT_REFUSED)).length, 1);
+    assert.equal(logs.some((line) => line.includes("fake-access") || line.includes("fake-refresh")), false);
+
+    const status = await store.status();
+    assert.equal(status.connected, true);
+    assert.equal(status.credentialStorage, "file");
+
+    // The keyring is asked once per launch: a rotation saves straight to the file.
+    await store.save({ ...FAKE_CREDENTIALS, refreshToken: "fake-refresh-2", rotation: 1 });
+    assert.equal(storage.encryptCalls, 1);
+    assert.equal(JSON.parse(await readFile(options.fallbackFilePath, "utf8")).credentials.refreshToken, "fake-refresh-2");
+
+    // The next launch, still refused, reads the file and stays signed in.
+    const relaunched = createDesktopOmniRushAccountStore({ ...options, loadSafeStorage: () => refusingStorage() });
+    assert.equal((await relaunched.load())?.refreshToken, "fake-refresh-2");
+    assert.equal(await exists(options.fallbackFilePath), true);
+  });
+}
+
+test("after an update the old keyring copy cannot be decrypted: signed out, then sign-in works", async () => {
+  // Sealed by the previous build's keychain identity.
+  const { options: before } = await fallbackOptions(linuxStorage("unknown"), { platform: "darwin" });
+  await createDesktopOmniRushAccountStore(before).save(FAKE_CREDENTIALS);
+  assert.match(await readFile(before.filePath, "utf8"), /^sealed:/);
+
+  // The updated app: decrypt fails, and encrypt is refused too.
+  const storage = refusingStorage();
+  storage.decryptStringAsync = async () => { throw new Error("Error while decrypting the ciphertext provided to safeStorage.decryptStringAsync."); };
+  const { options, logs } = await fallbackOptions(storage, { platform: "darwin" });
+  Object.assign(options, { filePath: before.filePath, fallbackFilePath: before.fallbackFilePath });
+  const store = createDesktopOmniRushAccountStore(options);
+  const status = await store.status();
+  assert.equal(status.connected, false);
+  assert.equal(status.reauthorizationRequired, true);
+  assert.equal(logs.some((line) => /cannot be decrypted/.test(line)), true);
+
+  await store.save({ ...FAKE_CREDENTIALS, refreshToken: "fake-refresh-new" });
+  assert.equal((await store.status()).connected, true);
+  // The old pair is gone for good: no later launch can read it back.
+  assert.equal(await exists(options.filePath), false);
+  assert.equal(JSON.parse(await readFile(options.fallbackFilePath, "utf8")).credentials.refreshToken, "fake-refresh-new");
+});
+
+test("an undecryptable keyring copy with a working keyring asks to sign in again, and the new sign-in is sealed", async () => {
+  const { options: before } = await fallbackOptions(linuxStorage("unknown"), { platform: "darwin" });
+  await createDesktopOmniRushAccountStore(before).save(FAKE_CREDENTIALS);
+  const storage = linuxStorage("unknown");
+  const original = storage.decryptStringAsync;
+  let rotatedKey = false;
+  storage.decryptStringAsync = async (value) => {
+    if (!rotatedKey) throw new Error("Error while decrypting the ciphertext provided to safeStorage.decryptStringAsync.");
+    return original(value);
+  };
+  const { options } = await fallbackOptions(storage, { platform: "darwin" });
+  Object.assign(options, { filePath: before.filePath, fallbackFilePath: before.fallbackFilePath });
+  const store = createDesktopOmniRushAccountStore(options);
+  const status = await store.status();
+  assert.equal(status.connected, false);
+  assert.equal(status.reauthorizationRequired, true);
+  assert.equal("credentialStorage" in status, false);
+
+  rotatedKey = true;
+  await store.save({ ...FAKE_CREDENTIALS, refreshToken: "fake-refresh-new" });
+  assert.match(await readFile(options.filePath, "utf8"), /^sealed:/);
+  assert.equal(await exists(options.fallbackFilePath), false);
+  assert.equal((await store.status()).connected, true);
+});
+
+test("a keyring that works again on a later launch receives the sign-in from the private file", async () => {
+  const { options } = await fallbackOptions(refusingStorage(), { platform: "darwin" });
+  await createDesktopOmniRushAccountStore(options).save(FAKE_CREDENTIALS);
+  assert.equal(await exists(options.fallbackFilePath), true);
+
+  const logs = [];
+  const healed = createDesktopOmniRushAccountStore({ ...options, loadSafeStorage: () => linuxStorage("unknown"), log: (line) => logs.push(line) });
+  assert.equal((await healed.load())?.refreshToken, "fake-refresh");
+  assert.match(await readFile(options.filePath, "utf8"), /^sealed:/);
+  assert.equal(await exists(options.fallbackFilePath), false);
+  assert.equal(logs.some((line) => /into the system keyring/.test(line)), true);
+});
+
+test("a keyring that throws while reporting availability counts as unusable", async () => {
+  const storage = { ...linuxStorage("unknown"), isAsyncEncryptionAvailable: async () => { throw new Error("safeStorage cannot be used before app is ready"); } };
+  const { options } = await fallbackOptions(storage, { platform: "darwin" });
+  const store = createDesktopOmniRushAccountStore(options);
+  await store.save(FAKE_CREDENTIALS);
+  assert.equal(await exists(options.fallbackFilePath), true);
+  assert.equal((await store.status()).connected, true);
+});
+
+test("without a private file path a refusing keyring still fails the save, naming the cause", async () => {
+  const options = await storeOptions({ platform: "darwin", loadSafeStorage: () => refusingStorage() });
+  await assert.rejects(
+    createDesktopOmniRushAccountStore(options).save(FAKE_CREDENTIALS),
+    /Secure desktop credential storage is unavailable: Error while encrypting/,
+  );
+});
 
 test("Linux basic_text without a fallback path keeps refusing (no silent plaintext)", async () => {
   const options = await storeOptions({ loadSafeStorage: () => linuxStorage("basic_text") });

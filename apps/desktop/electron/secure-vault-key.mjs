@@ -10,6 +10,13 @@ import {
 } from "./plaintext-credential-file.mjs";
 
 const KEY_BYTES = 32;
+
+/** safeStorage.encryptStringAsync rejected although encryption was reported available. */
+class KeyringRefusedError extends Error {
+  constructor(cause) {
+    super("The system keyring refused to encrypt", { cause });
+  }
+}
 const PLAINTEXT_KIND = "MCP credential vault key";
 
 /**
@@ -69,9 +76,10 @@ function decodeKey(encoded) {
  *   fallbackFilePath?: string | null;
  *   onKeyringSealed?: ((backend: string) => unknown) | null;
  *   log?: (message: string) => void;
- * }} options `fallbackFilePath`: Linux only, where the key is kept,
- * unencrypted at rest with owner-only permissions, while no keyring is usable
- * (see plaintext-credential-file.mjs). `onKeyringSealed`: Linux only, told
+ * }} options `fallbackFilePath`: where the key is kept, unencrypted at rest
+ * with owner-only permissions, while no keyring is usable (Linux without a
+ * keyring, or a keyring that refuses to encrypt on any platform; see
+ * plaintext-credential-file.mjs). `onKeyringSealed`: Linux only, told
  * which safeStorage backend sealed the key, so later launches keep that
  * --password-store.
  */
@@ -85,11 +93,11 @@ export function createDesktopVaultKeyProvider({
 }) {
   /** @type {Promise<Buffer> | null} */
   let pending = null;
-  const fileFallback = platform === "linux" && Boolean(fallbackFilePath);
+  const fileFallback = Boolean(fallbackFilePath);
 
   /** @param {import("electron").SafeStorage} safeStorage */
   async function noteKeyringSealed(safeStorage) {
-    if (!fileFallback || !onKeyringSealed) return;
+    if (platform !== "linux" || !fileFallback || !onKeyringSealed) return;
     try {
       await onKeyringSealed(safeStorage.getSelectedStorageBackend());
     } catch {
@@ -120,7 +128,7 @@ export function createDesktopVaultKeyProvider({
   }
 
   /**
-   * Linux without a usable keyring: the key lives in an owner-only file,
+   * No usable keyring: the key lives in an owner-only file,
    * unencrypted at rest. A key sealed by a keyring that is gone cannot be
    * read, so a fresh key is minted and the vault recovers as it does after a
    * keyring change; the sealed blob is left for the keyring's return.
@@ -132,14 +140,45 @@ export function createDesktopVaultKeyProvider({
     const key = randomBytes(KEY_BYTES);
     await writePlaintextCredentialFile(
       fallbackFilePath,
-      `${JSON.stringify({ note: "Unencrypted at rest: this system has no keyring. Owner-only file.", key: key.toString("base64") }, null, 2)}\n`,
+      `${JSON.stringify({ note: "Unencrypted at rest: no usable system keyring. Owner-only file.", key: key.toString("base64") }, null, 2)}\n`,
     );
     return key;
   }
 
+  /**
+   * The key, sealed by the keyring when it can encrypt. A keyring that
+   * refuses (a denied macOS keychain entry, a DPAPI failure) falls back to
+   * the private file when there is one.
+   */
   async function loadKey() {
+    try {
+      return await loadSealedKey();
+    } catch (error) {
+      if (!(error instanceof KeyringRefusedError)) throw error;
+      if (!fileFallback) throw error.cause;
+      const cause = error.cause instanceof Error ? error.cause.message : String(error.cause);
+      log(`[omnirush] The system keyring could not encrypt the MCP credential vault key (${cause}); keeping it in the private file.`);
+      return loadUnprotectedKey();
+    }
+  }
+
+  /** @param {import("electron").SafeStorage} safeStorage @param {string} value */
+  async function seal(safeStorage, value) {
+    try {
+      return await safeStorage.encryptStringAsync(value);
+    } catch (error) {
+      throw new KeyringRefusedError(error);
+    }
+  }
+
+  async function loadSealedKey() {
     const safeStorage = loadSafeStorage();
-    const encryptionAvailable = Boolean(safeStorage) && await safeStorage.isAsyncEncryptionAvailable();
+    let encryptionAvailable = false;
+    try {
+      encryptionAvailable = Boolean(safeStorage) && await safeStorage.isAsyncEncryptionAvailable();
+    } catch {
+      encryptionAvailable = false;
+    }
     const basicText = encryptionAvailable && platform === "linux" && safeStorage.getSelectedStorageBackend() === "basic_text";
     if (fileFallback && (!encryptionAvailable || basicText)) return loadUnprotectedKey();
     if (!encryptionAvailable) {
@@ -160,7 +199,11 @@ export function createDesktopVaultKeyProvider({
         await rename(filePath, `${filePath}.omnirush-backup-${backupTimestamp(new Date())}`).catch((error) => {
           if (error?.code !== "ENOENT") throw error;
         });
-        await replaceProtectedKey(filePath, await safeStorage.encryptStringAsync(unprotected.toString("base64")));
+        try {
+          await replaceProtectedKey(filePath, await safeStorage.encryptStringAsync(unprotected.toString("base64")));
+        } catch {
+          // The keyring refused: the private file keeps the vault usable.
+        }
       }
       const readBack = existing?.equals(unprotected) ? existing : await readSealedKey(safeStorage);
       if (readBack?.equals(unprotected)) {
@@ -197,7 +240,11 @@ export function createDesktopVaultKeyProvider({
       }
       if (decrypted && key) {
         if (decrypted.shouldReEncrypt) {
-          await replaceProtectedKey(filePath, await safeStorage.encryptStringAsync(decrypted.result));
+          // Best effort: the key read back fine either way.
+          await safeStorage.encryptStringAsync(decrypted.result).then(
+            (sealed) => replaceProtectedKey(filePath, sealed),
+            () => undefined,
+          );
         }
         await noteKeyringSealed(safeStorage);
         return key;
@@ -205,7 +252,7 @@ export function createDesktopVaultKeyProvider({
     }
 
     const key = randomBytes(KEY_BYTES);
-    await replaceProtectedKey(filePath, await safeStorage.encryptStringAsync(key.toString("base64")));
+    await replaceProtectedKey(filePath, await seal(safeStorage, key.toString("base64")));
     await noteKeyringSealed(safeStorage);
     return key;
   }

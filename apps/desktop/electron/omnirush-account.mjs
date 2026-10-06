@@ -59,7 +59,7 @@ const PERSIST_RETRY_MAX_MS = 60_000;
  */
 const NEVER_SENT = /\b(?:ENOTFOUND|EAI_AGAIN|ECONNREFUSED|ENETUNREACH|EHOSTUNREACH|UND_ERR_CONNECT_TIMEOUT|ERR_NAME_NOT_RESOLVED|ERR_NAME_RESOLUTION_FAILED|ERR_INTERNET_DISCONNECTED|ERR_CONNECTION_REFUSED|ERR_CONNECTION_TIMED_OUT|ERR_ADDRESS_UNREACHABLE|ERR_PROXY_CONNECTION_FAILED|ERR_CERT_\w+|ERR_TLS_CERT_\w+|SELF_SIGNED_CERT_IN_CHAIN|DEPTH_ZERO_SELF_SIGNED_CERT|UNABLE_TO_\w+|CERT_HAS_EXPIRED)\b/;
 const PLAINTEXT_KIND = "omnirush.ai sign-in";
-const PLAINTEXT_NOTE = "Unencrypted at rest: this system has no keyring. Owner-only file; signing out deletes it.";
+const PLAINTEXT_NOTE = "Unencrypted at rest: no usable system keyring. Owner-only file; signing out deletes it.";
 
 function sameCredentials(left, right) {
   return left.gatewayUrl === right.gatewayUrl
@@ -303,8 +303,10 @@ export function createDesktopOmniRushAccountStore({
   sleep = (milliseconds) => new Promise((resolvePromise) => setTimeout(resolvePromise, milliseconds)),
   // Only the default production profile may use the legacy keychain entries (legacyKeychainAllowed).
   legacyKeychain = false,
-  // Linux only: where the sign-in is kept, unencrypted at rest with owner-only
-  // permissions, while no keyring is usable (see plaintext-credential-file.mjs).
+  // Where the sign-in is kept, unencrypted at rest with owner-only
+  // permissions, while no keyring is usable: Linux without a keyring, or any
+  // platform whose keyring refuses to encrypt (a macOS keychain entry the
+  // updated app may no longer open). See plaintext-credential-file.mjs.
   fallbackFilePath = null,
   // Linux only: told which safeStorage backend sealed the sign-in once it is
   // written and read back, so later launches keep that --password-store.
@@ -362,8 +364,17 @@ export function createDesktopOmniRushAccountStore({
   let persistRetry = null;
   let persistRetryAttempt = 0;
   let loading = null;
-  const fileFallback = platform === "linux" && Boolean(fallbackFilePath);
+  const fileFallback = Boolean(fallbackFilePath);
+  /**
+   * The keyring refused to encrypt in this process. Electron keeps its
+   * encryptor for the life of the process, so asking again only fails again
+   * (and on macOS may show the keychain prompt again): the private file is
+   * used until the next launch.
+   */
+  let keyringRefused = false;
   let keyringLossLogged = false;
+  /** A keyring copy is on disk but this launch's keyring cannot decrypt it. */
+  let sealedUnreadable = false;
   let sealedBackendRecorded = null;
   // Every writer is tracked so a reader, the broker's latest() in
   // particular, observes a settled store rather than the pair a rotation is
@@ -402,7 +413,17 @@ export function createDesktopOmniRushAccountStore({
   }
 
   async function safeStorage() {
+    if (keyringRefused) return null;
     return usableSafeStorage(loadSafeStorage, platform);
+  }
+
+  /** Writes the private file and warns once. */
+  async function writeFallbackFile(normalized) {
+    await writePlaintextCredentialFile(
+      fallbackFilePath,
+      `${JSON.stringify({ note: PLAINTEXT_NOTE, credentials: normalized }, null, 2)}\n`,
+    );
+    logPlaintextCredentialsOnce(PLAINTEXT_KIND, log);
   }
 
   async function loadFallbackFile() {
@@ -414,9 +435,14 @@ export function createDesktopOmniRushAccountStore({
     }
   }
 
+  function noteSealedUnreadable() {
+    if (!sealedUnreadable) log("[omnirush] The saved omnirush.ai sign-in cannot be decrypted by the system keyring now; asking to sign in again.");
+    sealedUnreadable = true;
+  }
+
   /** Tell main which backend sealed the sign-in (once per backend per process). */
   async function noteKeyringSealed(storage) {
-    if (!fileFallback || !onKeyringSealed) return;
+    if (platform !== "linux" || !fileFallback || !onKeyringSealed) return;
     const backend = storage.getSelectedStorageBackend();
     if (sealedBackendRecorded === backend) return;
     try {
@@ -465,12 +491,20 @@ export function createDesktopOmniRushAccountStore({
         // been written and read back; otherwise the file stays and keeps the
         // user signed in, and a later load retries.
         await enqueueWrite(unprotected).then(
-          () => log("[omnirush] Moved the omnirush.ai sign-in from the private file into the system keyring."),
+          () => {
+            if (!keyringRefused) log("[omnirush] Moved the omnirush.ai sign-in from the private file into the system keyring.");
+          },
           () => undefined,
         );
         return unprotected;
       }
-      if (!sealed) return null;
+      if (!sealed) {
+        // A saved sign-in this keyring cannot open (an update changed the
+        // app's identity, the keychain entry was denied or replaced): signed
+        // out, and the user is asked to sign in again.
+        if (await exists(filePath)) noteSealedUnreadable();
+        return null;
+      }
       if (unprotected) await discardPlaintextCredentialFile(fallbackFilePath, PLAINTEXT_KIND, log);
       await noteKeyringSealed(storage);
       if (sealed.shouldReEncrypt) await enqueueWrite(sealed.credentials);
@@ -664,17 +698,30 @@ export function createDesktopOmniRushAccountStore({
 
   async function writeCredentials(normalized) {
     const storage = await safeStorage();
-    if (!storage) {
+    /** @type {Buffer | null} */
+    let encrypted = null;
+    if (storage) {
+      try {
+        encrypted = await storage.encryptStringAsync(JSON.stringify(normalized));
+      } catch (error) {
+        // isAsyncEncryptionAvailable() only says the encryptor started, not
+        // that the keyring gave it a key: a denied or locked macOS keychain
+        // (the app's code signature changed with an update), a Windows DPAPI
+        // failure. Never fail the sign-in over it.
+        if (!fileFallback) throw new Error(`Secure desktop credential storage is unavailable: ${error?.message ?? error}`);
+        keyringRefused = true;
+        log(`[omnirush] The system keyring could not encrypt the omnirush.ai sign-in (${error?.message ?? error}); keeping it in the private file.`);
+      }
+    }
+    if (!encrypted) {
       if (!fileFallback) throw new Error("Secure desktop credential storage is unavailable");
-      // Unencrypted at rest, protected only by owner-only permissions: Linux
-      // without a usable keyring. The next load with a keyring migrates it.
-      await writePlaintextCredentialFile(
-        fallbackFilePath,
-        `${JSON.stringify({ note: PLAINTEXT_NOTE, credentials: normalized }, null, 2)}\n`,
-      );
-      logPlaintextCredentialsOnce(PLAINTEXT_KIND, log);
+      // Unencrypted at rest, protected only by owner-only permissions: no
+      // usable keyring. The next load with a working keyring migrates it.
+      await writeFallbackFile(normalized);
+      // A keyring copy left on disk holds an older pair this one replaces:
+      // never let a later launch read it back.
+      if (storage) await rm(filePath, { force: true }).catch(() => undefined);
     } else {
-      const encrypted = await storage.encryptStringAsync(JSON.stringify(normalized));
       await mkdir(path.dirname(filePath), { recursive: true });
       const temporary = `${filePath}.${process.pid}.tmp`;
       await writeFile(temporary, encrypted, { mode: 0o600 });
@@ -683,20 +730,16 @@ export function createDesktopOmniRushAccountStore({
         throw error;
       });
       if (fileFallback) {
-        // Linux: only trust the keyring copy once it reads back. Until then
-        // the private file keeps the sign-in (a keyring that encrypts but
-        // cannot decrypt, a locked or half-started Secret Service).
+        // Only trust the keyring copy once it reads back. Until then the
+        // private file keeps the sign-in (a keyring that encrypts but cannot
+        // decrypt, a locked or half-started Secret Service).
         const readBack = await decryptKeyringCopy(storage);
         if (readBack && sameCredentials(readBack.credentials, normalized)) {
           await discardPlaintextCredentialFile(fallbackFilePath, PLAINTEXT_KIND, log);
           await noteKeyringSealed(storage);
         } else {
           log("[omnirush] The system keyring did not return the saved omnirush.ai sign-in; keeping it in the private file.");
-          await writePlaintextCredentialFile(
-            fallbackFilePath,
-            `${JSON.stringify({ note: PLAINTEXT_NOTE, credentials: normalized }, null, 2)}\n`,
-          );
-          logPlaintextCredentialsOnce(PLAINTEXT_KIND, log);
+          await writeFallbackFile(normalized);
         }
       }
     }
@@ -1045,7 +1088,9 @@ export function createDesktopOmniRushAccountStore({
       if (fileBacked && await keyringCopyUnreadable()) {
         return { connected: false, gatewayConfigured, ...server, ...storage, reauthorizationRequired: true, keyringUnavailable: true };
       }
-      if (signInRequired) return { connected: false, gatewayConfigured, ...server, ...storage, reauthorizationRequired: true };
+      if (signInRequired || (sealedUnreadable && await exists(filePath))) {
+        return { connected: false, gatewayConfigured, ...server, ...storage, reauthorizationRequired: true };
+      }
       return { connected: false, gatewayConfigured, ...server, ...storage };
     }
     try {
