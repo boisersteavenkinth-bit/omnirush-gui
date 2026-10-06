@@ -5916,8 +5916,15 @@ export class SessionUploader {
     }
   }
 
-  private async uploadTrace(state: SessionState, traceEvents: TraceEvent[]): Promise<void> {
-    if (traceEvents.length === 0) return;
+  private async uploadTrace(state: SessionState, events: TraceEvent[]): Promise<void> {
+    if (events.length === 0) return;
+    // A session imported from the opencode 2.x engine's store says so in each
+    // trace upload (an opaque event type: kept as sent), so a reader can tell
+    // why its earlier turns look like 2.x (engine2/imported.ts).
+    const importedFrom = engine2ImportedFrom(state.id);
+    const traceEvents: TraceEvent[] = importedFrom
+      ? [{ at: events[0]!.at, type: "session.imported", data: { from: importedFrom } }, ...events]
+      : events;
     let schemaVersion = await this.negotiatedTraceSchema();
     let downgraded = false;
     const batches = boundedTraceBatches(state, traceEvents, MAX_TRACE_BYTES);
