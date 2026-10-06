@@ -17,8 +17,10 @@ concurrency:
   group: omnirush-tests-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+# The bundled engine is fetched from a private release of omnirush-ai/omnirush-cli
+# (apps/desktop/scripts/prepare-sidecar.mjs): this repo's own token cannot read it.
 env:
-  OPENCODE_GITHUB_REPO: ${{ vars.OPENCODE_GITHUB_REPO || 'anomalyco/opencode' }}
+  OMNIRUSH_ENGINE_TOKEN: ${{ secrets.OMNIRUSH_ENGINE_TOKEN }}
 
 permissions:
   contents: read
@@ -88,7 +90,7 @@ jobs:
             ~/.cache/electron
             ~/.cache/electron-builder
             apps/desktop/resources/sidecars
-          key: ${{ runner.os }}-${{ runner.arch }}-desktop-smoke-${{ hashFiles('constants.json', 'pnpm-lock.yaml', 'apps/desktop/scripts/prepare-sidecar.mjs') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-desktop-smoke-${{ hashFiles('constants.json', 'pnpm-lock.yaml', 'apps/desktop/scripts/prepare-sidecar.mjs', 'apps/desktop/scripts/engine-release.json') }}
       - name: Setup tests
         id: setup
         uses: ./.github/actions/setup-tests

@@ -1824,17 +1824,6 @@ export function createRuntimeManager({
     };
   }
 
-  async function pinnedOpencodeInstallCommand() {
-    const constantsPath = path.resolve(desktopRoot, "../../constants.json");
-    const payload = JSON.parse(await readFile(constantsPath, "utf8"));
-    const version = String(payload?.opencodeVersion ?? "").trim().replace(/^v/, "");
-    if (!version) {
-      throw new Error("constants.json is missing opencodeVersion");
-    }
-    // The 2.x engine ships on npm as @opencode/cli (binaries `opencode` / `opencode2`).
-    return `npm install -g @opencode/cli@${version}`;
-  }
-
   function processMatchesSidecar(command) {
     return commandMatchesPackagedSidecar(command, sidecarDirs);
   }
@@ -2591,27 +2580,15 @@ export function createRuntimeManager({
   }
 
   async function engineInstall() {
-    if (process.platform === "win32") {
-      return {
-        ok: false,
-        status: -1,
-        stdout: "",
-        stderr:
-          "Guided install is not supported on Windows yet. Install the required OmniRush runtime manually, then restart OmniRush.ai.",
-      };
-    }
-
-    const installDir = path.join(app.getPath("home"), ".opencode", "bin");
-    const command = await pinnedOpencodeInstallCommand();
-    const result = await runShellCommand("bash", ["-lc", command], {
-      env: { ...(await buildChildEnv()), OPENCODE_INSTALL_DIR: installDir },
-      timeoutMs: 180_000,
-    });
+    // The engine is OmniRush.ai's own build of opencode 1.18.32 and ships
+    // inside the app (resources/sidecars); there is no separate installer.
+    // An upstream opencode install would keep its sessions apart from the
+    // app's, so none is offered.
     return {
-      ok: result.status === 0,
-      status: result.status,
-      stdout: result.stdout,
-      stderr: result.stderr,
+      ok: false,
+      status: -1,
+      stdout: "",
+      stderr: "The OmniRush engine ships inside OmniRush.ai. Reinstall OmniRush.ai to restore it, then restart the app.",
     };
   }
 

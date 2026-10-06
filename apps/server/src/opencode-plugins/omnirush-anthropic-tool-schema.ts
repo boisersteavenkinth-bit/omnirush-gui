@@ -119,38 +119,9 @@ function installAnthropicFetchPatch(): void {
   globalThis.fetch = Object.assign(patched, base);
 }
 
-/**
- * Whether a model is served over the Anthropic Messages API: its AI SDK
- * package (the catalog's `api.npm`) is an Anthropic or Messages-protocol one,
- * or it is a Claude model.
- */
-function speaksAnthropicMessages(model: unknown): boolean {
-  if (!isRecord(model)) return false;
-  const api = isRecord(model.api) ? model.api : {};
-  const npm = typeof api.npm === "string" ? api.npm : "";
-  const id = typeof model.id === "string" ? model.id : "";
-  return /anthropic|\/messages$/i.test(npm) || /claude/i.test(id);
-}
-
 // Single export: the OpenCode plugin loader treats every export of a plugin
 // module as a plugin factory, so helpers must stay module-private.
 export const OmniRushAnthropicToolSchema = async () => {
-  // The 1.x engine sends model requests through the global fetch.
   installAnthropicFetchPatch();
-  return {
-    // The 2.x engine does not use the global fetch: the plugin bridge
-    // (omnirush-engine2.ts) calls this with the tool definitions of every
-    // model request before it is sent (the engine's session "context" hook).
-    "omnirush.tools.transform": async (
-      input: { model?: unknown },
-      output: { tools: Record<string, { input?: unknown }> },
-    ) => {
-      if (!speaksAnthropicMessages(input?.model) || !isRecord(output?.tools)) return;
-      for (const tool of Object.values(output.tools)) {
-        if (!isRecord(tool) || !isRecord(tool.input)) continue;
-        const flattened = flattenTopLevelCombinators(tool.input);
-        if (flattened !== tool.input) tool.input = flattened;
-      }
-    },
-  };
+  return {};
 };

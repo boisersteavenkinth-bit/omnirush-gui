@@ -11,10 +11,16 @@ on:
     paths:
       - apps/desktop/electron-builder*.yml
       - apps/desktop/scripts/prepare-sidecar.mjs
+      - apps/desktop/scripts/engine-release.json
       - packaging/aur/**
       - scripts/aur/**
       - .github/workflows/release-desktop.yml
       - .github/workflows/linux-packages.yml
+
+# The bundled engine is fetched from a private release of omnirush-ai/omnirush-cli
+# (apps/desktop/scripts/prepare-sidecar.mjs): this repo's own token cannot read it.
+env:
+  OMNIRUSH_ENGINE_TOKEN: ${{ secrets.OMNIRUSH_ENGINE_TOKEN }}
 
 permissions:
   contents: read

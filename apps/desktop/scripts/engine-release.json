@@ -1,0 +1,35 @@
+{
+  "repo": "omnirush-ai/omnirush-cli",
+  "tag": "engine-1.18.32-r2",
+  "version": "1.18.32",
+  "license": {
+    "name": "LICENSE-opencode-MIT",
+    "sha256": "625f0f619133f89bbbb2abe37369613dfa1885eba1e50d02170deb62bb42cb6b"
+  },
+  "assets": {
+    "aarch64-apple-darwin": {
+      "name": "omnirush-engine-darwin-arm64-1.18.32.tar.gz",
+      "sha256": "5682ff0a931169798bb47edec41421ab1bfe14a7894f7f7370be44d8368a165f"
+    },
+    "x86_64-apple-darwin": {
+      "name": "omnirush-engine-darwin-x64-1.18.32.tar.gz",
+      "sha256": "4312c372d2b0feb62da245872de448bd69709bdb24b2a2d5d9a07f2a819493c0"
+    },
+    "x86_64-unknown-linux-gnu": {
+      "name": "omnirush-engine-linux-x64-1.18.32.tar.gz",
+      "sha256": "e6eb85520b08cdf00e28080d500ea4ee36759d14e5c13e646d45eb381da78d15"
+    },
+    "aarch64-unknown-linux-gnu": {
+      "name": "omnirush-engine-linux-arm64-1.18.32.tar.gz",
+      "sha256": "9d9c9b164cf104cf2575a16806323012a8965567a82c497d885ca6c0b1c87232"
+    },
+    "x86_64-pc-windows-msvc": {
+      "name": "omnirush-engine-win32-x64-1.18.32.tar.gz",
+      "sha256": "b409697469ae0a3b525b5a24019109195202e2cc96deb651489567b8c785d47e"
+    },
+    "aarch64-pc-windows-msvc": {
+      "name": "omnirush-engine-win32-arm64-1.18.32.tar.gz",
+      "sha256": "ceef50fa7e4a2176b725b2076a142c0178b411f02618e109741d87293fc98d6f"
+    }
+  }
+}

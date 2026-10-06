@@ -15,7 +15,7 @@ import {
   writeFileSync,
 } from "fs";
 import { basename, dirname, join, resolve } from "path";
-import { tmpdir } from "os";
+import { homedir, tmpdir } from "os";
 import { fileURLToPath } from "url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -32,20 +32,6 @@ const sidecarOverride = process.env.OMNIRUSH_SIDECAR_DIR?.trim() || readArg("--o
 const sidecarDir = sidecarOverride ? resolve(sidecarOverride) : join(__dirname, "..", "resources", "sidecars");
 const constantsPath = resolve(__dirname, "..", "..", "..", "constants.json");
 
-const opencodeGithubRepo = (() => {
-  const raw =
-    process.env.OPENCODE_GITHUB_REPO?.trim() ||
-    process.env.OMNIRUSH_OPENCODE_GITHUB_REPO?.trim() ||
-    "anomalyco/opencode";
-  const normalized = raw
-    .replace(/^https:\/\/github\.com\//i, "")
-    .replace(/\.git$/i, "")
-    .trim();
-  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(normalized)) {
-    return "anomalyco/opencode";
-  }
-  return normalized;
-})();
 const opencodeVersion = (() => {
   try {
     const raw = readFileSync(constantsPath, "utf8");
@@ -63,7 +49,12 @@ const normalizeVersion = (value) => {
   return raw.startsWith("v") ? raw.slice(1) : raw;
 };
 
-const opencodeAssetOverride = process.env.OPENCODE_ASSET?.trim() || null;
+// The engine is OmniRush.ai's build of opencode 1.18.32 (the one the CLI
+// bundles), published as per-platform tarballs on a private GitHub release of
+// the CLI repo and sha256-pinned in engine-release.json. Each tarball holds one
+// executable, `opencode[.exe]`, at its root.
+const engineReleasePath = resolve(__dirname, "engine-release.json");
+const engineRelease = JSON.parse(readFileSync(engineReleasePath, "utf8"));
 
 // Target triple for native platform binaries
 const resolvedTargetTriple = (() => {
@@ -157,7 +148,7 @@ const readBinaryVersion = (filePath) => {
   try {
     const result = spawnSync(filePath, ["--version"], { encoding: "utf8" });
     if (result.status === 0 && result.stdout) {
-      // 2.x prints "opencode v2.0.18"; 1.x printed the bare version.
+      // The engine prints the bare version ("1.18.32").
       const match = result.stdout.trim().match(/(\d+\.\d+\.\d+(?:[-+][\w.-]+)?)\s*$/);
       return match ? match[1] : result.stdout.trim();
     }
@@ -224,70 +215,129 @@ if (!normalizedOpencodeVersion) {
   process.exit(1);
 }
 
-// The 2.x engine ships no GitHub release assets: each platform binary is an
-// npm package (@opencode/cli-<platform>), a tarball holding package/bin/opencode.
-// Its sha512 is checked against the registry's dist.integrity before use.
-const opencodePackageByTarget = {
-  "aarch64-apple-darwin": "cli-darwin-arm64",
-  "x86_64-apple-darwin": "cli-darwin-x64-baseline",
-  "x86_64-unknown-linux-gnu": "cli-linux-x64-baseline",
-  "aarch64-unknown-linux-gnu": "cli-linux-arm64",
-  "x86_64-pc-windows-msvc": "cli-windows-x64-baseline",
-  "aarch64-pc-windows-msvc": "cli-windows-arm64",
+if (normalizedOpencodeVersion !== engineRelease.version) {
+  console.error(
+    `constants.json pins OpenCode ${normalizedOpencodeVersion}, but ${engineReleasePath} pins the engine release ${engineRelease.tag} (${engineRelease.version}).`
+  );
+  process.exit(1);
+}
+
+const engineAsset = resolvedTargetTriple ? engineRelease.assets?.[resolvedTargetTriple] ?? null : null;
+
+/** What the sidecar directory holds: the engine release and archive it was taken from. */
+const readRecordedEngine = () => {
+  const names = [resolvedTargetTriple ? `versions.json-${resolvedTargetTriple}${isWindowsTarget ? ".exe" : ""}` : null, "versions.json"];
+  for (const name of names.filter(Boolean)) {
+    try {
+      const parsed = JSON.parse(readFileSync(join(sidecarDir, name), "utf8"));
+      if (parsed?.opencode) return parsed.opencode;
+    } catch {
+      // not recorded
+    }
+  }
+  return null;
 };
 
-const opencodeRegistry = (process.env.OPENCODE_NPM_REGISTRY?.trim() || "https://registry.npmjs.org").replace(/\/+$/, "");
-const opencodePackage =
-  opencodeAssetOverride ?? (resolvedTargetTriple ? opencodePackageByTarget[resolvedTargetTriple] : null);
-const opencodeAsset = opencodePackage ? `${opencodePackage}-${normalizedOpencodeVersion}.tgz` : null;
-const opencodeUrl = opencodePackage
-  ? `${opencodeRegistry}/@opencode/${opencodePackage}/-/${opencodeAsset}`
-  : null;
-
+const recordedEngine = readRecordedEngine();
 const shouldDownloadOpencode =
   !opencodeCandidatePath ||
   !existsSync(opencodeCandidatePath) ||
   isStubBinary(opencodeCandidatePath) ||
   !existingOpencodeVersion ||
-  existingOpencodeVersion !== normalizedOpencodeVersion;
+  existingOpencodeVersion !== normalizedOpencodeVersion ||
+  !engineAsset ||
+  recordedEngine?.archiveSha256 !== engineAsset.sha256 ||
+  (opencodeCandidatePath && recordedEngine?.sha256 !== sha256File(opencodeCandidatePath));
 
 if (!shouldDownloadOpencode) {
-  console.log(`OpenCode sidecar already present (${existingOpencodeVersion}).`);
+  console.log(`OpenCode sidecar already present (${existingOpencodeVersion}, ${engineRelease.tag}).`);
 }
 
-/** The registry's dist.integrity of the platform package (sha512-<base64>). */
-const readOpencodeIntegrity = async () => {
-  const response = await fetch(`${opencodeRegistry}/@opencode/${opencodePackage}/${normalizedOpencodeVersion}`);
-  if (!response.ok) throw new Error(`npm registry answered ${response.status} for @opencode/${opencodePackage}@${normalizedOpencodeVersion}`);
-  const meta = await response.json();
-  const integrity = String(meta?.dist?.integrity ?? "");
-  if (!integrity.startsWith("sha512-")) throw new Error(`No sha512 integrity for @opencode/${opencodePackage}@${normalizedOpencodeVersion}`);
-  return integrity;
+/** A token that can read the private engine release (never printed). */
+const githubToken = () => {
+  for (const name of ["OMNIRUSH_ENGINE_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"]) {
+    const value = process.env[name]?.trim();
+    if (value) return value;
+  }
+  const gh = spawnSync("gh", ["auth", "token"], { encoding: "utf8" });
+  return gh.status === 0 ? gh.stdout.trim() || null : null;
+};
+
+const githubApi = async (url, accept, token) => {
+  const response = await fetch(url, {
+    headers: {
+      accept,
+      authorization: `Bearer ${token}`,
+      "user-agent": "omnirush-desktop-prepare-sidecar",
+      "x-github-api-version": "2022-11-28",
+    },
+    redirect: "follow",
+  });
+  if (!response.ok) throw new Error(`GitHub answered ${response.status} for ${url}`);
+  return response;
+};
+
+/** The pinned archive's bytes: a local copy (OMNIRUSH_ENGINE_ARCHIVE), the cache, or the release. */
+const readEngineArchive = async () => {
+  const verify = (bytes, source) => {
+    const actual = createHash("sha256").update(bytes).digest("hex");
+    if (actual !== engineAsset.sha256) {
+      throw new Error(`Checksum mismatch for ${engineAsset.name} from ${source}: expected ${engineAsset.sha256}, got ${actual}`);
+    }
+    return bytes;
+  };
+  const local = process.env.OMNIRUSH_ENGINE_ARCHIVE?.trim();
+  if (local) return verify(readFileSync(resolve(local)), local);
+  const cacheDir = process.env.OMNIRUSH_ENGINE_CACHE?.trim()
+    ? resolve(process.env.OMNIRUSH_ENGINE_CACHE.trim())
+    : join(homedir(), ".cache", "omnirush-desktop", "engine");
+  const cached = join(cacheDir, engineRelease.tag, engineAsset.name);
+  if (existsSync(cached)) {
+    try {
+      return verify(readFileSync(cached), cached);
+    } catch (error) {
+      console.warn(`${error instanceof Error ? error.message : String(error)}; downloading it again.`);
+    }
+  }
+  const token = githubToken();
+  if (!token) {
+    throw new Error(
+      `A GitHub token that can read ${engineRelease.repo} is required to fetch the engine from its private release ${engineRelease.tag}: ` +
+        "set OMNIRUSH_ENGINE_TOKEN (or GH_TOKEN / GITHUB_TOKEN), sign in with `gh auth login`, or point OMNIRUSH_ENGINE_ARCHIVE at the archive.",
+    );
+  }
+  const release = await (await githubApi(
+    `https://api.github.com/repos/${engineRelease.repo}/releases/tags/${engineRelease.tag}`,
+    "application/vnd.github+json",
+    token,
+  )).json();
+  const asset = (release.assets ?? []).find((entry) => entry.name === engineAsset.name);
+  if (!asset) throw new Error(`${engineAsset.name} is not an asset of ${engineRelease.repo} release ${engineRelease.tag}`);
+  const bytes = verify(Buffer.from(await (await githubApi(asset.url, "application/octet-stream", token)).arrayBuffer()), asset.url);
+  try {
+    mkdirSync(dirname(cached), { recursive: true });
+    writeFileSync(cached, bytes);
+  } catch {
+    // the cache is optional
+  }
+  return bytes;
 };
 
 if (shouldDownloadOpencode) {
-  if (!opencodePackage || !opencodeUrl) {
-    console.error(
-      `No OpenCode package configured for target ${resolvedTargetTriple ?? "unknown"}. Set OPENCODE_ASSET to override.`
-    );
+  if (!engineAsset) {
+    console.error(`No engine archive is pinned for target ${resolvedTargetTriple ?? "unknown"} in ${engineReleasePath}.`);
     process.exit(1);
   }
 
   mkdirSync(sidecarDir, { recursive: true });
 
   const stamp = Date.now();
-  const archivePath = join(tmpdir(), `opencode-${stamp}-${opencodeAsset}`);
+  const archivePath = join(tmpdir(), `opencode-${stamp}-${engineAsset.name}`);
   const extractDir = join(tmpdir(), `opencode-${stamp}`);
   mkdirSync(extractDir, { recursive: true });
 
   try {
-    const integrity = await readOpencodeIntegrity();
-    const response = await fetch(opencodeUrl);
-    if (!response.ok) throw new Error(`Download of ${opencodeUrl} failed: ${response.status}`);
-    const archive = Buffer.from(await response.arrayBuffer());
-    const actual = `sha512-${createHash("sha512").update(archive).digest("base64")}`;
-    if (actual !== integrity) throw new Error(`Integrity mismatch for ${opencodeUrl}: expected ${integrity}, got ${actual}`);
-    writeFileSync(archivePath, archive);
+    writeFileSync(archivePath, await readEngineArchive());
   } catch (error) {
     console.error(error instanceof Error ? error.message : String(error));
     process.exit(1);
@@ -327,8 +377,13 @@ if (shouldDownloadOpencode) {
       // ignore
     }
   }
+  try {
+    unlinkSync(archivePath);
+  } catch {
+    // ignore
+  }
 
-  console.log(`OpenCode sidecar updated to ${normalizedOpencodeVersion}.`);
+  console.log(`OpenCode sidecar updated to ${normalizedOpencodeVersion} (${engineRelease.tag}).`);
 }
 
 adHocSignDarwinSidecars([
@@ -350,6 +405,8 @@ const versions = {
   opencode: {
     version: normalizedOpencodeVersion,
     sha256: opencodeCandidatePath && existsSync(opencodeCandidatePath) ? sha256File(opencodeCandidatePath) : null,
+    release: engineRelease.tag,
+    archiveSha256: engineAsset?.sha256 ?? null,
   },
   "omnirush-server": {
     version: omnirushServerVersion,
