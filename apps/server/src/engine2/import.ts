@@ -6,7 +6,7 @@
  * sessions in `<data>/opencode/opencode.db` (2.x tables: `session_v2`,
  * `session_message`; on its first start it had moved the 1.x sessions of
  * earlier releases in there too). The app now runs OmniRush.ai's build of the
- * 1.x engine (1.18.32), whose store is `<data>/omnirush/opencode.db` and which
+ * 1.x engine (1.18.32), whose store is `<engine data>/omnirush/opencode.db` (engine-data-home.ts) and which
  * cannot read the 2.x tables. So that no session is lost, each 2.x session is
  * copied once into the 1.x store:
  *
@@ -18,7 +18,7 @@
  *     no plugins, no project config and no network;
  *   - the import keeps every id, so a session imported twice is written once;
  *   - what was imported, skipped (its folder is gone) or failed is recorded in
- *     `<data>/omnirush/desktop-engine2-import.json`; a failed session is tried again on
+ *     `<engine data>/omnirush/desktop-engine2-import.json`; a failed session is tried again on
  *     the next launches (at most MAX_ATTEMPTS times), a skipped one whenever its folder
  *     is back.
  *
@@ -27,13 +27,15 @@
  */
 import { spawn } from "node:child_process";
 import { chmodSync, closeSync, constants as fsConstants, copyFileSync, existsSync, mkdirSync, mkdtempSync, openSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { v1Messages, v1Session, type V1Message } from "./shapes.js";
 import { isEngine2Store, listEngine2Sessions, readEngine2Session, type Engine2StoredSession } from "./store.js";
 import { isRecord, num, record, str, type JsonRecord } from "./util.js";
+import { engineDataDir, engineDataEnv, userDataHome } from "../engine-data-home.js";
 
-export const ENGINE2_IMPORT_MANIFEST = "desktop-engine2-import.json";
+export { ENGINE2_IMPORT_MANIFEST } from "./imported.js";
+import { ENGINE2_IMPORT_MANIFEST } from "./imported.js";
 const MAX_ATTEMPTS = 3;
 const IMPORT_TIMEOUT_MS = 120_000;
 const LOCK_STALE_MS = 30 * 60_000;
@@ -43,7 +45,7 @@ const V1_PART_TYPES = new Set(["text", "reasoning", "file", "tool", "step-start"
 
 export type Engine2ImportLog = (level: "info" | "warn", message: string, attributes?: Record<string, unknown>) => void;
 
-type ManifestEntry = { at: number; messages?: number; attempts?: number; error?: string; reason?: string };
+type ManifestEntry = { at: number; messages?: number; attempts?: number; error?: string; reason?: string; from?: string };
 type Manifest = {
   version: 1;
   source: string;
@@ -73,21 +75,15 @@ export type Engine2ImportOptions = {
   timeoutMs?: number;
 };
 
-function dataHome(env: NodeJS.ProcessEnv): string {
-  const xdg = env.XDG_DATA_HOME?.trim();
-  if (xdg) return xdg;
-  return join(env.HOME?.trim() || homedir(), ".local", "share");
-}
-
 /** The 2.x engine's store, as the 2.x engine resolved it; null when an explicit store is in use. */
 export function engine2StorePath(env: NodeJS.ProcessEnv): string | null {
   if (env.OPENCODE_DB?.trim()) return null;
-  return join(dataHome(env), "opencode", "opencode.db");
+  return join(userDataHome(env), "opencode", "opencode.db");
 }
 
-/** The 1.x engine's data directory (OmniRush.ai's build keeps its store in `<data>/omnirush`). */
+/** The 1.x engine's data directory: the desktop engine's own (engine-data-home.ts). */
 export function engine1DataDir(env: NodeJS.ProcessEnv): string {
-  return join(dataHome(env), "omnirush");
+  return engineDataDir(env);
 }
 
 /**
@@ -248,6 +244,8 @@ function importEnv(env: NodeJS.ProcessEnv, configDir: string): NodeJS.ProcessEnv
   out.OPENCODE_DISABLE_LSP_DOWNLOAD = "1";
   out.OPENCODE_DISABLE_DEFAULT_PLUGINS = "1";
   out.npm_config_audit = "false";
+  // The engine writes the import into its own store (the desktop's data home).
+  Object.assign(out, engineDataEnv(env) ?? {});
   return out;
 }
 
@@ -352,7 +350,7 @@ export async function importEngine2Sessions(options: Engine2ImportOptions): Prom
       const run = await runImport(options.bin, file, directory, env, options.timeoutMs ?? IMPORT_TIMEOUT_MS);
       rmSync(file, { force: true });
       if (run.ok && run.output.includes(`Imported session: ${id}`)) {
-        manifest.imported[id] = { at: Date.now(), messages: document.messages.length };
+        manifest.imported[id] = { at: Date.now(), messages: document.messages.length, from: `opencode ${String(document.info.version ?? "2.x")}` };
         delete manifest.failed[id];
         delete manifest.skipped[id];
         result.imported.push(id);
@@ -389,7 +387,7 @@ export async function importEngine2Sessions(options: Engine2ImportOptions): Prom
  */
 export function adoptOpencodeCredentials(env: NodeJS.ProcessEnv, log?: Engine2ImportLog): string[] {
   if (engine2ImportDisabled(env)) return [];
-  const from = join(dataHome(env), "opencode");
+  const from = join(userDataHome(env), "opencode");
   const to = engine1DataDir(env);
   const copied: string[] = [];
   for (const name of ["auth.json", "mcp-auth.json"]) {

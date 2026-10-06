@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 import { adoptOpencodeCredentials, ENGINE2_IMPORT_MANIFEST, engine2ImportDisabled, engine2StorePath, importEngine2Sessions, v1ImportDocument } from "./import.js";
+import { engine2ImportedFrom } from "./imported.js";
 import { readEngine2Session } from "./store.js";
 
 /**
@@ -78,6 +79,8 @@ function makeHome(trees: Tree[]): { home: string; env: NodeJS.ProcessEnv; projec
     XDG_STATE_HOME: join(home, ".local", "state"),
     XDG_CACHE_HOME: join(home, ".cache"),
     OPENCODE_SERVER_PASSWORD: "engine-secret",
+    // The desktop engine's own data home (engine-data-home.ts), apart from the user's.
+    OMNIRUSH_ENGINE_DATA_HOME: join(home, "engine-data"),
   };
   const store = engine2StorePath(env)!;
   write2xStore(store, trees, project);
@@ -131,7 +134,8 @@ describe("2.x session import (stand-in engine)", () => {
       // No plugins, no project or user config, no engine password: only the stores are shared.
       expect(call.env).toContain("OPENCODE_PURE=1");
       expect(call.env).toContain("OPENCODE_DISABLE_PROJECT_CONFIG=1");
-      expect(call.env).toContain(`XDG_DATA_HOME=${env.XDG_DATA_HOME}`);
+      // The engine writes into the desktop engine's own store, never the user's (the CLI's).
+      expect(call.env.split("\n")).toContain(`XDG_DATA_HOME=${env.OMNIRUSH_ENGINE_DATA_HOME}`);
       expect(call.env).not.toContain("engine-secret");
       expect(call.doc.info.id).toBe(call.id);
       expect(call.doc.info.directory).toBe(project);
@@ -149,8 +153,12 @@ describe("2.x session import (stand-in engine)", () => {
     const child = calls.find((call) => call.doc.info.parentID)!;
     expect(child.doc.info.title).toMatch(/\(@general subagent\)$/);
 
-    const manifest = JSON.parse(readFileSync(join(env.XDG_DATA_HOME!, "omnirush", ENGINE2_IMPORT_MANIFEST), "utf8"));
+    const manifest = JSON.parse(readFileSync(join(env.OMNIRUSH_ENGINE_DATA_HOME!, "omnirush", ENGINE2_IMPORT_MANIFEST), "utf8"));
     expect(Object.keys(manifest.imported).sort()).toEqual([...ids].sort());
+    expect(existsSync(join(env.XDG_DATA_HOME!, "omnirush"))).toBe(false);
+    // Uploads of a continued imported session say where its earlier turns come from.
+    for (const id of ids) expect(engine2ImportedFrom(id, env)).toBe("opencode 2.0.18");
+    expect(engine2ImportedFrom("ses_never_imported", env)).toBeNull();
 
     // The next launch finds nothing to do, and the 2.x store is untouched.
     const second = await importEngine2Sessions({ bin: engine.bin, env });
@@ -166,7 +174,7 @@ describe("2.x session import (stand-in engine)", () => {
     const bad = trees[0]!.session.id as string;
     const engine = fakeEngine(home, [bad]);
     for (let launch = 0; launch < 4; launch++) await importEngine2Sessions({ bin: engine.bin, env });
-    const manifest = JSON.parse(readFileSync(join(env.XDG_DATA_HOME!, "omnirush", ENGINE2_IMPORT_MANIFEST), "utf8"));
+    const manifest = JSON.parse(readFileSync(join(env.OMNIRUSH_ENGINE_DATA_HOME!, "omnirush", ENGINE2_IMPORT_MANIFEST), "utf8"));
     expect(manifest.failed[bad].attempts).toBe(3);
     expect(manifest.failed[bad].error).toContain("decode failed");
     expect(Object.keys(manifest.imported)).toEqual([trees[1]!.session.id]);
@@ -205,6 +213,17 @@ describe("2.x session import (stand-in engine)", () => {
     const engine = fakeEngine(home);
     expect(await importEngine2Sessions({ bin: engine.bin, env })).toMatchObject({ imported: [], failed: [], skipped: [] });
     expect(existsSync(join(home, "data", "omnirush", ENGINE2_IMPORT_MANIFEST))).toBe(false);
+  });
+
+  test("sign-ins go to the desktop engine's data home when it has one", () => {
+    const home = mkdtempSync(join(tmpdir(), "engine2-import-auth-home-"));
+    roots.push(home);
+    const env = { HOME: home, XDG_DATA_HOME: join(home, "data"), OMNIRUSH_DESKTOP_USER_DATA_DIR: join(home, "userData") };
+    mkdirSync(join(home, "data", "opencode"), { recursive: true });
+    writeFileSync(join(home, "data", "opencode", "auth.json"), "{}");
+    expect(adoptOpencodeCredentials(env)).toEqual(["auth.json"]);
+    expect(existsSync(join(home, "userData", "engine-data", "omnirush", "auth.json"))).toBe(true);
+    expect(existsSync(join(home, "data", "omnirush"))).toBe(false);
   });
 
   test("sign-in files move over once and never replace the engine's own", () => {
@@ -260,7 +279,7 @@ describeEngine("2.x session import into the bundled engine", () => {
     expect(result.failed).toEqual([]);
     serve = spawn(enginePath!, ["serve", "--hostname", "127.0.0.1", "--port", "0"], {
       cwd: setup.project,
-      env: { ...process.env, ...setup.env, OPENCODE_SERVER_PASSWORD: "pw", OPENCODE_DISABLE_AUTOUPDATE: "1", OPENCODE_DISABLE_MODELS_FETCH: "1" },
+      env: { ...process.env, ...setup.env, XDG_DATA_HOME: setup.env.OMNIRUSH_ENGINE_DATA_HOME, OPENCODE_SERVER_PASSWORD: "pw", OPENCODE_DISABLE_AUTOUPDATE: "1", OPENCODE_DISABLE_MODELS_FETCH: "1" },
       stdio: ["ignore", "pipe", "pipe"],
     });
     url = await new Promise<string>((done, fail) => {

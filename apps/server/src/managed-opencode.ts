@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import net from "node:net";
 import { randomUUID } from "node:crypto";
 import { globalOpencodeConfigDir } from "@omnirush/paths";
+import { engineDataEnv } from "./engine-data-home.js";
 
 export type ManagedChildProcess = {
   exitCode: number | null;
@@ -165,10 +166,13 @@ async function startManagedOpencodeServer(
   // the opencode global config directory, so the engine reads that one too.
   const baseEnv = { ...process.env, ...options.env };
   if (!baseEnv.OPENCODE_CONFIG_DIR?.trim()) engineEnvDefaults.OPENCODE_CONFIG_DIR = globalOpencodeConfigDir({ env: baseEnv });
+  // The desktop's engine keeps its sessions apart from the CLI's (engine-data-home.ts).
+  const dataEnv = engineDataEnv(baseEnv) ?? {};
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     ...engineEnvDefaults,
     ...options.env,
+    ...dataEnv,
     OPENCODE_SERVER_USERNAME: username,
     OPENCODE_SERVER_PASSWORD: password,
   };
@@ -178,6 +182,7 @@ async function startManagedOpencodeServer(
   const injectedEnv = Object.entries({
     ...engineEnvDefaults,
     ...(options.env ?? {}),
+    ...dataEnv,
     OPENCODE_SERVER_USERNAME: username,
     OPENCODE_SERVER_PASSWORD: password,
   })
