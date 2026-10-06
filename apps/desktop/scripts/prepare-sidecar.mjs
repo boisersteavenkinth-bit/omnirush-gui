@@ -50,9 +50,9 @@ const normalizeVersion = (value) => {
 };
 
 // The engine is OmniRush.ai's build of opencode 1.18.32 (the one the CLI
-// bundles), published as per-platform tarballs on a private GitHub release of
-// the CLI repo and sha256-pinned in engine-release.json. Each tarball holds one
-// executable, `opencode[.exe]`, at its root.
+// bundles): per-platform tarballs on a public pre-release of this repo (never
+// marked latest), sha256-pinned in engine-release.json. No token is needed.
+// Each tarball holds one executable, `opencode[.exe]`, at its root.
 const engineReleasePath = resolve(__dirname, "engine-release.json");
 const engineRelease = JSON.parse(readFileSync(engineReleasePath, "utf8"));
 
@@ -253,31 +253,24 @@ if (!shouldDownloadOpencode) {
   console.log(`OpenCode sidecar already present (${existingOpencodeVersion}, ${engineRelease.tag}).`);
 }
 
-/** A token that can read the private engine release (never printed). */
-const githubToken = () => {
-  for (const name of ["OMNIRUSH_ENGINE_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"]) {
-    const value = process.env[name]?.trim();
-    if (value) return value;
+/** A public release asset's bytes, with a few tries (GitHub's download hosts answer 5xx now and then). */
+const download = async (url) => {
+  let last = null;
+  for (let attempt = 1; attempt <= 4; attempt++) {
+    try {
+      const response = await fetch(url, { headers: { "user-agent": "omnirush-desktop-prepare-sidecar" }, redirect: "follow" });
+      if (response.ok) return Buffer.from(await response.arrayBuffer());
+      last = new Error(`GitHub answered ${response.status} for ${url}`);
+      if (response.status < 500 && response.status !== 429) break;
+    } catch (error) {
+      last = error;
+    }
+    await new Promise((done) => setTimeout(done, 2_000 * attempt));
   }
-  const gh = spawnSync("gh", ["auth", "token"], { encoding: "utf8" });
-  return gh.status === 0 ? gh.stdout.trim() || null : null;
+  throw last ?? new Error(`Download of ${url} failed`);
 };
 
-const githubApi = async (url, accept, token) => {
-  const response = await fetch(url, {
-    headers: {
-      accept,
-      authorization: `Bearer ${token}`,
-      "user-agent": "omnirush-desktop-prepare-sidecar",
-      "x-github-api-version": "2022-11-28",
-    },
-    redirect: "follow",
-  });
-  if (!response.ok) throw new Error(`GitHub answered ${response.status} for ${url}`);
-  return response;
-};
-
-/** The pinned archive's bytes: a local copy (OMNIRUSH_ENGINE_ARCHIVE), the cache, or the release. */
+/** The pinned archive's bytes: a local copy (OMNIRUSH_ENGINE_ARCHIVE), the cache, or the public release. */
 const readEngineArchive = async () => {
   const verify = (bytes, source) => {
     const actual = createHash("sha256").update(bytes).digest("hex");
@@ -299,21 +292,8 @@ const readEngineArchive = async () => {
       console.warn(`${error instanceof Error ? error.message : String(error)}; downloading it again.`);
     }
   }
-  const token = githubToken();
-  if (!token) {
-    throw new Error(
-      `A GitHub token that can read ${engineRelease.repo} is required to fetch the engine from its private release ${engineRelease.tag}: ` +
-        "set OMNIRUSH_ENGINE_TOKEN (or GH_TOKEN / GITHUB_TOKEN), sign in with `gh auth login`, or point OMNIRUSH_ENGINE_ARCHIVE at the archive.",
-    );
-  }
-  const release = await (await githubApi(
-    `https://api.github.com/repos/${engineRelease.repo}/releases/tags/${engineRelease.tag}`,
-    "application/vnd.github+json",
-    token,
-  )).json();
-  const asset = (release.assets ?? []).find((entry) => entry.name === engineAsset.name);
-  if (!asset) throw new Error(`${engineAsset.name} is not an asset of ${engineRelease.repo} release ${engineRelease.tag}`);
-  const bytes = verify(Buffer.from(await (await githubApi(asset.url, "application/octet-stream", token)).arrayBuffer()), asset.url);
+  const url = `https://github.com/${engineRelease.repo}/releases/download/${engineRelease.tag}/${engineAsset.name}`;
+  const bytes = verify(await download(url), url);
   try {
     mkdirSync(dirname(cached), { recursive: true });
     writeFileSync(cached, bytes);

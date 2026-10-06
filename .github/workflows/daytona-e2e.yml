@@ -20,11 +20,6 @@ on:
     workflows: [Warden]
     types: [completed]
 
-# The bundled engine is fetched from a private release of omnirush-ai/omnirush-cli
-# (apps/desktop/scripts/prepare-sidecar.mjs): this repo's own token cannot read it.
-env:
-  OMNIRUSH_ENGINE_TOKEN: ${{ secrets.OMNIRUSH_ENGINE_TOKEN }}
-
 permissions:
   actions: read
   contents: read

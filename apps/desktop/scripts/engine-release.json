@@ -1,7 +1,8 @@
 {
-  "repo": "omnirush-ai/omnirush-cli",
+  "repo": "omnirush-ai/omnirush-gui",
   "tag": "engine-1.18.32-r2",
   "version": "1.18.32",
+  "origin": "The same archives as release engine-1.18.32-r2 of omnirush-ai/omnirush-cli (the CLI's engine), copied to a public pre-release of this repo that is never marked latest.",
   "license": {
     "name": "LICENSE-opencode-MIT",
     "sha256": "625f0f619133f89bbbb2abe37369613dfa1885eba1e50d02170deb62bb42cb6b"

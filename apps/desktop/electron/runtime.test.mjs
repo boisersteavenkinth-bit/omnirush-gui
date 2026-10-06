@@ -100,7 +100,8 @@ describe("bundled OpenCode runtime", () => {
     // bundled from 2.2.0 is gone (its sessions are imported, engine2/import.ts).
     assert.equal(constants.opencodeVersion, "v1.18.32");
     assert.equal(release.version, "1.18.32");
-    assert.equal(release.repo, "omnirush-ai/omnirush-cli");
+    // A public pre-release of this repo, never marked latest: no token needed.
+    assert.equal(release.repo, "omnirush-ai/omnirush-gui");
     assert.equal(release.tag, "engine-1.18.32-r2");
     for (const target of ["aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]) {
       assert.match(release.assets[target].name, /^omnirush-engine-[a-z0-9-]+-1\.18\.32\.tar\.gz$/);
