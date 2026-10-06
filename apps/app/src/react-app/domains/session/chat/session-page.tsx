@@ -102,6 +102,8 @@ import { isSameWorkbenchSession } from "./workbench-store";
 import { ReactSessionRuntime } from "../sync/runtime-sync";
 import { useSessionInteractions } from "../sync/use-session-interactions";
 import { createClient } from "@/app/lib/opencode";
+import { needsTurnGuard } from "@/app/lib/good-session";
+import { TurnGuardDialog } from "@/react-app/domains/quality/good-session";
 import { createClientV2, isOpencodeV2BaseUrl } from "@/app/lib/opencode-v2-adapter";
 import {
   availableNarrowPane,
@@ -509,6 +511,8 @@ export function SessionPage(props: SessionPageProps) {
   const [renameTitle, setRenameTitle] = useState("");
   const [renameBusy, setRenameBusy] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
+  // The don't-leave-mid-turn confirm: what to do on "Quit anyway".
+  const [turnGuardProceed, setTurnGuardProceed] = useState<(() => void) | null>(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [sessionActionId, setSessionActionId] = useState<string | null>(null);
   const workbenchPrimary = useWorkbenchStore((state) => state.primary);
@@ -1172,6 +1176,21 @@ export function SessionPage(props: SessionPageProps) {
     props.sidebar.onOpenSession(workspaceId, sessionId);
   }, [focusWorkbenchPane, omniRushbenchTab, props.sidebar]);
 
+  const sessionTurnRunning = useCallback((sessionId: string | null | undefined) => {
+    const status = sessionId ? props.sidebar.sessionStatusById[sessionId] : undefined;
+    return status === "thinking" || status === "responding" || status === "compacting" || status === "waiting";
+  }, [props.sidebar.sessionStatusById]);
+
+  // The sidebar's switch: leaving a session whose turn runs asks first.
+  const guardedOpenSessionTab = useCallback((workspaceId: string, sessionId: string) => {
+    const currentSessionId = props.sidebar.selectedSessionId ?? null;
+    if (needsTurnGuard({ action: "switch", turnRunning: sessionTurnRunning(currentSessionId), currentSessionId, targetSessionId: sessionId })) {
+      setTurnGuardProceed(() => () => openSessionTab(workspaceId, sessionId));
+      return;
+    }
+    openSessionTab(workspaceId, sessionId);
+  }, [openSessionTab, props.sidebar.selectedSessionId, sessionTurnRunning]);
+
   const closeSecondaryWorkbenchPane = useCallback(() => {
     setWorkbenchSplit(null);
   }, [setWorkbenchSplit]);
@@ -1398,14 +1417,21 @@ export function SessionPage(props: SessionPageProps) {
           workspaceConnectionStateById={props.sidebar.workspaceConnectionStateById}
           newTaskDisabled={props.sidebar.newTaskDisabled}
           onSelectWorkspace={props.sidebar.onSelectWorkspace}
-          onOpenSession={openSessionTab}
+          onOpenSession={guardedOpenSessionTab}
           onPrefetchSession={props.sidebar.onPrefetchSession}
           onCreateTaskInWorkspace={props.sidebar.onCreateTaskInWorkspace}
           onCreateSplitTaskInWorkspace={props.sidebar.onCreateSplitTaskInWorkspace}
           onOpenRenameSession={props.onRenameSession ? openRenameModal : undefined}
           onOpenDeleteSession={props.onDeleteSession ? (sessionId) => {
-            setSessionActionId(sessionId);
-            setDeleteOpen(true);
+            const openDelete = () => {
+              setSessionActionId(sessionId);
+              setDeleteOpen(true);
+            };
+            if (needsTurnGuard({ action: "delete", turnRunning: sessionTurnRunning(sessionId) })) {
+              setTurnGuardProceed(() => openDelete);
+              return;
+            }
+            openDelete();
           } : undefined}
           onArchiveSession={props.onArchiveSession ? (sessionId, archived) => {
             void props.onArchiveSession?.(sessionId, archived);
@@ -2047,6 +2073,16 @@ export function SessionPage(props: SessionPageProps) {
           onTitleChange={setRenameTitle}
         />
       ) : null}
+
+      <TurnGuardDialog
+        open={turnGuardProceed !== null}
+        onWait={() => setTurnGuardProceed(null)}
+        onQuit={() => {
+          const proceed = turnGuardProceed;
+          setTurnGuardProceed(null);
+          proceed?.();
+        }}
+      />
 
       {props.onDeleteSession ? (
         <ConfirmModal

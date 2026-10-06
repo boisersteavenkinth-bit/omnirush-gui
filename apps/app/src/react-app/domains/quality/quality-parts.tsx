@@ -3,6 +3,7 @@ import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 
 import { compactTokenCount } from "../../../app/lib/omnirush-usage";
+import { goodSessionWording } from "../../../app/lib/good-session";
 import { qualityBadgeText, qualityBadgeTitle, type AccountQuality } from "../../../app/lib/quality";
 
 /** The tier, as a small neutral badge. Dashed in preview (spins pay nothing). */
@@ -67,7 +68,7 @@ export function spinRowTitle(quality: AccountQuality): string {
   const ready = quality.spinsAvailable;
   const stars = Math.min(ready, quality.clientSpinsAvailable ?? 0);
   return ready > 0
-    ? `${ready} spin${ready === 1 ? "" : "s"} ready${stars > 0 ? `, ${stars} replay-ready ★ on the richer wheel` : ""}`
+    ? `${ready} spin${ready === 1 ? "" : "s"} ready${stars > 0 ? `, ${stars} Good session ★ on the richer wheel` : ""}`
     : "No spins yet: good sessions earn spins.";
 }
 
@@ -85,7 +86,7 @@ export function SpinCounts({ quality }: { quality: AccountQuality }) {
         <Badge
           variant="secondary"
           data-testid="quality-client-spins"
-          title={`${stars} replay-ready ★`}
+          title={`${stars} Good session${stars === 1 ? "" : "s"} ★`}
           className="h-4 px-1.5 text-[10px] font-normal text-muted-foreground tabular-nums"
         >
           ★{shortCount(stars)}
@@ -95,12 +96,12 @@ export function SpinCounts({ quality }: { quality: AccountQuality }) {
   );
 }
 
-/** "4-day streak · +1 spin per replay-ready ★ session · 7 days: +2". */
+/** "4-day streak · +1 spin per Good session ★ · 7 days: +2". */
 export function streakText(quality: Pick<AccountQuality, "streakDays" | "streakMultiplier" | "streakNext">): string | null {
   if (quality.streakDays <= 0 && !quality.streakNext) return null;
   const parts: string[] = [];
   parts.push(quality.streakDays > 0 ? `${quality.streakDays}-day streak` : "No streak yet");
-  if (quality.streakMultiplier > 0) parts.push(`+${quality.streakMultiplier} spin${quality.streakMultiplier === 1 ? "" : "s"} per replay-ready ★ session`);
+  if (quality.streakMultiplier > 0) parts.push(`+${quality.streakMultiplier} spin${quality.streakMultiplier === 1 ? "" : "s"} per Good session ★`);
   if (quality.streakNext) parts.push(`${quality.streakNext.days} days: +${quality.streakNext.bonusSpins}`);
   return parts.join(" · ");
 }
@@ -133,7 +134,7 @@ export function NextSpinHint({ quality, className }: { quality: AccountQuality; 
       <ProgressRing progress={hint.progress} className="mt-px text-muted-foreground" />
       <div className="min-w-0">
         <div className="font-medium text-foreground">Next spin · {Math.round(hint.progress * 100)}%</div>
-        <div className="mt-0.5 leading-5 text-muted-foreground">{hint.text}</div>
+        <div className="mt-0.5 leading-5 text-muted-foreground">{goodSessionWording(hint.text)}</div>
       </div>
     </div>
   );

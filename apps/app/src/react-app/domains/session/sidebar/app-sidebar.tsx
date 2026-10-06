@@ -42,6 +42,7 @@ import { omnirushAccountStatus, type WorkspaceInfo } from "../../../../app/lib/d
 import { omnirushUsageSummary } from "../../../../app/lib/omnirush-usage";
 import { isDesktopRuntime } from "../../../../app/lib/runtime-env";
 import { refreshAccountStatus, setQualitySessionId, useAccountStatusStore, useQualityUiStore, type AccountQuality } from "../../../../app/lib/quality";
+import { goodSessionWording } from "../../../../app/lib/good-session";
 import { ProgressRing, QualityTierBadge, SpinCounts, spinRowTitle } from "../../quality/quality-parts";
 import { OmniRushDenHelpLink } from "../../workspace/omnirush-den-help-link";
 import { NotificationBell } from "../../../shell/notification-center";
@@ -1011,7 +1012,7 @@ function QualitySpinRow({ quality }: { quality: AccountQuality }) {
         <button
           type="button"
           onClick={openPanel}
-          title={hint?.text ?? quality.nextTierHint ?? "Quality rewards"}
+          title={goodSessionWording(hint?.text ?? quality.nextTierHint ?? "Quality rewards")}
           aria-label={`Next spin ${progress}`}
           data-testid="quality-footer-next"
           className="absolute inset-e-1 top-1.5 flex h-5 items-center gap-1 rounded-md px-1 text-[11px] text-muted-foreground tabular-nums transition hover:bg-sidebar-accent hover:text-foreground group-data-[collapsible=icon]:hidden"

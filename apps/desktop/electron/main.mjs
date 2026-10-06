@@ -93,6 +93,7 @@ import {
   setOmniRushSentrySession,
 } from "./sentry.mjs";
 import { installStdioErrorHandlers } from "./stdio-errors.mjs";
+import { createTurnGuard } from "./turn-guard.mjs";
 import {
   createRendererCrashRecovery,
   installSocketTypeOfServiceGuard,
@@ -1103,6 +1104,11 @@ const IDLE_ROUTER_INFO = Object.freeze({
 
 let mainWindow = null;
 const pendingDeepLinks = [];
+const turnGuard = createTurnGuard({
+  showMessageBox: (win, options) => (win ? dialog.showMessageBox(win, options) : dialog.showMessageBox(options)),
+  getWindow: () => (mainWindow && !mainWindow.isDestroyed() ? mainWindow : null),
+  appName: APP_NAME,
+});
 
 browserPanel = createBrowserPanel({
   remoteDebugPort,
@@ -2543,6 +2549,9 @@ const desktopCommandHandlers = {
   "__setApplicationMenuVisible": async (event, ...args) => {
       return applicationMenu.setVisible(args[0]);
   },
+  "__setTurnRunning": async (event, ...args) => {
+      return turnGuard.setTurnRunning(args[0] === true);
+  },
 };
 
 if (isDevMode) {
@@ -2721,9 +2730,19 @@ async function createMainWindow() {
     flushPendingDeepLinks();
   });
 
+  // A turn still running: ask before the window goes (turn-guard.mjs).
+  turnGuard.reset();
+  mainWindow.on("close", (event) => {
+    const win = mainWindow;
+    turnGuard.guardClose(event, () => {
+      if (win && !win.isDestroyed()) win.close();
+    });
+  });
+
   mainWindow.on("closed", () => {
     browserPanel.destroy();
     mainWindow = null;
+    turnGuard.setTurnRunning(false);
   });
 
   const recoverRendererCrash = createRendererCrashRecovery({
@@ -2945,6 +2964,7 @@ or use: pnpm dev:worktree`);
 } else {
   app.on("before-quit", (event) => {
     if (runtimeDisposedForQuit) return;
+    if (!turnGuard.guardQuit(event, () => app.quit())) return;
     event.preventDefault();
     if (runtimeDisposeInProgress) return;
     showShutdownScreen();
