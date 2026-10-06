@@ -9,7 +9,7 @@ import { cn } from "@/lib/utils";
 import { omnirushAccountStatus, omnirushQualityDetails } from "../../../app/lib/desktop";
 import {
   CLIENT_GRADE_NOTE,
-  REPLAY_READY_LABEL,
+  GOOD_SESSION_STAR_LABEL,
   canSpinNow,
   isCoachingNotice,
   qualityTierLabel,
@@ -23,6 +23,8 @@ import type { OmniRushQualitySession } from "@omnirush/types/desktop-ipc";
 import { BiggestWinTicker, NextSpinHint, QualityTierBadge, StreakLine } from "./quality-parts";
 import { QualitySpinDialog } from "./quality-spin-dialog";
 import { useQualityPopups } from "./use-quality-popups";
+import { GoodSessionGuide } from "./good-session";
+import { goodSessionWording } from "../../../app/lib/good-session";
 
 /** Used only when the server sends no `fail_labels` entry for a code. */
 const FALLBACK_FAIL_LABELS: Record<string, string> = {
@@ -69,12 +71,12 @@ export function SessionReasons({ reasons }: { reasons: QualitySessionReasons | n
               <span className="shrink-0 font-medium text-foreground">+{session.spins} spin{session.spins === 1 ? "" : "s"}</span>
             ) : null}
           </div>
-          {session.why ? <div className="mt-0.5 text-xs leading-5 text-foreground">{session.why}</div> : null}
+          {session.why ? <div className="mt-0.5 text-xs leading-5 text-foreground">{goodSessionWording(session.why)}</div> : null}
           {workSummary(session.work) ? <div className="mt-0.5 text-[11px] text-muted-foreground">{workSummary(session.work)}</div> : null}
           {session.fails.length || session.reproducible === "pass" || session.clientGrade ? (
             <div className="mt-1.5 flex flex-wrap gap-1">
               {session.clientGrade ? (
-                <Badge variant="secondary" data-testid="quality-client-grade" className="h-4 px-1.5 text-[10px] font-normal text-muted-foreground">{REPLAY_READY_LABEL}</Badge>
+                <Badge variant="secondary" data-testid="quality-client-grade" className="h-4 px-1.5 text-[10px] font-normal text-muted-foreground">{GOOD_SESSION_STAR_LABEL}</Badge>
               ) : session.reproducible === "pass" ? (
                 <Badge variant="secondary" data-testid="quality-reproducible" className="h-4 px-1.5 text-[10px] font-normal text-muted-foreground">Reproducible ✓</Badge>
               ) : null}
@@ -116,8 +118,8 @@ export function QualityNoticeCard(props: QualityNoticeCardProps) {
   const coaching = isCoachingNotice(notice, quality);
   const [whyOpen, setWhyOpen] = useState(false);
   const [sessions, setSessions] = useState<QualitySessionReasons | null>(null);
-  const title = notice?.title ?? `Quality: ${qualityTierLabel(quality.tier)}`;
-  const body = notice?.body || (notice ? "" : quality.nextTierHint ?? "");
+  const title = goodSessionWording(notice?.title ?? `Quality: ${qualityTierLabel(quality.tier)}`);
+  const body = goodSessionWording(notice?.body || (notice ? "" : quality.nextTierHint ?? ""));
   const spinnable = canSpinNow(quality);
   const Icon = coaching ? Lightbulb : Gift;
 
@@ -168,12 +170,14 @@ export function QualityNoticeCard(props: QualityNoticeCardProps) {
           <div data-testid="quality-notice-tips">
             <p className="text-xs font-medium text-foreground">{coaching ? "How to earn spins" : "Tips"}</p>
             <ul className="mt-1 list-disc space-y-1 ps-4 text-xs leading-5 text-muted-foreground marker:text-muted-foreground/60">
-              {quality.tips.map((tip) => <li key={tip}>{tip}</li>)}
+              {quality.tips.map((tip) => <li key={tip}>{goodSessionWording(tip)}</li>)}
             </ul>
           </div>
         ) : coaching ? (
           <p className="text-xs font-medium text-foreground">How to earn spins</p>
         ) : null}
+
+        <GoodSessionGuide className="rounded-lg border border-border px-3 py-2" />
 
         {coaching ? (
           <div>
@@ -226,7 +230,7 @@ export function QualityNudge(props: { text: string; onDismiss: () => void }) {
       className={cn("fixed bottom-4 right-4 z-[64] flex max-w-[360px] items-start gap-3 p-4 text-sm", TOAST_SURFACE)}
     >
       <Gift className="mt-0.5 size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
-      <span className="flex-1 text-muted-foreground">{props.text}</span>
+      <span className="flex-1 text-muted-foreground">{goodSessionWording(props.text)}</span>
       <Button type="button" variant="ghost" size="icon-xs" onClick={props.onDismiss} aria-label="Dismiss" className="-me-1 -mt-0.5 text-muted-foreground">
         <X />
       </Button>

@@ -12,7 +12,7 @@ import { omnirushAccountStatus, omnirushQualityDetails, omnirushQualitySpin, omn
 import { compactTokenCount } from "../../../app/lib/omnirush-usage";
 import {
   CLIENT_GRADE_NOTE,
-  REPLAY_READY_LABEL,
+  GOOD_SESSION_STAR_LABEL,
   countUpValue,
   DEFAULT_WHEEL_SEGMENTS,
   SOUND_STORAGE_KEY,
@@ -84,7 +84,7 @@ function recentSpinLabel(spin: OmniRushQualitySpinRecord): string {
   return spin.status === "ready" ? "ready" : spin.status;
 }
 
-/** The last spins (newest first) as one muted line, ★ on the replay-ready ones. */
+/** The last spins (newest first) as one muted line, ★ on the Good session ones. */
 export function RecentSpins({ spins }: { spins: OmniRushQualitySpinRecord[] }) {
   const shown = spins.slice(0, 10);
   if (!shown.length) return null;
@@ -95,8 +95,8 @@ export function RecentSpins({ spins }: { spins: OmniRushQualitySpinRecord[] }) {
         {shown.map((spin, index) => (
           <li
             key={spin.id}
-            data-replay-ready={spin.clientGrade ? "" : undefined}
-            title={spin.clientGrade ? REPLAY_READY_LABEL : spin.status}
+            data-good-session={spin.clientGrade ? "" : undefined}
+            title={spin.clientGrade ? GOOD_SESSION_STAR_LABEL : spin.status}
             className="tabular-nums"
           >
             {spin.clientGrade ? "★ " : ""}
@@ -251,11 +251,11 @@ export function QualitySpinPanel(props: QualitySpinPanelProps) {
   const celebrate = result?.celebrate ?? "none";
   const busy = phase === "requesting" || phase === "spinning" || (phase === "result" && !settled);
   const canSpin = !busy && spinsLeft > 0 && !(phase !== "result" && resting);
-  // Before a spin: the wheel the next spin uses (the richer one while replay-ready spins are
+  // Before a spin: the wheel the next spin uses (the richer one while Good session ★ spins are
   // waiting). From the answer on: the wheel the server actually used.
   const nextIsReplayReady = !result && quality.clientSpinsAvailable > 0 && clientSegments.length > 0;
   const shownSegments = result ? segments : nextIsReplayReady ? clientSegments : segments;
-  const replayWheel = result ? (result.clientGrade ? "Replay-ready ★ wheel" : null) : nextIsReplayReady ? "Replay-ready ★ wheel (next spin)" : null;
+  const replayWheel = result ? (result.clientGrade ? "Good session ★ wheel" : null) : nextIsReplayReady ? "Good session ★ wheel (next spin)" : null;
   const resultLine = result
     ? [
         result.preview || result.capped ? spinPayoutText(result) : result.potBalance !== null ? `Pot: ${compactTokenCount(result.potBalance)} tokens` : "Added to your pot",
@@ -274,7 +274,7 @@ export function QualitySpinPanel(props: QualitySpinPanelProps) {
         <Description>
           {spinsLeft} spin{spinsLeft === 1 ? "" : "s"} ready
           {!result && quality.clientSpinsAvailable > 0 ? (
-            <span data-testid="quality-dialog-client-spins"> · ★{quality.clientSpinsAvailable} replay-ready</span>
+            <span data-testid="quality-dialog-client-spins"> · ★{quality.clientSpinsAvailable} Good session</span>
           ) : null}
         </Description>
       </div>
@@ -326,7 +326,7 @@ export function QualitySpinPanel(props: QualitySpinPanelProps) {
               </span>
               {settled && celebrate === "jackpot" ? <Badge variant="secondary" className="font-normal">Jackpot</Badge> : null}
               {settled && result.clientGrade ? (
-                <Badge variant="secondary" className="font-normal text-muted-foreground">{REPLAY_READY_LABEL}</Badge>
+                <Badge variant="secondary" className="font-normal text-muted-foreground">{GOOD_SESSION_STAR_LABEL}</Badge>
               ) : settled && result.reproducible ? (
                 <Badge variant="secondary" className="font-normal text-muted-foreground">Reproducible</Badge>
               ) : null}
@@ -366,7 +366,7 @@ export function QualitySpinPanel(props: QualitySpinPanelProps) {
             {busy ? "Spinning" : settled ? `Spin again (${spinsLeft} left)` : spinsLeft > 1 ? `Spin (${spinsLeft} ready)` : "Spin"}
           </Button>
         ) : (
-          <p className="text-sm text-muted-foreground">No spins left. Replay-ready ★ sessions earn more.</p>
+          <p className="text-sm text-muted-foreground">No spins left. Good sessions ★ earn more.</p>
         )}
       </DialogFooter>
     </>

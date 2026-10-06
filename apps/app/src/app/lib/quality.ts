@@ -16,6 +16,7 @@ import type {
   OmniRushWheelSegment,
 } from "@omnirush/types/desktop-ipc";
 
+import { GOOD_SESSION_LABEL, goodSessionWording } from "./good-session";
 import { compactTokenCount } from "./omnirush-usage";
 
 export type AccountQuality = OmniRushAccountQuality;
@@ -58,7 +59,7 @@ export function qualityBadgeTitle(quality: AccountQuality): string {
   if (quality.tokensMultiplier < 1) parts.push(`tokens ×${quality.tokensMultiplier}`);
   if (quality.preview) parts.push("preview: spins pay 0 tokens");
   const head = parts.join(" · ");
-  return quality.nextTierHint ? `${head}\n${quality.nextTierHint}` : head;
+  return quality.nextTierHint ? `${head}\n${goodSessionWording(quality.nextTierHint)}` : head;
 }
 
 /** Whether the spin button can spin now: spins left, and not all of them held back by a resting wheel. */
@@ -242,9 +243,9 @@ export function nearMissText(spin: QualitySpin, jackpotTokens?: number | null): 
 }
 
 /** The star, explained wherever it shows. */
-export const CLIENT_GRADE_NOTE = "★ Replay-ready sessions earn +2 spins on a richer wheel.";
+export const CLIENT_GRADE_NOTE = "★ Good sessions earn +2 spins on a richer wheel.";
 /** What users read for a client-grade session or spin (internal fields keep `client`). */
-export const REPLAY_READY_LABEL = "Replay-ready ★";
+export const GOOD_SESSION_STAR_LABEL = GOOD_SESSION_LABEL;
 
 /**
  * The prize shown `progress` (0..1) into the count-up: an ease-out that never

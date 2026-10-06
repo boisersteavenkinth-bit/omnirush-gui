@@ -47,6 +47,7 @@ import { SessionRoute } from "./session-route";
 import { DesktopUpdaterProvider } from "../domains/settings/state/desktop-updater-provider";
 import { UpdateGate } from "./update-gate";
 import { QualityRewards } from "../domains/quality/quality-notice";
+import { TurnRunningSync } from "../domains/quality/good-session";
 import { SettingsRoute } from "./settings-route";
 import { ShellConfigProvider } from "./shell-config";
 import { WelcomeRoute } from "./welcome-route";
@@ -512,6 +513,7 @@ export function AppRoot() {
                   <LoadingOverlay />
                   <CloudWorkspaceOverlay />
                   {isDesktopRuntime() ? <QualityRewards /> : null}
+                  {isDesktopRuntime() ? <TurnRunningSync /> : null}
                 </CloudWorkspaceStatusProvider>
               </OmniRushWebAccessGate>
             </DenSigninGate>

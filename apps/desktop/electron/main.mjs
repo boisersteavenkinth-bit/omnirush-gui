@@ -93,6 +93,7 @@ import {
   setOmniRushSentrySession,
 } from "./sentry.mjs";
 import { installStdioErrorHandlers } from "./stdio-errors.mjs";
+import { createTurnGuard } from "./turn-guard.mjs";
 import {
   createRendererCrashRecovery,
   installSocketTypeOfServiceGuard,
@@ -1103,6 +1104,11 @@ const IDLE_ROUTER_INFO = Object.freeze({
 
 let mainWindow = null;
 const pendingDeepLinks = [];
+const turnGuard = createTurnGuard({
+  showMessageBox: (win, options) => (win ? dialog.showMessageBox(win, options) : dialog.showMessageBox(options)),
+  getWindow: () => (mainWindow && !mainWindow.isDestroyed() ? mainWindow : null),
+  appName: APP_NAME,
+});
 
 browserPanel = createBrowserPanel({
   remoteDebugPort,
@@ -1446,6 +1452,8 @@ const wakeAutomationRunner = (wakeEvent) => {
   }
 };
 powerMonitor.on("resume", () => wakeAutomationRunner("resume"));
+// OS shutdown or logout never waits on the turn guard (a prevented quit would block it).
+powerMonitor.on("shutdown", () => turnGuard.allowQuit());
 powerMonitor.on("unlock-screen", () => wakeAutomationRunner("unlock-screen"));
 
 let runtimeDisposedForQuit = false;
@@ -2132,6 +2140,7 @@ const desktopCommandHandlers = {
         runtimeManager,
         uiControlServer,
         removeWindowsBrandShortcut,
+        allowQuit: () => turnGuard.allowQuit(),
       }, {
         preserveBootstrap: args[0]?.preserveBootstrap !== false,
         input: {
@@ -2543,6 +2552,9 @@ const desktopCommandHandlers = {
   "__setApplicationMenuVisible": async (event, ...args) => {
       return applicationMenu.setVisible(args[0]);
   },
+  "__setTurnRunning": async (event, ...args) => {
+      return turnGuard.setTurnRunning(args[0] === true);
+  },
 };
 
 if (isDevMode) {
@@ -2557,6 +2569,7 @@ if (isDevMode) {
       // Best effort — never block the relaunch on a flush failure.
     }
     setTimeout(() => {
+      turnGuard.allowQuit();
       app.relaunch();
       // Graceful quit (not app.exit) so before-quit teardown runs and managed
       // sidecars are stopped — a hard exit orphans them and they can hold
@@ -2721,9 +2734,20 @@ async function createMainWindow() {
     flushPendingDeepLinks();
   });
 
+  // Windows logout or shutdown never waits on the turn guard.
+  mainWindow.on("session-end", () => turnGuard.allowQuit());
+  // A turn still running: ask before the window goes (turn-guard.mjs).
+  mainWindow.on("close", (event) => {
+    const win = mainWindow;
+    turnGuard.guardClose(event, () => {
+      if (win && !win.isDestroyed()) win.close();
+    });
+  });
+
   mainWindow.on("closed", () => {
     browserPanel.destroy();
     mainWindow = null;
+    turnGuard.setTurnRunning(false);
   });
 
   const recoverRendererCrash = createRendererCrashRecovery({
@@ -2739,6 +2763,8 @@ async function createMainWindow() {
     },
   });
   mainWindow.webContents.on("render-process-gone", (_event, details) => {
+    // The renderer that said a turn runs is gone; a reload says it again.
+    turnGuard.setTurnRunning(false);
     recoverRendererCrash(details);
   });
 
@@ -2828,6 +2854,7 @@ ipcMain.handle("omnirush:update-gate:refresh", async () => {
   setInterval(readProfile, 30 * 60_000).unref?.();
 }
 ipcMain.handle("omnirush:shell:relaunch", async () => {
+  turnGuard.allowQuit();
   app.relaunch();
   app.quit();
 });
@@ -2915,6 +2942,7 @@ registerMigrationIpc({ app, ipcMain });
 const { ensureAutoUpdater, prepareInstallOnQuit } = registerUpdaterIpc({
   app,
   ipcMain,
+  allowQuit: () => turnGuard.allowQuit(),
   getMainWindow: () => mainWindow,
   // All distributions intentionally share one application identifier, so they also
   // share Squirrel's ShipIt domain. Keep the shared default rather than
@@ -2945,6 +2973,7 @@ or use: pnpm dev:worktree`);
 } else {
   app.on("before-quit", (event) => {
     if (runtimeDisposedForQuit) return;
+    if (!turnGuard.guardQuit(event, () => app.quit())) return;
     event.preventDefault();
     if (runtimeDisposeInProgress) return;
     showShutdownScreen();

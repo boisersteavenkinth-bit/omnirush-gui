@@ -794,7 +794,7 @@ export async function runPendingNukeCleanup(input, options = {}) {
 }
 
 /** @returns {Promise<import("@omnirush/types/desktop-ipc").NukeReceipt>} */
-export async function executeNukeFreshStart({ app, session, runtimeManager, uiControlServer, removeWindowsBrandShortcut }, options = {}) {
+export async function executeNukeFreshStart({ app, session, runtimeManager, uiControlServer, removeWindowsBrandShortcut, allowQuit = () => {} }, options = {}) {
   const input = {
     ...(options.input ?? {
       env: process.env,
@@ -852,6 +852,7 @@ export async function executeNukeFreshStart({ app, session, runtimeManager, uiCo
   });
 
   setTimeout(() => {
+    allowQuit();
     if (!workerScheduled) app.relaunch();
     app.quit();
   }, 100);
