@@ -82,6 +82,7 @@ describe("code files mirror session_qc.is_code_path", () => {
   test("written lines like session_repro._written_lines; patches count added lines", () => {
     expect(writtenLines({ content: "a\nb\nc" })).toBe(3);
     expect(writtenLines({ newString: "x" })).toBe(1);
+    expect(writtenLines({ edits: [{ oldText: "a", newText: "b\nc" }, { new_text: "d" }] })).toBe(3);
     expect(writtenLines({ edits: [{ newString: "a\nb" }, { newString: "c" }] })).toBe(3);
     expect(writtenLines({ patchText: "*** Update File: a.py\n@@\n-a\n+b\n+c\n" })).toBe(2);
   });
@@ -91,7 +92,7 @@ describe("ran/tested is session_qc.BUILD_TEST only (WorkSize.test_runs)", () => 
   test("builds and tests count", () => {
     for (const command of [
       "npm test", "pnpm build", "cd api && pytest -q", "python3 -m pytest tests", "go test ./...", "cargo build --release",
-      "make", "npx tsc --noEmit", "tsc -p .", "FOO=1 npm run build", "bun test", "timeout 20 node --test", "npx vitest run",
+      "make", "npx tsc --noEmit", "tsc -p .", "FOO=1 npm run build", "bun test", "timeout 20 node --test", "npx vitest run", "uv run pytest", "poetry run pytest -q",
     ]) {
       expect(ranSomething(command)).toBe(true);
     }

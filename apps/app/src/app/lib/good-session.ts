@@ -150,7 +150,7 @@ export const FLOOR_ALONE_LINES = 150;
 /** Lines an edit put in (session_repro._written_lines; apply_patch: its added lines). */
 export function writtenLines(input: unknown): number {
   const value = record(input);
-  for (const key of ["content", "newString", "new_string", "new_str"]) {
+  for (const key of ["content", "newString", "new_string", "new_str", "newText", "new_text"]) {
     if (typeof value[key] === "string") return (value[key] as string).split("\n").length;
   }
   if (Array.isArray(value.edits)) {
@@ -174,7 +174,7 @@ const BUILD_TEST = new RegExp(
   "i",
 );
 const ENV_ASSIGN = /^[A-Za-z_][A-Za-z0-9_]*=\S*$/;
-const WRAPPERS = new Set(["sudo", "time", "nice", "env", "exec", "command", "timeout", "npx", "bunx", "pnpx"]);
+const WRAPPERS = new Set(["sudo", "time", "nice", "env", "exec", "command", "timeout", "npx", "bunx", "pnpx", "uv", "poetry", "run"]);
 
 /** The commands of a shell line, each as its words (V2 `_split`/`_words`). */
 export function commandSegments(command: unknown): string[][] {
