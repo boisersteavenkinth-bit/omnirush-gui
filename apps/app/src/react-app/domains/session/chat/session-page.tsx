@@ -1183,14 +1183,16 @@ export function SessionPage(props: SessionPageProps) {
 
   // Leaving a session whose turn runs (switching away, deleting it) asks
   // first; a second request, after "Wait for it", goes ahead. The guard
-  // re-arms when no turn runs any more (the CLI's createQuitGuard).
+  // re-arms when a turn ends or a new one starts (the CLI's createQuitGuard).
   const leaveGuard = useRef(createQuitGuard());
-  const anyTurnRunning = Object.values(props.sidebar.sessionStatusById).some(
-    (status) => status === "thinking" || status === "responding" || status === "compacting" || status === "waiting",
-  );
+  const runningTurns = Object.entries(props.sidebar.sessionStatusById)
+    .filter(([, status]) => status === "thinking" || status === "responding" || status === "compacting" || status === "waiting")
+    .map(([sessionId]) => sessionId)
+    .sort()
+    .join(",");
   useEffect(() => {
-    if (!anyTurnRunning) leaveGuard.current.turnEnded();
-  }, [anyTurnRunning]);
+    leaveGuard.current.turnEnded();
+  }, [runningTurns]);
   const guardLeave = useCallback((running: boolean, proceed: () => void) => {
     if (leaveGuard.current.request({ running }) === "ask") {
       setTurnGuardProceed(() => proceed);
