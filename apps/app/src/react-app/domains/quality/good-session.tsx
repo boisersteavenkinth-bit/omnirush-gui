@@ -19,11 +19,10 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { toast } from "@/components/ui/sonner";
 import { cn } from "@/lib/utils";
 
-import { openDesktopUrl } from "../../../app/lib/desktop";
+import { omnirushQualityDetails, openDesktopUrl } from "../../../app/lib/desktop";
 import {
   GOOD_SESSION_GUIDE,
   GOOD_SESSION_GUIDE_LINK,
-  GOOD_SESSION_LABEL,
   GOOD_SESSION_WSL_TIP,
   TURN_GUARD_DETAIL,
   TURN_GUARD_QUIT,
@@ -32,14 +31,17 @@ import {
   WSL_BANNER_DISMISSED_KEY,
   WSL_BANNER_TEXT,
   WSL_GUIDE_URL,
+  checklistHeading,
+  checklistText,
   goodSessionChecklist,
   goodSessionNudge,
+  messageFacts,
   localDay,
   shouldNudge,
   showWslBanner,
   type GoodSessionCheck,
 } from "../../../app/lib/good-session";
-import { readPref, writePref } from "../../../app/lib/quality";
+import { readPref, useAccountQuality, writePref } from "../../../app/lib/quality";
 import { isDesktopRuntime, isWindowsPlatform } from "../../../app/utils";
 import { hasLiveSessionActivity, useSessionActivityStore } from "../session/status/session-activity-store";
 
@@ -105,19 +107,59 @@ export type GoodSessionChecklistBarProps = {
   turnRunning: boolean;
 };
 
+const SERVER_VERDICT_REFRESH_MS = 5 * 60_000;
+
+/**
+ * The server's verdict on this session (GET /me/quality: `client_grade`),
+ * once the local checks pass and no turn runs. Sessions are checked about
+ * once an hour after upload, so this is usually false during the session.
+ */
+function useServerGood(sessionId: string, ask: boolean): boolean {
+  const quality = useAccountQuality();
+  const [good, setGood] = useState<{ sessionId: string; good: boolean }>({ sessionId, good: false });
+  const lastRead = useRef<{ sessionId: string; at: number } | null>(null);
+  useEffect(() => {
+    if (!ask || !quality) return;
+    const last = lastRead.current;
+    if (last && last.sessionId === sessionId && Date.now() - last.at < SERVER_VERDICT_REFRESH_MS) return;
+    lastRead.current = { sessionId, at: Date.now() };
+    let cancelled = false;
+    void omnirushQualityDetails()
+      .then((details) => {
+        if (cancelled) return;
+        const session = details?.sessions.find((entry) => entry.sessionId === sessionId);
+        setGood({ sessionId, good: session?.clientGrade === true });
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [ask, quality, sessionId]);
+  return good.sessionId === sessionId && good.good;
+}
+
 /**
  * The live checklist over the composer: "Good session: code changed ✓ ·
- * ran/tested ✗ · in project ✓ · finish your turn". One gentle nudge per
- * session when a turn ends with something missing.
+ * ran/tested ✗ · in project ✓ · finish your turn". When every local check
+ * passes it reads "On track for a Good session ★ (final check after
+ * upload)" with an outlined star; the star fills only on the server's
+ * verdict. One gentle nudge per session when a turn ends with something
+ * missing.
  */
 export function GoodSessionChecklistBar(props: GoodSessionChecklistBarProps) {
   const nativeWindows = useMemo(() => isNativeWindowsHost(), []);
-  const checklist = useMemo(() => goodSessionChecklist({
-    messages: props.messages,
+  const facts = useMemo(() => messageFacts(props.messages), [props.messages]);
+  const local = useMemo(() => goodSessionChecklist({
+    ...facts,
     workspaceRoot: props.workspaceRoot,
     turnRunning: props.turnRunning,
     nativeWindows,
-  }), [nativeWindows, props.messages, props.turnRunning, props.workspaceRoot]);
+  }), [facts, nativeWindows, props.turnRunning, props.workspaceRoot]);
+  const serverGood = useServerGood(props.sessionId, local.onTrack);
+  const checklist = useMemo(
+    () => (serverGood && local.onTrack ? { ...local, verdict: "good" as const, text: checklistText(local.checks, "good") } : local),
+    [local, serverGood],
+  );
   const hasPrompt = props.messages.some((message) => message.role === "user");
 
   // The nudge: on the running → done edge of this session's turn.
@@ -135,16 +177,22 @@ export function GoodSessionChecklistBar(props: GoodSessionChecklistBarProps) {
   }, [checklist, hasPrompt, props.sessionId, props.turnRunning]);
 
   if (!hasPrompt) return null;
+  const verdict = checklist.verdict;
   return (
-    <div className="px-4 max-lg:px-3 lg:px-8" data-testid="good-session-checklist" data-good={checklist.good ? "" : undefined}>
+    <div className="px-4 max-lg:px-3 lg:px-8" data-testid="good-session-checklist" data-verdict={verdict}>
       <div className="mx-auto flex max-w-[800px] items-center gap-2 pb-1.5">
         <div
           className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 rounded-full border border-border bg-popover/60 px-2.5 py-1 text-[11px] leading-4 text-muted-foreground"
           aria-label={checklist.text}
           role="status"
         >
-          <Star className={cn("size-3 shrink-0", checklist.good ? "fill-current text-foreground" : "text-muted-foreground")} aria-hidden="true" />
-          <span className="whitespace-nowrap font-medium text-foreground">{checklist.good ? GOOD_SESSION_LABEL : "Good session"}:</span>
+          <Star
+            data-testid="good-session-star"
+            data-filled={verdict === "good" ? "" : undefined}
+            className={cn("size-3 shrink-0", verdict === "good" ? "fill-current text-foreground" : verdict === "on-track" ? "text-foreground" : "text-muted-foreground")}
+            aria-hidden="true"
+          />
+          <span className="whitespace-nowrap font-medium text-foreground">{checklistHeading(verdict)}:</span>
           {checklist.checks.map((check, index) => (
             <span key={check.id} className="inline-flex items-center gap-1.5">
               {index > 0 ? <span aria-hidden="true" className="text-muted-foreground/60">·</span> : null}

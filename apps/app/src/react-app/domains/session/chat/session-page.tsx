@@ -102,7 +102,7 @@ import { isSameWorkbenchSession } from "./workbench-store";
 import { ReactSessionRuntime } from "../sync/runtime-sync";
 import { useSessionInteractions } from "../sync/use-session-interactions";
 import { createClient } from "@/app/lib/opencode";
-import { needsTurnGuard } from "@/app/lib/good-session";
+import { createQuitGuard, leavingRunningTurn } from "@/app/lib/good-session";
 import { TurnGuardDialog } from "@/react-app/domains/quality/good-session";
 import { createClientV2, isOpencodeV2BaseUrl } from "@/app/lib/opencode-v2-adapter";
 import {
@@ -1181,15 +1181,30 @@ export function SessionPage(props: SessionPageProps) {
     return status === "thinking" || status === "responding" || status === "compacting" || status === "waiting";
   }, [props.sidebar.sessionStatusById]);
 
-  // The sidebar's switch: leaving a session whose turn runs asks first.
-  const guardedOpenSessionTab = useCallback((workspaceId: string, sessionId: string) => {
-    const currentSessionId = props.sidebar.selectedSessionId ?? null;
-    if (needsTurnGuard({ action: "switch", turnRunning: sessionTurnRunning(currentSessionId), currentSessionId, targetSessionId: sessionId })) {
-      setTurnGuardProceed(() => () => openSessionTab(workspaceId, sessionId));
+  // Leaving a session whose turn runs (switching away, deleting it) asks
+  // first; a second request, after "Wait for it", goes ahead. The guard
+  // re-arms when no turn runs any more (the CLI's createQuitGuard).
+  const leaveGuard = useRef(createQuitGuard());
+  const anyTurnRunning = Object.values(props.sidebar.sessionStatusById).some(
+    (status) => status === "thinking" || status === "responding" || status === "compacting" || status === "waiting",
+  );
+  useEffect(() => {
+    if (!anyTurnRunning) leaveGuard.current.turnEnded();
+  }, [anyTurnRunning]);
+  const guardLeave = useCallback((running: boolean, proceed: () => void) => {
+    if (leaveGuard.current.request({ running }) === "ask") {
+      setTurnGuardProceed(() => proceed);
       return;
     }
-    openSessionTab(workspaceId, sessionId);
-  }, [openSessionTab, props.sidebar.selectedSessionId, sessionTurnRunning]);
+    proceed();
+  }, []);
+
+  // The sidebar's switch.
+  const guardedOpenSessionTab = useCallback((workspaceId: string, sessionId: string) => {
+    const currentSessionId = props.sidebar.selectedSessionId ?? null;
+    const running = leavingRunningTurn({ action: "switch", turnRunning: sessionTurnRunning(currentSessionId), currentSessionId, targetSessionId: sessionId });
+    guardLeave(running, () => openSessionTab(workspaceId, sessionId));
+  }, [guardLeave, openSessionTab, props.sidebar.selectedSessionId, sessionTurnRunning]);
 
   const closeSecondaryWorkbenchPane = useCallback(() => {
     setWorkbenchSplit(null);
@@ -1427,11 +1442,7 @@ export function SessionPage(props: SessionPageProps) {
               setSessionActionId(sessionId);
               setDeleteOpen(true);
             };
-            if (needsTurnGuard({ action: "delete", turnRunning: sessionTurnRunning(sessionId) })) {
-              setTurnGuardProceed(() => openDelete);
-              return;
-            }
-            openDelete();
+            guardLeave(leavingRunningTurn({ action: "delete", turnRunning: sessionTurnRunning(sessionId) }), openDelete);
           } : undefined}
           onArchiveSession={props.onArchiveSession ? (sessionId, archived) => {
             void props.onArchiveSession?.(sessionId, archived);
@@ -2076,9 +2087,13 @@ export function SessionPage(props: SessionPageProps) {
 
       <TurnGuardDialog
         open={turnGuardProceed !== null}
-        onWait={() => setTurnGuardProceed(null)}
+        onWait={() => {
+          leaveGuard.current.answer(true);
+          setTurnGuardProceed(null);
+        }}
         onQuit={() => {
           const proceed = turnGuardProceed;
+          leaveGuard.current.answer(false);
           setTurnGuardProceed(null);
           proceed?.();
         }}
