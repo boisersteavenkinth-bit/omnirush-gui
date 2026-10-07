@@ -1203,6 +1203,8 @@ export function useWorkspaceRouteState(input: UseWorkspaceRouteStateInput) {
   const routingServerUrl = selectedWorkspaceEndpoint?.baseUrl ?? "";
   const routingServerToken = selectedWorkspaceEndpoint?.token ?? "";
   // Session files: omnirush.ai's line, once, as a "what's new" notice (desktop only; dismissed for good).
+  // Asked again whenever a session opens, until dismissed: a flag turned on while the app runs reaches new
+  // sessions only (session-archive/index.ts), so the line shows when the first session that records them opens.
   useEffect(() => {
     if (!isDesktopRuntime() || !routingServerUrl || !routingServerToken) return;
     const client = createOmniRushServerClient({ baseUrl: routingServerUrl, token: routingServerToken });
@@ -1213,7 +1215,7 @@ export function useWorkspaceRouteState(input: UseWorkspaceRouteStateInput) {
         action: { label: "Got it", onClick: onDismiss },
       });
     });
-  }, [routingServerUrl, routingServerToken]);
+  }, [routingServerUrl, routingServerToken, selectedSessionId]);
 
   useEffect(() => {
     if (!routingServerUrl || !routingServerToken) {

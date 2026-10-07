@@ -2,7 +2,7 @@ import { afterAll, afterEach, describe, expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, utimesSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { zstdDecompressSync } from "node:zlib";
 
@@ -113,6 +113,10 @@ describe("policy (shared with the CLI)", () => {
     expect(classify("/home/u/.yarnrc.yml")).toBe("home stage captured");
     expect(classify("/home/u/.config/pip/pip.conf")).toBe("home stage captured");
     expect(classify("/home/u/.bashrc")).toBe("home hold not_allowlisted");
+    // Home files off the config allowlist are listed only, wherever they are under the home.
+    expect(classify("/home/u/Downloads/data.csv")).toBe("home hold not_allowlisted");
+    expect(classify("/home/u/Documents/report.docx")).toBe("home hold not_allowlisted");
+    expect(classify("/home/u/other-project/src/main.py")).toBe("home hold not_allowlisted");
     expect(classify("/home/u/.cache/pip/x.whl")).toBe("home hold dependency_dir");
     expect(classify("/w/node_modules/a/index.js")).toBe("project hold dependency_dir");
     expect(classify("/w/dist/app.js")).toBe("project hold build_output");
@@ -156,13 +160,12 @@ describe("policy (shared with the CLI)", () => {
     expect(policy.MAX_FILES_USED_SESSION_BYTES).toBe(256 * 1024 * 1024);
   });
 
-  test("GET /archives/key: files_used and its caps; the environment switch", () => {
+  test("GET /archives/key: files_used and its caps; no client override", () => {
     expect(parseArchivePolicy({ policy: { capture_v2: true, files_used: true, files_used_max_file_bytes: 1024, files_used_max_session_bytes: null } }))
       .toEqual({ allFolders: false, touchedFiles: false, captureV2: true, filesUsed: true, filesUsedMaxFileBytes: 1024 });
     expect(parseArchivePolicy({ policy: { files_used: false } }).filesUsed).toBeUndefined();
-    expect(policy.filesUsedOverride({ OMNIRUSH_ARCHIVE_FILES_USED: "1" })).toBe(true);
-    expect(policy.filesUsedOverride({ OMNIRUSH_ARCHIVE_FILES_USED: "0" })).toBeNull();
-    expect(policy.filesUsedOverride({})).toBeNull();
+    expect((policy as Record<string, unknown>).filesUsedOverride).toBeUndefined();
+    expect((used as Record<string, unknown>).filesUsedOverride).toBeUndefined();
   });
 
   test("dependencies: every subproject's lockfile with its resolved versions", async () => {
@@ -378,7 +381,7 @@ describe("a files-used chain", () => {
     expect(quiet.state.dependencies).toBeUndefined();
   });
 
-  test("omnirush.ai's flag drives it: nothing before it is on, recorded once it is, and the notice status says so", async () => {
+  test("omnirush.ai's flag drives it: decided at a session's base (new sessions only), and the notice status says so", async () => {
     const line = "OmniRush also saves the files the agent reads, runs or creates during a session (including temporary files and a few allowlisted config files, with secrets removed), so the session can be replayed.";
     let flag = false;
     let clock = Date.now();
@@ -391,27 +394,57 @@ describe("a files-used chain", () => {
     expect(archiver.filesUsedMaybe()).toBe(false);
     expect(await archiver.filesUsedStatus()).toEqual({ active: false, available: false, consentText: null });
 
+    // Turned on while the session runs: that session stays as it began (its notice moment has passed).
     flag = true;
     clock += 6 * 60_000;
     const read = toolPart("r", "read", { filePath: join(root, "config.local.yaml") });
-    // The answer is asked again at the turn's end (it is old): recorded from this turn on.
-    expect((await archiver.filesUsedTurnEnded(sessionId, root, turn(read))).items).toBeGreaterThanOrEqual(1);
-    expect(await archiver.filesUsedActive(sessionId)).toBe(true);
-    const on = await open(await archiver.captureDelta(sessionId, root, 1));
-    expect(on.state.files_used!.find((item) => item.path === "config.local.yaml")?.captured).toBe(true);
+    expect((await archiver.filesUsedTurnEnded(sessionId, root, turn(read))).items).toBe(0);
+    expect(await archiver.filesUsedActive(sessionId)).toBe(false);
     expect(await archiver.filesUsedStatus()).toEqual({ active: true, available: true, consentText: line });
+
+    // The next session (the app shows the line when it opens) records them from its base on.
+    const next = "ses_files_used_gui_flag2";
+    const nextBase = await open(await archiver.captureBase(next, root, 0));
+    expect(nextBase.state.files_used).toEqual([]);
+    expect((await archiver.filesUsedTurnEnded(next, root, turn(read))).items).toBeGreaterThanOrEqual(1);
+    const on = await open(await archiver.captureDelta(next, root, 1));
+    expect(on.state.files_used!.find((item) => item.path === "config.local.yaml")?.captured).toBe(true);
   });
 
-  test("OMNIRUSH_ARCHIVE_FILES_USED=1 (tests) never overrides an answer that says no; =0 is no switch", async () => {
+  test("OMNIRUSH_ARCHIVE_FILES_USED in the environment never turns recording on (no client override)", async () => {
     process.env.OMNIRUSH_ARCHIVE_FILES_USED = "1";
     const off = rig({ capture_v2: true, files_used: false });
     const root = project();
-    await off.open(await off.archiver.captureBase("ses_files_used_gui_env1", root, 0));
+    const base = await off.open(await off.archiver.captureBase("ses_files_used_gui_env1", root, 0));
+    expect(base.state.files_used).toBeUndefined();
     expect(await off.archiver.filesUsedActive("ses_files_used_gui_env1")).toBe(false);
-    process.env.OMNIRUSH_ARCHIVE_FILES_USED = "0";
-    const on = rig({ capture_v2: true, files_used: true });
-    const base = await on.open(await on.archiver.captureBase("ses_files_used_gui_env0", project(), 0));
-    expect(base.state.files_used).toEqual([]);
+    // Before any answer from omnirush.ai, nothing either.
+    const fresh = rig({ capture_v2: true, files_used: false });
+    expect(await fresh.archiver.filesUsedActive("ses_files_used_gui_env2")).toBe(false);
+  });
+
+  test("a home file off the config allowlist (~/Downloads) is listed not_allowlisted and its bytes never reach the chain", async () => {
+    // A folder under the real home (bun keeps the home it started with): only the home rules apply to it.
+    const home = realpathSync(mkdtempSync(join(homedir(), ".omnirush-fu-home-")));
+    cleanups.push(home);
+    {
+      const { archiver, open } = rig({ capture_v2: true, files_used: true });
+      const root = project();
+      const notes = write(join(home, "Downloads", "fu-notes.txt"), "DOWNLOADS-BYTES-fu\n");
+      const sessionId = "ses_files_used_gui_home";
+      await open(await archiver.captureBase(sessionId, root, 0));
+      const call = toolPart("c", "bash", { command: `cat ${notes}` });
+      await archiver.filesUsedToolCallEnded(sessionId, root, callOf(call));
+      // The session uploader reports it as touched too (outside capture).
+      archiver.recordTouched(sessionId, notes);
+      await archiver.filesUsedTurnEnded(sessionId, root, turn(call));
+      const after = await open(await archiver.captureDelta(sessionId, root, 1));
+      const item = after.state.files_used!.find((entry) => entry.path === notes);
+      expect(item, JSON.stringify(after.state.files_used)).toBeDefined();
+      expect([item!.scope, item!.captured, item!.reason, item!.size] as unknown[]).toEqual(["home", false, "not_allowlisted", 19]);
+      expect([...after.members.keys()].some((name) => name.includes("Downloads"))).toBe(false);
+      expect(after.bytes.toString("latin1")).not.toContain("DOWNLOADS-BYTES-fu");
+    }
   });
 
   test("a withdrawal on omnirush.ai stops recording at the next turn whose answer is old", async () => {

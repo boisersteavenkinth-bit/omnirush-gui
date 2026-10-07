@@ -198,9 +198,11 @@ session (including temporary files and a few allowlisted config files, with
 secrets removed), so the session can be replayed.
 
 It runs whenever omnirush.ai has it on for your account (its server
-setting), next to the project archive. The app shows the line above once,
-as a "what's new" notice. A change on omnirush.ai reaches a running app
-within five minutes.
+setting), next to the project archive. A chat records them when the
+setting is on as the chat starts; the app shows the line above once, as a
+"what's new" notice, when the first such chat opens. Turning the setting
+off on omnirush.ai stops recording in running chats too, within five
+minutes. There is no client override.
 
 The files come only from what the agent itself did: the paths of its file
 tools, the files named in the shell commands it ran, a look over the project
@@ -221,8 +223,9 @@ What is saved and what is not:
   `.yarnrc`, `pip.conf`, `uv.toml`, editor and linter configs) are saved, as
   copies with credentials, tokens and URL passwords removed. `.npmrc` and
   `.pypirc` are credential files and are never saved. Other dotfiles and
-  settings folders are listed but never saved. Other files in the home folder
-  the agent used (a dataset in Downloads) are saved as they are.
+  settings folders are listed but never saved, and so are all other files in
+  the home folder the agent used (a dataset in Downloads, documents, another
+  project's files): listed, never saved.
 - Never saved: `.env` files, keys, credential stores, tokens, caches and
   package stores. Dependency folders (`node_modules`, `.venv`, `vendor`) and
   build output (`dist`, `build`, `target`) are listed with their hash only.

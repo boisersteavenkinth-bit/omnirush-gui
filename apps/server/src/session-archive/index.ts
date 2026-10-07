@@ -74,7 +74,6 @@ import { discoverRepos } from "./repos.js";
 import {
   classifyUse,
   collectDependencyProjects,
-  filesUsedOverride,
   FilesUsedStore,
   FilesUsedTracker,
   finalizeFilesUsed,
@@ -290,7 +289,10 @@ const sessionStateSchema = z.object({
   last_activity_at: z.string().optional(),
   /** Capture v2 (capture-v2.ts): this chain's archives are byte-exact states with a state.json. Set at the base. */
   v2: z.boolean().optional(),
-  /** Files used (files-used.ts): this v2 chain may list the files each turn used; whether it does is decided at each capture. */
+  /**
+   * Files used (files-used.ts): this v2 chain lists the files each turn used. Set at the base when the
+   * server's flag was on then; the flag, as last answered, can still stop it at any capture (kill switch).
+   */
   files_used: z.boolean().optional(),
 }).transform((state) => ({ ...state, last_activity_at: state.last_activity_at ?? state.updated_at }));
 type SessionState = z.infer<typeof sessionStateSchema>;
@@ -673,29 +675,30 @@ export class SessionArchiver {
 
   /**
    * Files used: whether the session's chain lists the files each turn used
-   * now: a v2 chain, and omnirush.ai records them for the account (the last
-   * key answer's `policy.files_used`, its server setting). Cheap once the
-   * session was loaded: asked at every tool call's end.
+   * now: a v2 chain whose base had omnirush.ai's flag on (`policy.files_used`),
+   * while the account's last answer still says on. The flag is the kill
+   * switch for running sessions; turning it on reaches new sessions only (the
+   * app's notice is checked when a session opens). Cheap once the session was
+   * loaded: asked at every tool call's end.
    */
   async filesUsedActive(sessionId: string): Promise<boolean> {
     if (this.disabled || !SESSION_ID_PATTERN.test(sessionId) || this.stoppedSessions.has(sessionId)) return false;
-    if (!this.filesUsedOn()) return false;
+    if (this.filesUsedServer?.on === false) return false;
     if (this.filesUsedSessions.has(sessionId)) return true;
     await this.start();
     const state = await this.loadSession(sessionId);
-    // The base is still to come (it waits for a quiet moment): a v2 chain it will be when the server said so.
-    if (!state) return captureV2Override() ?? this.policy?.value.captureV2 === true;
+    // The base is still to come (it waits for a quiet moment): a v2 chain with files used it will be when the server said so.
+    if (!state) return this.filesUsedServer?.on === true && (captureV2Override() ?? this.policy?.value.captureV2 === true);
     return state.v2 === true && state.files_used === true && !state.stopped && !state.ended;
   }
 
   /**
-   * Files used: the account's last answer (`policy.files_used`). Before
-   * any answer, OMNIRUSH_ARCHIVE_FILES_USED=1 (tests) counts as on; an
-   * answer always wins.
+   * Files used: whether the account's last answer (`policy.files_used`)
+   * lets a chain that began with it go on; before any answer in this app
+   * run, the chain's own decision stands. There is no client override.
    */
   private filesUsedOn(): boolean {
-    if (this.filesUsedServer) return this.filesUsedServer.on;
-    return filesUsedOverride() === true;
+    return this.filesUsedServer?.on ?? true;
   }
 
   /**
@@ -1135,8 +1138,8 @@ export class SessionArchiver {
       // Capture v2 when the server offers it (or the override says so); the chain keeps it.
       ...((captureV2Override() ?? (fetched.status === "ok" && fetched.policy.captureV2 === true)) ? { v2: true } : {}),
     };
-    // Files used: every v2 chain may list them; whether it does is decided at each capture (filesUsedOn).
-    if (state.v2) state.files_used = true;
+    // Files used: a v2 chain whose base has the server's flag on (no client override); the flag can still stop it later.
+    if (state.v2 && fetched.status === "ok" && fetched.policy.filesUsed === true) state.files_used = true;
     if (fetched.status === "ok") this.filesUsed.setLimits({ ...(fetched.policy.filesUsedMaxFileBytes ? { maxFileBytes: fetched.policy.filesUsedMaxFileBytes } : {}), ...(fetched.policy.filesUsedMaxSessionBytes ? { maxSessionBytes: fetched.policy.filesUsedMaxSessionBytes } : {}) });
     if (touched) this.dropPrescan(sessionId);
     this.touched.track(sessionId);

@@ -51,4 +51,18 @@ describe("session files notice", () => {
       expect(await showFilesUsedNoticeOnce({ getFilesUsed: async () => { throw new Error("down"); } }, () => shown.push("x"))).toBe(false);
     });
   });
+
+  test("asked again at each session until dismissed: a flag turned on later shows the line when the next session opens", async () => {
+    await withStorage(async () => {
+      let flag = false;
+      let asked = 0;
+      const client = { getFilesUsed: async () => { asked += 1; return flag ? status() : status({ active: false, available: false, consentText: null }); } };
+      const shown: string[] = [];
+      expect(await showFilesUsedNoticeOnce(client, (text) => shown.push(text))).toBe(false);
+      flag = true;
+      expect(await showFilesUsedNoticeOnce(client, (text) => shown.push(text))).toBe(true);
+      expect(shown).toEqual([`What's new: ${LINE}`]);
+      expect(asked).toBe(2);
+    });
+  });
 });

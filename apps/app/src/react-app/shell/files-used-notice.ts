@@ -31,7 +31,9 @@ function dismissNotice(): void {
 /**
  * Once per computer: omnirush.ai's session files line as a "what's new"
  * notice that stays until dismissed. `show` puts it in the app's notices.
- * Never throws.
+ * Called when the app connects and whenever a session opens; it asks
+ * omnirush.ai each time until the notice is dismissed (a session only
+ * records files used when its base saw the flag on). Never throws.
  */
 export async function showFilesUsedNoticeOnce(
   client: Pick<OmniRushServerClient, "getFilesUsed">,
