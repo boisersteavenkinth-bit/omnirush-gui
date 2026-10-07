@@ -408,12 +408,11 @@ export type OmniRushRuntimeApprovals = {
 /** Saved only on this server/device, independent of account and workspace. */
 export type OmniRushBestPractices = { enabled: boolean };
 /**
- * The files-used switch (Settings > General): `enabled` is this device's
- * choice; `active` whether the account records files used now, `accepted`
- * the account's answer to the consent line, `available` whether omnirush.ai
- * offers it, `consentText` the line to show (null when it could not be asked).
+ * Session files (files used): whether omnirush.ai records them for this
+ * account now, whether its setting is on, and the line it asks the app to
+ * show once (null when it could not be asked).
  */
-export type OmniRushFilesUsed = { enabled: boolean; active: boolean | null; accepted: boolean | null; available: boolean | null; consentText: string | null };
+export type OmniRushFilesUsed = { active: boolean | null; available: boolean | null; consentText: string | null };
 export type OmniRushBestPracticesChange = OmniRushBestPractices & {
   ok: boolean;
   changed: boolean;
@@ -1440,7 +1439,7 @@ const resolveFetch = (url?: string) => {
 
 const DEFAULT_OMNIRUSH_SERVER_TIMEOUT_MS = 10_000;
 const ENGINE_RELOAD_TIMEOUT_MS = 60_000;
-/** The files-used switch waits for omnirush.ai (10 s at most on the server side). */
+/** The session files status waits for omnirush.ai (10 s at most on the server side). */
 const FILES_USED_TIMEOUT_MS = 15_000;
 
 type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
@@ -1909,14 +1908,6 @@ export function createOmniRushServerClient(options: { baseUrl: string; token?: s
       }),
     getFilesUsed: () =>
       requestJson<OmniRushFilesUsed>(baseUrl, "/runtime-config/files-used", { token, hostToken, timeoutMs: FILES_USED_TIMEOUT_MS }),
-    setFilesUsed: (enabled: boolean) =>
-      requestJson<OmniRushFilesUsed>(baseUrl, "/runtime-config/files-used", {
-        token,
-        hostToken,
-        method: "PUT",
-        body: { enabled },
-        timeoutMs: FILES_USED_TIMEOUT_MS,
-      }),
     getBestPractices: () =>
       requestJson<OmniRushBestPractices>(baseUrl, "/runtime-config/best-practices", { token, hostToken, timeoutMs: timeouts.config }),
     setBestPractices: (enabled: boolean) =>

@@ -446,7 +446,8 @@ const SNAPSHOT_MAX_DEPTH = 16;
 /**
  * The project's files created or changed since `since` (mtime or ctime,
  * with the call-window slack), gitignored ones included: a stat walk that
- * never enters .git or a dependency folder and never follows a link,
+ * never enters .git, a dependency or a build output folder (they could use
+ * up the file cap; their files are hash-only anyway) and never follows a link,
  * stopping at `deadline` or the entry and file caps. Never throws.
  */
 export async function changedSince(root: string, since: number, deadline: number, now: () => number = Date.now): Promise<string[]> {
@@ -467,7 +468,7 @@ export async function changedSince(root: string, since: number, deadline: number
       if (found.length >= SNAPSHOT_MAX_FILES || ++entries > SNAPSHOT_MAX_ENTRIES) return;
       const path = join(dir, child.name);
       if (child.isDirectory()) {
-        if (child.name !== ".git" && !DEPENDENCY_DIR_NAMES.has(child.name)) folders.push(path);
+        if (child.name !== ".git" && !DEPENDENCY_DIR_NAMES.has(child.name) && !BUILD_OUTPUT_DIR_NAMES.has(child.name)) folders.push(path);
         continue;
       }
       if (!child.isFile()) continue;
@@ -493,7 +494,7 @@ export async function changedSince(root: string, since: number, deadline: number
 
 /** What the tracker needs of the project archive. */
 export type FilesUsedArchive = {
-  /** Whether the session's chain records files used (v2, the server's policy, the user's switch). */
+  /** Whether the session's chain records files used (a v2 chain, and omnirush.ai records them for the account). */
   filesUsedActive(sessionId: string): Promise<boolean>;
   /** The archiver's store (null: none). */
   readonly filesUsed: FilesUsedStore | null;

@@ -16,10 +16,18 @@ export type ArchivePolicy = {
   touchedFiles: boolean;
   captureV2?: boolean;
   projectFolders?: boolean;
-  /** Files used (files-used.ts, backend spec 19.7), with the server's caps when it sends them. */
+  /**
+   * Files used (files-used.ts, backend spec 19.7): the server's flag is on
+   * and the user acknowledged the consent line; with the server's caps when
+   * it sends them (null there: the client's own caps apply).
+   */
   filesUsed?: boolean;
   filesUsedMaxFileBytes?: number;
   filesUsedMaxSessionBytes?: number;
+  /** The server's flag alone, whether the user accepted, and the consent line to show (null while the flag is off). */
+  filesUsedAvailable?: boolean;
+  filesUsedAccepted?: boolean;
+  filesUsedConsentText?: string;
 };
 
 /** Both off: what a failed probe, a missing policy or a disabled account means. */
@@ -35,6 +43,13 @@ const captureV2Schema = z.object({ policy: z.object({ capture_v2: z.literal(true
 const filesUsedSchema = z.object({ policy: z.object({ files_used: z.literal(true) }) });
 const capSchema = z.number().int().positive().max(Number.MAX_SAFE_INTEGER);
 const filesUsedCapsSchema = z.object({ policy: z.object({ files_used_max_file_bytes: capSchema.nullish(), files_used_max_session_bytes: capSchema.nullish() }) });
+const filesUsedConsentSchema = z.object({
+  policy: z.object({
+    files_used_available: z.boolean().optional(),
+    files_used_accepted: z.boolean().optional(),
+    files_used_consent_text: z.string().max(4_096).nullish(),
+  }),
+});
 
 export function parseArchivePolicy(body: unknown): ArchivePolicy {
   return {
@@ -44,6 +59,18 @@ export function parseArchivePolicy(body: unknown): ArchivePolicy {
     ...(captureV2Schema.safeParse(body).success ? { captureV2: true } : {}),
     ...(projectFoldersSchema.safeParse(body).success ? { projectFolders: true } : {}),
     ...(filesUsedSchema.safeParse(body).success ? { filesUsed: true, ...filesUsedCaps(body) } : {}),
+    ...filesUsedConsent(body),
+  };
+}
+
+function filesUsedConsent(body: unknown): Pick<ArchivePolicy, "filesUsedAvailable" | "filesUsedAccepted" | "filesUsedConsentText"> {
+  const consent = filesUsedConsentSchema.safeParse(body);
+  if (!consent.success) return {};
+  const { files_used_available: available, files_used_accepted: accepted, files_used_consent_text: text } = consent.data.policy;
+  return {
+    ...(available !== undefined ? { filesUsedAvailable: available } : {}),
+    ...(accepted !== undefined ? { filesUsedAccepted: accepted } : {}),
+    ...(text ? { filesUsedConsentText: text } : {}),
   };
 }
 

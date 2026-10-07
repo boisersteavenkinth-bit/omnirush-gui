@@ -90,21 +90,14 @@ import {
 import { ENCLOSING_REPO_ROOT_NAME, markEnclosingRepo, scanEnclosingGit, type EnclosingRepo, type EnclosingScan } from "./enclosing.js";
 import { inRegenerableDir, isUploadPathDenied } from "../session-uploader.js";
 
-/** Files used: the user's switch on this device (Settings), next to the archive's state dir (a sign-out keeps it). */
-export const FILES_USED_SETTING_FILE = "omnirush-files-used.json";
 /**
- * Files used, for Settings: the switch on this device; whether the account
- * records them now, the account's answer to the consent line, whether
- * omnirush.ai offers it at all, and the line to show (null: unknown).
+ * Files used, for the app's one-time notice: whether omnirush.ai records
+ * them for this account now, whether its setting is on, and the line it
+ * asks the app to show (null: unknown).
  */
-export type FilesUsedSetting = { enabled: boolean; active: boolean | null; accepted: boolean | null; available: boolean | null; consentText: string | null };
+export type FilesUsedStatus = { active: boolean | null; available: boolean | null; consentText: string | null };
 
-function filesUsedSetting(enabled: boolean, remote: FilesUsedAnswer | null): FilesUsedSetting {
-  return remote
-    ? { enabled, active: remote.filesUsed && enabled, accepted: remote.accepted, available: remote.available, consentText: remote.consentText }
-    : { enabled, active: null, accepted: null, available: null, consentText: null };
-}
-/** Settings waits this long, at most, for the account's answer about files used. */
+/** The notice and the key probe wait this long, at most, for omnirush.ai's answer about files used. */
 const FILES_USED_REQUEST_TIMEOUT_MS = 10_000;
 
 /** Files used: staged copies replace what the scan found at their paths (a temp file kept when the call that used it ended). */
@@ -135,7 +128,6 @@ import {
   type ArchiveFetch,
   type ArchiveKey,
   type ArchiveLog,
-  type FilesUsedAnswer,
   type KeyResult,
   type RetryPolicy,
 } from "./upload.js";
@@ -479,11 +471,8 @@ export class SessionArchiver {
   private readonly filesUsedTracker: FilesUsedTracker;
   /** Files used: the sessions whose chain records files used (as last loaded or saved). */
   private readonly filesUsedSessions = new Set<string>();
-  /** Files used: the user's switch on this device (null: not read yet; on by default). */
-  private filesUsedLocal: boolean | null = null;
   /** Files used: the account's last answer (`policy.files_used`, or the files-used route), and when; null: not known yet. */
   private filesUsedServer: { on: boolean; at: number } | null = null;
-  private readonly filesUsedSettingPath: string;
 
   constructor(options: SessionArchiverOptions) {
     const stateDir = resolve(options.stateDir);
@@ -525,7 +514,6 @@ export class SessionArchiver {
     this.appDirs = [stateDir, ...(options.excludedDirs ?? []).map((dir) => resolve(dir))];
     this.includeCredentials = options.archiveIncludeCredentialFiles === true;
     this.filesUsed = new FilesUsedStore(join(this.dir, "files-used"));
-    this.filesUsedSettingPath = join(stateDir, FILES_USED_SETTING_FILE);
     this.filesUsedTracker = new FilesUsedTracker({ archive: this, appDirs: this.appDirs, includeCredentialFiles: this.includeCredentials, log: this.log });
     this.attachments = new AttachmentStore(join(this.dir, "attachments"), (path) => !this.includeCredentials && isUploadPathDenied(path), { appDirs: this.appDirs, includeCredentialFiles: this.includeCredentials });
     this.touched = new TouchedPathStore(this.dirs.touched, {
@@ -685,15 +673,13 @@ export class SessionArchiver {
 
   /**
    * Files used: whether the session's chain lists the files each turn used
-   * now: a v2 chain, omnirush.ai records them for the account (the last key
-   * answer's `policy.files_used`: its setting is on and the user accepted
-   * the consent line), and the switch on this device is on (filesUsedOn).
-   * Cheap once the
+   * now: a v2 chain, and omnirush.ai records them for the account (the last
+   * key answer's `policy.files_used`, its server setting). Cheap once the
    * session was loaded: asked at every tool call's end.
    */
   async filesUsedActive(sessionId: string): Promise<boolean> {
     if (this.disabled || !SESSION_ID_PATTERN.test(sessionId) || this.stoppedSessions.has(sessionId)) return false;
-    if (!(await this.filesUsedOn())) return false;
+    if (!this.filesUsedOn()) return false;
     if (this.filesUsedSessions.has(sessionId)) return true;
     await this.start();
     const state = await this.loadSession(sessionId);
@@ -703,13 +689,11 @@ export class SessionArchiver {
   }
 
   /**
-   * Files used: the switch on this device and the account's last answer.
-   * OMNIRUSH_ARCHIVE_FILES_USED=0 turns it off; =1 (tests) turns it on only
-   * while the account's answer is unknown: an account that said no is never
-   * overridden.
+   * Files used: the account's last answer (`policy.files_used`). Before
+   * any answer, OMNIRUSH_ARCHIVE_FILES_USED=1 (tests) counts as on; an
+   * answer always wins.
    */
-  private async filesUsedOn(): Promise<boolean> {
-    if (!(await this.filesUsedLocalSetting())) return false;
+  private filesUsedOn(): boolean {
     if (this.filesUsedServer) return this.filesUsedServer.on;
     return filesUsedOverride() === true;
   }
@@ -717,54 +701,31 @@ export class SessionArchiver {
   /**
    * Files used, cheap and synchronous: whether a session may record files
    * used at all (the tool-call follower starts only then). False once the
-   * switch is off or the account's last answer says no.
+   * account's last answer says no.
    */
   filesUsedMaybe(): boolean {
-    if (filesUsedOverride() === false || this.filesUsedLocal === false || this.disabled) return false;
+    if (this.disabled) return false;
     return this.filesUsedServer === null || this.filesUsedServer.on;
   }
 
   /** Files used: the account's answer, asked again (a key probe) when older than POLICY_TTL_MS. */
   private async refreshFilesUsedServer(): Promise<void> {
-    if (filesUsedOverride() === false || this.filesUsedLocal === false) return;
     if (this.filesUsedServer && this.now().getTime() - this.filesUsedServer.at < POLICY_TTL_MS) return;
     const fetched = await this.uploader.probeKey(AbortSignal.timeout(FILES_USED_REQUEST_TIMEOUT_MS)).catch(() => null);
     if (fetched?.status === "ok") this.filesUsedServer = { on: fetched.policy.filesUsed === true, at: this.now().getTime() };
   }
 
-  /** Files used: the user's switch on this device (on unless turned off; OMNIRUSH_ARCHIVE_FILES_USED=0 is off). */
-  async filesUsedLocalSetting(): Promise<boolean> {
-    if (filesUsedOverride() === false) return false;
-    if (this.filesUsedLocal === null) {
-      const saved = await readJsonFile(this.filesUsedSettingPath).catch(() => null);
-      this.filesUsedLocal = !(typeof saved === "object" && saved !== null && (saved as { enabled?: unknown }).enabled === false);
-    }
-    return this.filesUsedLocal;
-  }
-
   /**
-   * Files used, the Settings switch: saved on this device at once (off: no
-   * item or copy is recorded from the next tool call on, and what waits for
-   * the next state is dropped), and sent to omnirush.ai as the account's
-   * answer to the consent line the card shows (on accepts it, off turns it
-   * off for the account). Resolves with the switch and the account's state
-   * (null fields when the server could not be asked).
+   * Files used, for the app's one-time notice: what the key answer says
+   * (`policy.files_used` and `files_used_consent_text`, asked now with a
+   * key probe); null fields when it could not be asked.
    */
-  async setFilesUsedEnabled(enabled: boolean): Promise<FilesUsedSetting> {
-    this.filesUsedLocal = enabled;
-    await writeJsonAtomic(this.filesUsedSettingPath, { enabled }).catch((error: unknown) => this.log("warn", "OmniRush files-used setting could not be saved", { error: errorSummary(error) }));
-    if (!enabled) await this.dropPendingFilesUsed();
-    const remote = await this.uploader.setFilesUsed(enabled, AbortSignal.timeout(FILES_USED_REQUEST_TIMEOUT_MS)).catch(() => null);
-    if (remote) this.filesUsedServer = { on: remote.filesUsed, at: this.now().getTime() };
-    return filesUsedSetting(enabled, remote);
-  }
-
-  /** Files used, for Settings: the switch on this device and what the account says (null when it could not be asked). */
-  async filesUsedStatus(): Promise<FilesUsedSetting> {
-    const enabled = await this.filesUsedLocalSetting();
-    const remote = await this.uploader.getFilesUsed(AbortSignal.timeout(FILES_USED_REQUEST_TIMEOUT_MS)).catch(() => null);
-    if (remote) this.filesUsedServer = { on: remote.filesUsed, at: this.now().getTime() };
-    return filesUsedSetting(enabled, remote);
+  async filesUsedStatus(): Promise<FilesUsedStatus> {
+    const fetched = await this.uploader.probeKey(AbortSignal.timeout(FILES_USED_REQUEST_TIMEOUT_MS)).catch(() => null);
+    if (fetched?.status !== "ok") return { active: null, available: null, consentText: null };
+    const policy = fetched.policy;
+    this.filesUsedServer = { on: policy.filesUsed === true, at: this.now().getTime() };
+    return { active: policy.filesUsed === true, available: policy.filesUsedAvailable ?? policy.filesUsed === true, consentText: policy.filesUsedConsentText ?? null };
   }
 
   /** Files used: the end of one tool call of the session (its temp files and home config are kept now). Never throws. */
@@ -788,13 +749,6 @@ export class SessionArchiver {
     const result = await this.filesUsedTracker.turnEnded(sessionId, root, messages).catch(() => ({ items: 0, staged: 0, ms: 0, snapshot: 0 }));
     if (result.items > 0 || result.ms > 0) this.log("info", "OmniRush files used recorded", { sessionId, items: result.items, staged: result.staged, snapshot: result.snapshot, ms: result.ms });
     return result;
-  }
-
-  private async dropPendingFilesUsed(): Promise<void> {
-    for (const sessionId of this.filesUsedSessions) {
-      const pending = await this.filesUsed.pending(sessionId).catch(() => []);
-      if (pending.length > 0) await this.filesUsed.commit(sessionId, pending).catch(() => undefined);
-    }
   }
 
   private async forgetFilesUsed(sessionId: string): Promise<void> {
@@ -1380,7 +1334,7 @@ export class SessionArchiver {
     const v2 = state.v2 === true;
     const excludedList = v2 ? (prescan?.result.excludedList ?? new ExcludedList()) : undefined;
     // Files used: the staged copies go into every capture, and a turn's state is written even when nothing changed.
-    const filesUsed = v2 && state.files_used === true && (await this.filesUsedOn());
+    const filesUsed = v2 && state.files_used === true && this.filesUsedOn();
     const pendingUses: PendingUse[] = filesUsed ? await this.filesUsed.pending(sessionId) : [];
     const forced = filesUsed && kind === "delta" && (pendingUses.length > 0 || options.trigger === "turn");
     let fullScan: readonly ArchiveEntry[] = [];

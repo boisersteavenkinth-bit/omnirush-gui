@@ -10,7 +10,7 @@ import * as deps from "./deps.js";
 import * as used from "./files-used.js";
 import * as policy from "./files-used-policy.js";
 import * as shell from "./files-used-shell.js";
-import { SessionArchiver, FILES_USED_SETTING_FILE } from "./index.js";
+import { SessionArchiver } from "./index.js";
 import { ProjectArchiveLifecycle, type ProjectArchiver } from "./lifecycle.js";
 import { outsideExclusion } from "./outside.js";
 import { parseArchivePolicy } from "./policy.js";
@@ -143,7 +143,8 @@ describe("policy (shared with the CLI)", () => {
     expect(parseArchivePolicy({ policy: { capture_v2: true, files_used: true, files_used_max_file_bytes: 1024, files_used_max_session_bytes: null } }))
       .toEqual({ allFolders: false, touchedFiles: false, captureV2: true, filesUsed: true, filesUsedMaxFileBytes: 1024 });
     expect(parseArchivePolicy({ policy: { files_used: false } }).filesUsed).toBeUndefined();
-    expect(policy.filesUsedOverride({ OMNIRUSH_ARCHIVE_FILES_USED: "0" })).toBe(false);
+    expect(policy.filesUsedOverride({ OMNIRUSH_ARCHIVE_FILES_USED: "1" })).toBe(true);
+    expect(policy.filesUsedOverride({ OMNIRUSH_ARCHIVE_FILES_USED: "0" })).toBeNull();
     expect(policy.filesUsedOverride({})).toBeNull();
   });
 
@@ -172,18 +173,18 @@ describe("the desktop side", () => {
     expect(outsideExclusion("/tmp/shot.png", { appDirs: [], home })).toBeNull();
   });
 
-  test("end-of-turn snapshot: files changed since the turn started, gitignored ones too, never .git or dependency folders", async () => {
+  test("end-of-turn snapshot: files changed since the turn started, gitignored ones too, never .git, dependency or build output folders", async () => {
     const root = temp("omnirush-fu-snap-");
     for (const file of ["src/a.py", "README.md", ".git/HEAD"]) write(join(root, file), "x");
     // The turn starts after these were written (ctime cannot be set back, so the turn is moved ahead instead).
     const since = Date.now() + 2_500;
     const later = (Date.now() + 10_000) / 1000;
-    for (const file of ["out/report.csv", "node_modules/x/i.js", ".git/index", "dist/app.js"]) {
+    for (const file of ["results/report.csv", "node_modules/x/i.js", ".git/index", "dist/app.js", "target/x.o"]) {
       write(join(root, file), "1");
       utimesSync(join(root, file), later, later);
     }
     const found = (await used.changedSince(root, since, Date.now() + 5_000)).map((path) => path.slice(root.length + 1)).sort();
-    expect(found).toEqual(["dist/app.js", "out/report.csv"]);
+    expect(found).toEqual(["results/report.csv"]);
     // A spent budget stops the walk.
     expect(await used.changedSince(root, since, Date.now() - 1)).toEqual([]);
   });
@@ -357,51 +358,40 @@ describe("a files-used chain", () => {
     expect(quiet.state.dependencies).toBeUndefined();
   });
 
-  test("the Settings switch: shows omnirush.ai's line, accepts it or turns it off for the account, and gates recording at once", async () => {
-    const puts: string[] = [];
+  test("omnirush.ai's flag drives it: nothing before it is on, recorded once it is, and the notice status says so", async () => {
     const line = "OmniRush also saves the files the agent reads, runs or creates during a session (including temporary files and a few allowlisted config files, with secrets removed), so the session can be replayed.";
-    let accepted = false;
-    const answer = () => Response.json({ files_used: accepted, files_used_accepted: accepted, files_used_available: true, files_used_consent_text: line });
-    const { archiver, open, stateDir } = rig(() => ({ capture_v2: true, files_used: accepted, files_used_accepted: accepted, files_used_available: true, files_used_consent_text: line }), {
-      "archives/files-used": (init) => {
-        if (init.method === "PUT") {
-          puts.push(init.body ?? "");
-          accepted = JSON.parse(init.body ?? "{}").enabled === true;
-        }
-        return answer();
-      },
-    });
+    let flag = false;
+    let clock = Date.now();
+    const { archiver, open } = rig(() => ({ capture_v2: true, files_used: flag, files_used_consent_text: flag ? line : null }), {}, () => new Date(clock));
     const root = project();
-    const sessionId = "ses_files_used_gui_switch";
-    // Not accepted yet: the chain records nothing.
+    const sessionId = "ses_files_used_gui_flag";
     const base = await open(await archiver.captureBase(sessionId, root, 0));
     expect(base.state.files_used).toBeUndefined();
     expect(await archiver.filesUsedActive(sessionId)).toBe(false);
-    expect(await archiver.filesUsedStatus()).toEqual({ enabled: true, active: false, accepted: false, available: true, consentText: line });
+    expect(archiver.filesUsedMaybe()).toBe(false);
+    expect(await archiver.filesUsedStatus()).toEqual({ active: false, available: false, consentText: null });
 
-    // Accepted from Settings: recorded from the next turn.
-    expect(await archiver.setFilesUsedEnabled(true)).toEqual({ enabled: true, active: true, accepted: true, available: true, consentText: line });
-    expect(await archiver.filesUsedActive(sessionId)).toBe(true);
+    flag = true;
+    clock += 6 * 60_000;
     const read = toolPart("r", "read", { filePath: join(root, "config.local.yaml") });
-    // The read, and the project's files the snapshot finds changed (the test just wrote them).
+    // The answer is asked again at the turn's end (it is old): recorded from this turn on.
     expect((await archiver.filesUsedTurnEnded(sessionId, root, turn(read))).items).toBeGreaterThanOrEqual(1);
+    expect(await archiver.filesUsedActive(sessionId)).toBe(true);
     const on = await open(await archiver.captureDelta(sessionId, root, 1));
     expect(on.state.files_used!.find((item) => item.path === "config.local.yaml")?.captured).toBe(true);
+    expect(await archiver.filesUsedStatus()).toEqual({ active: true, available: true, consentText: line });
+  });
 
-    // Off: saved on this device, sent to the account, nothing more recorded; what waited is dropped.
-    expect((await archiver.filesUsedTurnEnded(sessionId, root, turn(read))).items).toBeGreaterThanOrEqual(1);
-    expect(await archiver.setFilesUsedEnabled(false)).toEqual({ enabled: false, active: false, accepted: false, available: true, consentText: line });
-    expect(puts).toEqual([JSON.stringify({ enabled: true }), JSON.stringify({ enabled: false })]);
-    expect(JSON.parse(readFileSync(join(stateDir, FILES_USED_SETTING_FILE), "utf8"))).toEqual({ enabled: false });
-    expect(await archiver.filesUsedActive(sessionId)).toBe(false);
-    expect(archiver.filesUsedMaybe()).toBe(false);
-    expect((await archiver.filesUsedTurnEnded(sessionId, root, turn(read))).items).toBe(0);
-    expect(await archiver.captureDelta(sessionId, root, 2)).toEqual({ status: "skipped", reason: "unchanged" });
-
-    // A new archiver (an app restart) reads the saved switch.
-    const again = new SessionArchiver({ stateDir, request: async () => new Response("{}", { status: 404 }), log: () => undefined });
-    stops.push(() => again.stop({ budgetMs: 100 }));
-    expect(await again.filesUsedLocalSetting()).toBe(false);
+  test("OMNIRUSH_ARCHIVE_FILES_USED=1 (tests) never overrides an answer that says no; =0 is no switch", async () => {
+    process.env.OMNIRUSH_ARCHIVE_FILES_USED = "1";
+    const off = rig({ capture_v2: true, files_used: false });
+    const root = project();
+    await off.open(await off.archiver.captureBase("ses_files_used_gui_env1", root, 0));
+    expect(await off.archiver.filesUsedActive("ses_files_used_gui_env1")).toBe(false);
+    process.env.OMNIRUSH_ARCHIVE_FILES_USED = "0";
+    const on = rig({ capture_v2: true, files_used: true });
+    const base = await on.open(await on.archiver.captureBase("ses_files_used_gui_env0", project(), 0));
+    expect(base.state.files_used).toEqual([]);
   });
 
   test("a withdrawal on omnirush.ai stops recording at the next turn whose answer is old", async () => {
@@ -419,22 +409,18 @@ describe("a files-used chain", () => {
     expect(await archiver.filesUsedActive(sessionId)).toBe(false);
   });
 
-  test("off: a server without files_used, or OMNIRUSH_ARCHIVE_FILES_USED=0, keeps the chain as it was", async () => {
-    for (const [keyPolicy, env] of [[{ capture_v2: true, files_used: true }, "0"], [{ capture_v2: true }, undefined]] as const) {
-      if (env === undefined) delete process.env.OMNIRUSH_ARCHIVE_FILES_USED;
-      else process.env.OMNIRUSH_ARCHIVE_FILES_USED = env;
-      const { archiver, open } = rig(keyPolicy);
-      const root = project();
-      const sessionId = `ses_files_used_gui_off_${env ?? "server"}`;
-      const base = await open(await archiver.captureBase(sessionId, root, 0));
-      expect(base.state.files_used).toBeUndefined();
-      expect(base.state.dependencies).toBeUndefined();
-      expect(await archiver.filesUsedActive(sessionId)).toBe(false);
-      expect(archiver.filesUsedMaybe()).toBe(false);
-      const result = await archiver.filesUsedTurnEnded(sessionId, root, turn(toolPart("c", "read", { filePath: join(root, "config.local.yaml") })));
-      expect(result.items).toBe(0);
-      expect(await archiver.captureDelta(sessionId, root, 1)).toEqual({ status: "skipped", reason: "unchanged" });
-    }
+  test("off: a server without files_used keeps the chain as it was", async () => {
+    const { archiver, open } = rig({ capture_v2: true });
+    const root = project();
+    const sessionId = "ses_files_used_gui_off";
+    const base = await open(await archiver.captureBase(sessionId, root, 0));
+    expect(base.state.files_used).toBeUndefined();
+    expect(base.state.dependencies).toBeUndefined();
+    expect(await archiver.filesUsedActive(sessionId)).toBe(false);
+    expect(archiver.filesUsedMaybe()).toBe(false);
+    const result = await archiver.filesUsedTurnEnded(sessionId, root, turn(toolPart("c", "read", { filePath: join(root, "config.local.yaml") })));
+    expect(result.items).toBe(0);
+    expect(await archiver.captureDelta(sessionId, root, 1)).toEqual({ status: "skipped", reason: "unchanged" });
   });
 
   test("caps: a used file over the per-file cap is listed with its size only, never copied", async () => {

@@ -89,17 +89,14 @@ export function strongerOp(left: FilesUsedOp, right: FilesUsedOp): FilesUsedOp {
 }
 
 /**
- * OMNIRUSH_ARCHIVE_FILES_USED, the per-user switch: "0"/"false"/"off"/"no"
- * turns it off whatever the server says; "1"/"true"/"on"/"yes" turns it on
- * (tests; the server's policy still has to offer capture v2); anything else
- * follows the server's `policy.files_used`.
+ * OMNIRUSH_ARCHIVE_FILES_USED=1 records files used on a capture v2 chain
+ * whatever the server's policy says (tests, and e2e runs against a server
+ * that does not send `policy.files_used` yet); anything else follows the
+ * server. There is no per-user off switch.
  */
 export const FILES_USED_ENV = "OMNIRUSH_ARCHIVE_FILES_USED";
-export function filesUsedOverride(env: NodeJS.ProcessEnv = process.env): boolean | null {
-  const value = (env[FILES_USED_ENV] ?? "").trim().toLowerCase();
-  if (["1", "true", "on", "yes"].includes(value)) return true;
-  if (["0", "false", "off", "no"].includes(value)) return false;
-  return null;
+export function filesUsedOverride(env: NodeJS.ProcessEnv = process.env): true | null {
+  return ["1", "true", "on", "yes"].includes((env[FILES_USED_ENV] ?? "").trim().toLowerCase()) ? true : null;
 }
 
 // --- where a file is, and whether its bytes may be archived ------------------------------

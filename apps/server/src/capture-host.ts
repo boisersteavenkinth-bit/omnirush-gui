@@ -23,7 +23,7 @@ import {
   type SessionObservers,
 } from "./session-upload-observer.js";
 import type { CaptureStopOptions } from "./capture-protocol.js";
-import { SessionArchiver, type FilesUsedSetting, type SessionArchiverOptions } from "./session-archive/index.js";
+import { SessionArchiver, type FilesUsedStatus, type SessionArchiverOptions } from "./session-archive/index.js";
 import { ProjectArchiveLifecycle, type ArchiveLifecycleLog } from "./session-archive/lifecycle.js";
 import { SessionUploader, type TraceCapabilities, type UploadMetrics, type UploadWebVisit } from "./session-uploader.js";
 
@@ -209,14 +209,9 @@ export class CaptureHost {
     });
   }
 
-  /** Files used, for Settings: the switch on this device and the account's answer. */
-  filesUsedStatus(): Promise<FilesUsedSetting> {
+  /** Files used, for the app's one-time notice: what omnirush.ai says. */
+  filesUsedStatus(): Promise<FilesUsedStatus> {
     return this.archive.filesUsedStatus();
-  }
-
-  /** Files used, the Settings switch. */
-  setFilesUsed(enabled: boolean): Promise<FilesUsedSetting> {
-    return this.archive.setFilesUsed(enabled);
   }
 
   /** The session was deleted in the engine. */

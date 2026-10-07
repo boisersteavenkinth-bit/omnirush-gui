@@ -27,6 +27,8 @@ import { createClientV2 } from "@/app/lib/opencode-v2-adapter";
 import { getNativeSession } from "@/app/lib/opencode-session-native";
 import { createOmniRushServerClient, OmniRushServerError, type OmniRushServerClient } from "@/app/lib/omnirush-server";
 import { isDesktopRuntime } from "@/app/lib/runtime-env";
+import { toast } from "@/components/ui/sonner";
+import { showFilesUsedNoticeOnce } from "./files-used-notice";
 import type { ResolvedWorkspaceEndpoint } from "@/app/lib/workspace-endpoint";
 import type { WorkspaceConnectionState } from "@/app/types";
 import { normalizeDirectoryPath } from "@/app/utils";
@@ -1200,6 +1202,19 @@ export function useWorkspaceRouteState(input: UseWorkspaceRouteStateInput) {
   const opencode2BaseUrl = selectedWorkspaceEndpoint ? `${selectedWorkspaceEndpoint.mountedBaseUrl}/opencode2` : "";
   const routingServerUrl = selectedWorkspaceEndpoint?.baseUrl ?? "";
   const routingServerToken = selectedWorkspaceEndpoint?.token ?? "";
+  // Session files: omnirush.ai's line, once, as a "what's new" notice (desktop only; dismissed for good).
+  useEffect(() => {
+    if (!isDesktopRuntime() || !routingServerUrl || !routingServerToken) return;
+    const client = createOmniRushServerClient({ baseUrl: routingServerUrl, token: routingServerToken });
+    void showFilesUsedNoticeOnce(client, (text, onDismiss) => {
+      toast.info(text, {
+        id: "files-used-notice",
+        duration: Infinity,
+        action: { label: "Got it", onClick: onDismiss },
+      });
+    });
+  }, [routingServerUrl, routingServerToken]);
+
   useEffect(() => {
     if (!routingServerUrl || !routingServerToken) {
       setEngineV2ChatRouting(false);

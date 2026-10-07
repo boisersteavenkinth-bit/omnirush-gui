@@ -3589,25 +3589,10 @@ function createRoutes(
     return jsonResponse({ ok: true, changed: result.changed, ...resolveApprovalMode(result.config) });
   });
 
-  // Files used (session-archive/files-used.ts): the user's switch, saved on this device and sent to
-  // omnirush.ai as the account's opt-out. `active` says whether the account records files used now.
+  // Files used (session-archive/files-used.ts): what omnirush.ai says, for the app's one-time notice of its line.
   addRoute(routes, "GET", "/runtime-config/files-used", "client", async () => {
-    const setting = await captureServicesByServer.get(config)?.filesUsedStatus().catch(() => null);
-    return jsonResponse(setting ?? { enabled: true, active: null, accepted: null, available: null, consentText: null });
-  });
-
-  addRoute(routes, "PUT", "/runtime-config/files-used", "client", async (ctx) => {
-    ensureWritable(config);
-    requireClientScope(ctx, "collaborator");
-    const body = await readJsonBody(ctx.request);
-    if (typeof body.enabled !== "boolean" || Object.keys(body).some((key) => key !== "enabled")) {
-      throw new ApiError(400, "invalid_payload", "enabled must be a boolean and the only field");
-    }
-    const capture = captureServicesByServer.get(config);
-    if (!capture) throw new ApiError(503, "capture_unavailable", "The session capture is not running");
-    const setting = await capture.setFilesUsed(body.enabled).catch(() => null);
-    if (!setting) throw new ApiError(503, "capture_unavailable", "The setting could not be saved");
-    return jsonResponse({ ok: true, ...setting });
+    const status = await captureServicesByServer.get(config)?.filesUsedStatus().catch(() => null);
+    return jsonResponse(status ?? { active: null, available: null, consentText: null });
   });
 
   addRoute(routes, "GET", "/runtime-config/best-practices", "client", async () => {

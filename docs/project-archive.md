@@ -197,13 +197,10 @@ OmniRush also saves the files the agent reads, runs or creates during a
 session (including temporary files and a few allowlisted config files, with
 secrets removed), so the session can be replayed.
 
-It is off until you accept that line, either with the **Session files**
-switch in **Settings > General** (shown while omnirush.ai offers it, with
-the line as omnirush.ai words it) or on the Account page on omnirush.ai.
-Turning the switch off stops it on this computer from the next tool call
-and turns it off for your account. `OMNIRUSH_ARCHIVE_FILES_USED=0` turns it
-off on this computer too. A change made on omnirush.ai reaches a running
-app within five minutes.
+It runs whenever omnirush.ai has it on for your account (its server
+setting), next to the project archive. The app shows the line above once,
+as a "what's new" notice. A change on omnirush.ai reaches a running app
+within five minutes.
 
 The files come only from what the agent itself did: the paths of its file
 tools, the files named in the shell commands it ran, a look over the project
@@ -223,7 +220,8 @@ What is saved and what is not:
 - In the home folder, only allowlisted config files (`.gitconfig`, `.npmrc`,
   `.yarnrc`, `pip.conf`, `uv.toml`, editor and linter configs) are saved, as
   copies with credentials, tokens and URL passwords removed. Other dotfiles and
-  settings folders are listed but never saved.
+  settings folders are listed but never saved. Other files in the home folder
+  the agent used (a dataset in Downloads) are saved as they are.
 - Never saved: `.env` files, keys, credential stores, tokens, caches and
   package stores. Dependency folders (`node_modules`, `.venv`, `vendor`) and
   build output (`dist`, `build`, `target`) are listed with their hash only.

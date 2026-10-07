@@ -15,13 +15,13 @@ import { realpath } from "node:fs/promises";
 
 import { attachmentsFromMessages } from "./attachments.js";
 import type { StartCapture } from "./capture-v2.js";
-import type { CaptureResult, DrainResult, FilesUsedSetting, FinalReason, SessionArchiver } from "./index.js";
+import type { CaptureResult, DrainResult, FilesUsedStatus, FinalReason, SessionArchiver } from "./index.js";
 import type { UsedToolCall } from "./files-used.js";
 
 export type ProjectArchiver = Pick<
   SessionArchiver,
   "captureBase" | "captureDelta" | "captureFinal" | "startFinalCandidates" | "recordTouched" | "forgetTouched" | "drain" | "signOut" | "stop"
-> & Partial<Pick<SessionArchiver, "startManifest" | "hasStartManifest" | "captureState" | "recordAttachments" | "recordBinary" | "filesUsedToolCallEnded" | "filesUsedTurnStarted" | "filesUsedTurnEnded" | "filesUsedMaybe" | "filesUsedStatus" | "setFilesUsedEnabled">>;
+> & Partial<Pick<SessionArchiver, "startManifest" | "hasStartManifest" | "captureState" | "recordAttachments" | "recordBinary" | "filesUsedToolCallEnded" | "filesUsedTurnStarted" | "filesUsedTurnEnded" | "filesUsedMaybe" | "filesUsedStatus">>;
 
 /** Engine reads for one session, resolving to the parsed JSON, or null when it cannot be read. */
 export type ArchiveEngineReads = {
@@ -391,27 +391,17 @@ export class ProjectArchiveLifecycle {
     if (record && this.active && !this.consentOff) this.archiver.filesUsedTurnStarted?.(sessionId);
   }
 
-  /** Files used, for Settings: the switch on this device and the account's answer. Never rejects. */
-  async filesUsedStatus(): Promise<FilesUsedSetting> {
+  /** Files used, for the app's one-time notice: what omnirush.ai says. Never rejects. */
+  async filesUsedStatus(): Promise<FilesUsedStatus> {
     try {
       if (this.archiver.filesUsedStatus) return await this.archiver.filesUsedStatus();
     } catch (error) {
       this.warn("files-used", error);
     }
-    return { enabled: true, active: null, accepted: null, available: null, consentText: null };
+    return { active: null, available: null, consentText: null };
   }
 
-  /** Files used, the Settings switch: saved on this device, sent to the account as its opt-out. Never rejects. */
-  async setFilesUsed(enabled: boolean): Promise<FilesUsedSetting> {
-    try {
-      if (this.archiver.setFilesUsedEnabled) return await this.archiver.setFilesUsedEnabled(enabled);
-    } catch (error) {
-      this.warn("files-used", error);
-    }
-    return { enabled, active: null, accepted: null, available: null, consentText: null };
-  }
-
-  /** Files used: whether tool calls are worth following now (the switch, the kept policy). */
+  /** Files used: whether tool calls are worth following now (the account's last answer). */
   filesUsedMaybe(): boolean {
     return this.active && !this.consentOff && this.archiver.filesUsedMaybe?.() === true;
   }
