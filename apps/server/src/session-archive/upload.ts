@@ -19,7 +19,7 @@ export type ArchiveFetch = (input: string, init?: RequestInit) => Promise<Respon
  */
 export type ArchiveApiRequest = (path: string, init: ArchiveApiRequestInit) => Promise<Response>;
 /** `refresh: false` returns a 401 as it is, without refreshing the bearer (the all-folders policy probe); absent means true. */
-export type ArchiveApiRequestInit = { method: "GET" | "POST"; body?: string; signal?: AbortSignal; refresh?: false };
+export type ArchiveApiRequestInit = { method: "GET" | "POST" | "PUT"; body?: string; signal?: AbortSignal; refresh?: false };
 export type ArchiveLog = (level: "info" | "warn", message: string, attributes?: Record<string, unknown>) => void;
 
 export type RetryPolicy = {
@@ -142,6 +142,35 @@ export type ArchiveUploadJob = {
 
 export type ArchiveKey = { kid: string; publicKey: Buffer; alg: string };
 
+/**
+ * The account's files-used answer: `filesUsed` the server records them now
+ * (its setting is on and the user accepted the line), `accepted` the user's
+ * answer, `available` the setting alone, `consentText` the line to show.
+ */
+export type FilesUsedAnswer = { filesUsed: boolean; accepted: boolean | null; available: boolean | null; consentText: string | null };
+
+const filesUsedSchema = z.object({
+  files_used: z.boolean(),
+  files_used_accepted: z.boolean().optional(),
+  // An earlier form of the route: the opt-out instead of the answer.
+  files_used_opt_out: z.boolean().optional(),
+  files_used_available: z.boolean().optional(),
+  files_used_consent_text: z.string().max(4_096).nullish(),
+});
+
+function filesUsedResult(result: ApiResult): FilesUsedAnswer | null {
+  if (result.kind !== "ok") return null;
+  const parsed = filesUsedSchema.safeParse(result.body);
+  if (!parsed.success) return null;
+  const body = parsed.data;
+  return {
+    filesUsed: body.files_used,
+    accepted: body.files_used_accepted ?? (body.files_used_opt_out === undefined ? null : !body.files_used_opt_out),
+    available: body.files_used_available ?? null,
+    consentText: body.files_used_consent_text ?? null,
+  };
+}
+
 export type KeyResult =
   /** The policy comes with the key, in the same response. */
   | { status: "ok"; key: ArchiveKey; policy: ArchivePolicy }
@@ -255,7 +284,7 @@ export class ArchiveUploader {
     this.token = token?.trim() || null;
   }
 
-  private send(method: "GET" | "POST", path: string, body: unknown, signal?: AbortSignal, probe = false): Promise<Response> {
+  private send(method: "GET" | "POST" | "PUT", path: string, body: unknown, signal?: AbortSignal, probe = false): Promise<Response> {
     const payload = body === undefined ? undefined : JSON.stringify(body);
     const timeout = timeoutSignal(probe ? POLICY_PROBE_TIMEOUT_MS : REQUEST_TIMEOUT_MS, signal);
     if (this.options.request) return this.options.request(path, { method, ...(payload === undefined ? {} : { body: payload }), signal: timeout, ...(probe ? { refresh: false as const } : {}) });
@@ -285,7 +314,7 @@ export class ArchiveUploader {
   }
 
   /** One API call: 401 refreshes the bearer once; network errors and retryable statuses back off. */
-  private async call(method: "GET" | "POST", path: string, body: unknown, signal?: AbortSignal): Promise<ApiResult> {
+  private async call(method: "GET" | "POST" | "PUT", path: string, body: unknown, signal?: AbortSignal): Promise<ApiResult> {
     let refreshed = false;
     let attempt = 0;
     for (;;) {
@@ -382,6 +411,23 @@ export class ArchiveUploader {
     if (outcome?.status === "disabled") return { status: "disabled", code: outcome.code };
     if (result.kind === "error") return { status: "unavailable", reason: `status ${result.status}` };
     return { status: "unavailable", reason: result.kind === "unavailable" ? result.reason : result.kind };
+  }
+
+  /**
+   * Files used (19.7): the account's answer, GET /archives/files-used
+   * (`{files_used, files_used_accepted, files_used_available,
+   * files_used_consent_text}`); null when it cannot be read (an older
+   * server, archiving off, no network).
+   */
+  async getFilesUsed(signal?: AbortSignal): Promise<FilesUsedAnswer | null> {
+    if (!this.configured) return null;
+    return filesUsedResult(await this.call("GET", "archives/files-used", undefined, signal));
+  }
+
+  /** Files used (19.7): PUT /archives/files-used `{enabled}`, the account's answer to the consent line; null when the server did not take it. */
+  async setFilesUsed(enabled: boolean, signal?: AbortSignal): Promise<FilesUsedAnswer | null> {
+    if (!this.configured) return null;
+    return filesUsedResult(await this.call("PUT", "archives/files-used", { enabled }, signal));
   }
 
   /** Best-effort POST /archives/{id}/abort (7.7); one attempt, result ignored. */

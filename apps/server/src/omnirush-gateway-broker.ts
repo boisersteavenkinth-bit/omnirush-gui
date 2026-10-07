@@ -694,7 +694,7 @@ export const VOICE_TRANSCRIPTIONS_PATH = "audio/transcriptions";
 const VOICE_TRANSCRIBE_TIMEOUT_MS = 35_000;
 
 /** The project archive routes the session archiver calls (archives, archives/key, archives/<id>/parts|complete|abort). */
-const ARCHIVE_API_PATH = /^archives(?:\/key|\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/(?:parts|complete|abort))?$/;
+const ARCHIVE_API_PATH = /^archives(?:\/key|\/files-used|\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/(?:parts|complete|abort))?$/;
 
 /**
  * Set by the omnirush-reasoning-effort engine plugin; keep the two
@@ -1270,7 +1270,7 @@ export class OmniRushGatewayBroker {
    * `refresh: false` (the archiver's all-folders policy probe) it is one
    * request: a 401 is returned as it is, with no refresh and no second try.
    */
-  archiveRequest(path: string, init: { method: "GET" | "POST"; body?: string; signal?: AbortSignal; refresh?: false }): Promise<Response> {
+  archiveRequest(path: string, init: { method: "GET" | "POST" | "PUT"; body?: string; signal?: AbortSignal; refresh?: false }): Promise<Response> {
     if (!ARCHIVE_API_PATH.test(path)) return Promise.resolve(Response.json({ error: "unsupported_archive_path" }, { status: 404 }));
     return this.withDeviceBearer((state) => this.fetcher(apiUrl(state.gatewayUrl, path), {
       method: init.method,

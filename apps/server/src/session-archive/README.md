@@ -45,6 +45,10 @@ The user-facing description is `docs/project-archive.md`.
 | `files.ts` | Atomic state-file writes and the GC hint |
 | `index.ts` | `SessionArchiver`: durable queue, crash recovery, drain |
 | `lifecycle.ts` | `ProjectArchiveLifecycle`: when the server calls the archiver (session start, turn end, a turn that ends without completing, session end, sign-out, shutdown, app start), the engine-derived turn count, the child-session check, the consent-off window, the quiet window before a final archive and the bounded background queue; `projectArchiveEnabled` (`OMNIRUSH_ARCHIVE_ENABLED`) |
+| `files-used-policy.ts` | Files used (backend spec 19.7): the `files_used` item and its reasons, the caps (64 MiB per file, 256 MiB per chat), `classifyUse` (scope, and whether the bytes are archived from the scan, staged, or held), the home config allowlist and `scrubHomeConfig`. Pure; byte-identical to the CLI's |
+| `files-used-shell.ts` | Files used: the files a shell command reads, writes or runs, from its text alone. Pure; byte-identical to the CLI's |
+| `deps.ts` | Files used: the resolved versions of each subproject from its lockfile (the state's `dependencies`). Pure; byte-identical to the CLI's |
+| `files-used.ts` | Files used, the app side: `FilesUsedStore` (staged copies and the items waiting for the next state), `FilesUsedTracker` (the end of each tool call keeps its temp files and scrubbed home config; the end of each turn lists every file its calls used, plus the end-of-turn snapshot of files changed during the turn, and reports the project and outside ones as touched), `collectDependencyProjects`, `watchToolCallEnds`. Only the agent's own tool calls are read: no hooks, no file watchers |
 | `fake-archive-server.ts`, `test-helpers.ts` | Test support only |
 
 ## API

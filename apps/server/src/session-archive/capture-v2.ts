@@ -16,6 +16,8 @@
 import type { AttachmentRecord } from "./attachments.js";
 import { attachmentStateItem } from "./attachments.js";
 import type { RepoState } from "./repos.js";
+import type { FilesUsedItem } from "./files-used-policy.js";
+import type { ToolchainProject } from "./deps.js";
 
 export const ARCHIVE_SCHEMA_V2 = "omnirush.archive.v2";
 export const STATE_MEMBER = "__omnirush__/state.json";
@@ -104,6 +106,10 @@ export type StateDocumentInput = {
   excluded: ExcludedList;
   scrubbed: readonly string[];
   attachments: readonly AttachmentRecord[];
+  /** Files used (19.7): the files the turns since the last state used; present (maybe empty) on a files-used chain. */
+  filesUsed?: readonly FilesUsedItem[];
+  /** Files used (19.7): every subproject's lockfile and resolved versions, when they were read for this state. */
+  dependencies?: readonly ToolchainProject[];
 };
 
 /** `__omnirush__/state.json` of a v2 archive. */
@@ -120,5 +126,7 @@ export function stateDocument(input: StateDocumentInput): Buffer {
     excluded_truncated_count: input.excluded.truncatedCount,
     scrubbed: [...input.scrubbed].sort(),
     attachments: input.attachments.map(attachmentStateItem),
+    ...(input.filesUsed ? { files_used: input.filesUsed } : {}),
+    ...(input.dependencies ? { dependencies: input.dependencies } : {}),
   }), "utf8");
 }

@@ -32,6 +32,8 @@ export type CaptureCalls = {
   stop: [options?: CaptureStopOptions];
   idle: [];
   diagnostics: [];
+  filesUsedStatus: [];
+  setFilesUsed: [enabled: boolean];
 };
 
 export type CaptureCallName = keyof CaptureCalls;
@@ -45,7 +47,7 @@ export type HostRequest =
   | { type: "uploadFile"; sessionId: string; path: string; size: number }
   | { type: "capabilities" }
   | { type: "refreshAccessToken" }
-  | { type: "archiveRequest"; path: string; method: "GET" | "POST"; body?: string; refresh?: false }
+  | { type: "archiveRequest"; path: string; method: "GET" | "POST" | "PUT"; body?: string; refresh?: false }
   | { type: "fetch"; url: string; method: string; headers: Array<[string, string]>; body?: Uint8Array<ArrayBuffer> | string };
 
 export type RequestChannel = "uploader" | "archive";
@@ -180,5 +182,9 @@ export function invokeCapture(host: CaptureHost, call: CaptureCall): unknown {
       return host.idle();
     case "diagnostics":
       return host.diagnostics();
+    case "filesUsedStatus":
+      return host.filesUsedStatus();
+    case "setFilesUsed":
+      return host.setFilesUsed(...call.args);
   }
 }

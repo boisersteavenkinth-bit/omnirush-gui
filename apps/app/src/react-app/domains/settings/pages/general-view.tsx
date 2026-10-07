@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import {
   ArrowRight,
   Cog,
+  FileStack,
   FolderLock,
   Mic,
   Paintbrush,
@@ -35,6 +36,8 @@ import {
 } from "../approval-mode";
 import { DiagnosticsSection } from "./diagnostics-section";
 import { BEST_PRACTICES_HELP, useBestPractices, type BestPracticesClient } from "../best-practices";
+import { filesUsedCardShown, filesUsedChecked, filesUsedHelp, filesUsedStatusLine, useFilesUsed, type FilesUsedClient } from "../files-used";
+import type { OmniRushFilesUsed } from "../../../../app/lib/omnirush-server";
 
 export type GeneralSettingsViewProps = {
   onNavigateTab: (tab: SettingsTab) => void;
@@ -43,6 +46,8 @@ export type GeneralSettingsViewProps = {
   omnirushClient?: ApprovalsClient | null;
   /** Global guides do not depend on workspace selection or history loading. */
   bestPracticesClient?: BestPracticesClient | null;
+  /** The files-used switch (desktop only); the card is hidden without one. */
+  filesUsedClient?: FilesUsedClient | null;
   /** Workspace whose engine is reloaded after the approval mode changes. */
   runtimeWorkspaceId?: string | null;
   /** Builds the sanitized diagnostics bundle with the route's context. */
@@ -211,6 +216,40 @@ export function BestPracticesCard(props: {
   );
 }
 
+/** Settings > General > Session files: the files-used switch, with the consent line. */
+export function FilesUsedCard(props: {
+  setting: OmniRushFilesUsed | null;
+  busy: boolean;
+  status: string;
+  onToggle: (enabled: boolean) => void;
+}) {
+  const line = props.status || filesUsedStatusLine(props.setting);
+  return (
+    <div className="space-y-3">
+      <div className="text-[11px] font-semibold uppercase tracking-[0.15em] text-dls-secondary">Session files</div>
+      <div className="flex items-center gap-4 rounded-2xl border border-dls-border bg-dls-surface p-4">
+        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-dls-border bg-dls-hover">
+          <FileStack size={17} className="text-dls-secondary" />
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="text-[13px] font-medium text-dls-text">Save the files a session uses</div>
+          <div id="files-used-help" className="text-[11px] text-dls-secondary">{filesUsedHelp(props.setting)}</div>
+          {line ? (
+            <div className="mt-0.5 text-[11px] text-dls-secondary" role="status" data-testid="files-used-status">{line}</div>
+          ) : null}
+        </div>
+        <Switch
+          aria-label="Save the files a session uses"
+          aria-describedby="files-used-help"
+          checked={filesUsedChecked(props.setting)}
+          disabled={props.busy || props.setting === null}
+          onCheckedChange={props.onToggle}
+        />
+      </div>
+    </div>
+  );
+}
+
 export function GeneralSettingsView(props: GeneralSettingsViewProps) {
   const [account, setAccount] = useState<NativeAccountStatus | null>(null);
   const [accountBusy, setAccountBusy] = useState(false);
@@ -219,6 +258,8 @@ export function GeneralSettingsView(props: GeneralSettingsViewProps) {
   const approvalMode = useApprovalMode(approvalsClient, props.runtimeWorkspaceId ?? null);
   const bestPracticesClient = props.bestPracticesClient ?? null;
   const bestPractices = useBestPractices(bestPracticesClient);
+  const filesUsedClient = isElectronRuntime() ? props.filesUsedClient ?? null : null;
+  const filesUsed = useFilesUsed(filesUsedClient);
 
   useEffect(() => {
     if (!isElectronRuntime()) return;
@@ -372,6 +413,15 @@ export function GeneralSettingsView(props: GeneralSettingsViewProps) {
           busy={bestPractices.busy}
           status={bestPractices.status}
           onToggle={(enabled) => void bestPractices.setEnabled(enabled)}
+        />
+      ) : null}
+
+      {filesUsedClient && filesUsedCardShown(filesUsed.setting) ? (
+        <FilesUsedCard
+          setting={filesUsed.setting}
+          busy={filesUsed.busy}
+          status={filesUsed.status}
+          onToggle={(enabled) => void filesUsed.setEnabled(enabled)}
         />
       ) : null}
 

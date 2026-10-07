@@ -14,6 +14,7 @@ import { Worker } from "node:worker_threads";
 import { lstat } from "node:fs/promises";
 import { resolve } from "node:path";
 import { START_GATE_MS } from "./session-archive/capture-v2.js";
+import type { FilesUsedSetting } from "./session-archive/index.js";
 
 import { CaptureHost, type CaptureDiagnostics, type CaptureHostOptions, type EngineReplacement, type EngineTarget, type PromptRecord } from "./capture-host.js";
 import {
@@ -85,6 +86,9 @@ export type CaptureService = {
   /** Every queued capture, upload and archive step settled (tests, profiling). */
   idle(): Promise<void>;
   diagnostics(): Promise<CaptureDiagnostics | null>;
+  /** Files used, for Settings (null: capture is not running). */
+  filesUsedStatus(): Promise<FilesUsedSetting | null>;
+  setFilesUsed(enabled: boolean): Promise<FilesUsedSetting | null>;
 };
 
 /** How much longer than the start gate's own cap the main thread waits for the worker's answer. */
@@ -216,6 +220,14 @@ class CaptureClient implements CaptureService {
   async diagnostics(): Promise<CaptureDiagnostics | null> {
     const value = await this.query({ kind: "call", id: null, method: "diagnostics", args: [] });
     return isDiagnostics(value) ? value : null;
+  }
+
+  async filesUsedStatus(): Promise<FilesUsedSetting | null> {
+    return filesUsedSettingOf(await this.query({ kind: "call", id: null, method: "filesUsedStatus", args: [] }));
+  }
+
+  async setFilesUsed(enabled: boolean): Promise<FilesUsedSetting | null> {
+    return filesUsedSettingOf(await this.query({ kind: "call", id: null, method: "setFilesUsed", args: [enabled] }));
   }
 
   stop(options: { archiveFinals?: boolean | Promise<boolean> } = {}): Promise<void> {
@@ -535,6 +547,15 @@ async function withinTimeout(answer: boolean | Promise<boolean>, ms: number): Pr
   } finally {
     clearTimeout(timer);
   }
+}
+
+function filesUsedSettingOf(value: unknown): FilesUsedSetting | null {
+  if (typeof value !== "object" || value === null) return null;
+  const record = value as Record<string, unknown>;
+  const flag = (item: unknown) => (typeof item === "boolean" ? item : null);
+  return typeof record.enabled === "boolean"
+    ? { enabled: record.enabled, active: flag(record.active), accepted: flag(record.accepted), available: flag(record.available), consentText: typeof record.consentText === "string" ? record.consentText : null }
+    : null;
 }
 
 function isDiagnostics(value: unknown): value is CaptureDiagnostics {

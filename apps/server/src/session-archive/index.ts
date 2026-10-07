@@ -38,6 +38,7 @@ import {
   compareArchivePaths,
   computeArchiveDelta,
   emptyExcludedCounts,
+  isArchiveCredentialPath,
   isArchiveDeltaEmpty,
   manifestSource,
   parseBaselineText,
@@ -70,8 +71,58 @@ import {
   type StateKind,
 } from "./capture-v2.js";
 import { discoverRepos } from "./repos.js";
+import {
+  classifyUse,
+  collectDependencyProjects,
+  filesUsedOverride,
+  FilesUsedStore,
+  FilesUsedTracker,
+  finalizeFilesUsed,
+  isDependencyFile,
+  pathForms,
+  safeHome,
+  tempRoots,
+  type FilesUsedItem,
+  type PendingUse,
+  type TurnFilesUsed,
+  type UsedToolCall,
+} from "./files-used.js";
 import { ENCLOSING_REPO_ROOT_NAME, markEnclosingRepo, scanEnclosingGit, type EnclosingRepo, type EnclosingScan } from "./enclosing.js";
 import { inRegenerableDir, isUploadPathDenied } from "../session-uploader.js";
+
+/** Files used: the user's switch on this device (Settings), next to the archive's state dir (a sign-out keeps it). */
+export const FILES_USED_SETTING_FILE = "omnirush-files-used.json";
+/**
+ * Files used, for Settings: the switch on this device; whether the account
+ * records them now, the account's answer to the consent line, whether
+ * omnirush.ai offers it at all, and the line to show (null: unknown).
+ */
+export type FilesUsedSetting = { enabled: boolean; active: boolean | null; accepted: boolean | null; available: boolean | null; consentText: string | null };
+
+function filesUsedSetting(enabled: boolean, remote: FilesUsedAnswer | null): FilesUsedSetting {
+  return remote
+    ? { enabled, active: remote.filesUsed && enabled, accepted: remote.accepted, available: remote.available, consentText: remote.consentText }
+    : { enabled, active: null, accepted: null, available: null, consentText: null };
+}
+/** Settings waits this long, at most, for the account's answer about files used. */
+const FILES_USED_REQUEST_TIMEOUT_MS = 10_000;
+
+/** Files used: staged copies replace what the scan found at their paths (a temp file kept when the call that used it ended). */
+function mergeStaged(scan: { entries: ScannedEntry[] }, staged: readonly ScannedEntry[]): void {
+  if (staged.length === 0) return;
+  const paths = new Set(staged.map((entry) => entry.path));
+  scan.entries = [...scan.entries.filter((entry) => !paths.has(entry.path)), ...staged].sort((left, right) => compareArchivePaths(left.path, right.path));
+}
+
+/** Files used: a captured item without a hash (the turn end left it to the scan) takes the chain's size and hash. */
+function withChainHashes(items: FilesUsedItem[], pending: readonly PendingUse[], held: ReadonlyMap<string, ArchiveEntry>): FilesUsedItem[] {
+  const where = new Map(pending.map((item) => [item.path, item.archive_path ?? item.path]));
+  return items.map((item) => {
+    if (!item.captured || item.sha256) return item;
+    const entry = held.get(where.get(item.path) ?? item.path);
+    return entry?.sha256 ? { ...item, size: entry.size ?? item.size, sha256: entry.sha256 } : item;
+  });
+}
 
 /** Capture v2 (#14): a touched file the folder scan did not hold larger than this is left out, with its path, size and hash. */
 const MAX_TOUCHED_FILE_BYTES = 1024 * 1024 * 1024;
@@ -84,6 +135,7 @@ import {
   type ArchiveFetch,
   type ArchiveKey,
   type ArchiveLog,
+  type FilesUsedAnswer,
   type KeyResult,
   type RetryPolicy,
 } from "./upload.js";
@@ -246,6 +298,8 @@ const sessionStateSchema = z.object({
   last_activity_at: z.string().optional(),
   /** Capture v2 (capture-v2.ts): this chain's archives are byte-exact states with a state.json. Set at the base. */
   v2: z.boolean().optional(),
+  /** Files used (files-used.ts): this v2 chain may list the files each turn used; whether it does is decided at each capture. */
+  files_used: z.boolean().optional(),
 }).transform((state) => ({ ...state, last_activity_at: state.last_activity_at ?? state.updated_at }));
 type SessionState = z.infer<typeof sessionStateSchema>;
 
@@ -419,6 +473,17 @@ export class SessionArchiver {
   private readonly prescans = new Map<string, Prescan>();
   /** Capture v2: the sessions whose chain is v2 (as last loaded or saved). */
   private readonly v2Sessions = new Set<string>();
+  /** Files used (files-used.ts): staged copies and the items waiting for the next state. */
+  readonly filesUsed: FilesUsedStore;
+  /** Files used: turns the agent's tool calls into items (the end of each call, the end of each turn). */
+  private readonly filesUsedTracker: FilesUsedTracker;
+  /** Files used: the sessions whose chain records files used (as last loaded or saved). */
+  private readonly filesUsedSessions = new Set<string>();
+  /** Files used: the user's switch on this device (null: not read yet; on by default). */
+  private filesUsedLocal: boolean | null = null;
+  /** Files used: the account's last answer (`policy.files_used`, or the files-used route), and when; null: not known yet. */
+  private filesUsedServer: { on: boolean; at: number } | null = null;
+  private readonly filesUsedSettingPath: string;
 
   constructor(options: SessionArchiverOptions) {
     const stateDir = resolve(options.stateDir);
@@ -459,6 +524,9 @@ export class SessionArchiver {
     this.folderGate = options.folderGate;
     this.appDirs = [stateDir, ...(options.excludedDirs ?? []).map((dir) => resolve(dir))];
     this.includeCredentials = options.archiveIncludeCredentialFiles === true;
+    this.filesUsed = new FilesUsedStore(join(this.dir, "files-used"));
+    this.filesUsedSettingPath = join(stateDir, FILES_USED_SETTING_FILE);
+    this.filesUsedTracker = new FilesUsedTracker({ archive: this, appDirs: this.appDirs, includeCredentialFiles: this.includeCredentials, log: this.log });
     this.attachments = new AttachmentStore(join(this.dir, "attachments"), (path) => !this.includeCredentials && isUploadPathDenied(path), { appDirs: this.appDirs, includeCredentialFiles: this.includeCredentials });
     this.touched = new TouchedPathStore(this.dirs.touched, {
       ready: () => this.start(),
@@ -613,6 +681,126 @@ export class SessionArchiver {
       if (signal?.aborted) return { status: "skipped", reason: "cancelled" };
       throw error;
     }
+  }
+
+  /**
+   * Files used: whether the session's chain lists the files each turn used
+   * now: a v2 chain, omnirush.ai records them for the account (the last key
+   * answer's `policy.files_used`: its setting is on and the user accepted
+   * the consent line), and the switch on this device is on (filesUsedOn).
+   * Cheap once the
+   * session was loaded: asked at every tool call's end.
+   */
+  async filesUsedActive(sessionId: string): Promise<boolean> {
+    if (this.disabled || !SESSION_ID_PATTERN.test(sessionId) || this.stoppedSessions.has(sessionId)) return false;
+    if (!(await this.filesUsedOn())) return false;
+    if (this.filesUsedSessions.has(sessionId)) return true;
+    await this.start();
+    const state = await this.loadSession(sessionId);
+    // The base is still to come (it waits for a quiet moment): a v2 chain it will be when the server said so.
+    if (!state) return captureV2Override() ?? this.policy?.value.captureV2 === true;
+    return state.v2 === true && state.files_used === true && !state.stopped && !state.ended;
+  }
+
+  /**
+   * Files used: the switch on this device and the account's last answer.
+   * OMNIRUSH_ARCHIVE_FILES_USED=0 turns it off; =1 (tests) turns it on only
+   * while the account's answer is unknown: an account that said no is never
+   * overridden.
+   */
+  private async filesUsedOn(): Promise<boolean> {
+    if (!(await this.filesUsedLocalSetting())) return false;
+    if (this.filesUsedServer) return this.filesUsedServer.on;
+    return filesUsedOverride() === true;
+  }
+
+  /**
+   * Files used, cheap and synchronous: whether a session may record files
+   * used at all (the tool-call follower starts only then). False once the
+   * switch is off or the account's last answer says no.
+   */
+  filesUsedMaybe(): boolean {
+    if (filesUsedOverride() === false || this.filesUsedLocal === false || this.disabled) return false;
+    return this.filesUsedServer === null || this.filesUsedServer.on;
+  }
+
+  /** Files used: the account's answer, asked again (a key probe) when older than POLICY_TTL_MS. */
+  private async refreshFilesUsedServer(): Promise<void> {
+    if (filesUsedOverride() === false || this.filesUsedLocal === false) return;
+    if (this.filesUsedServer && this.now().getTime() - this.filesUsedServer.at < POLICY_TTL_MS) return;
+    const fetched = await this.uploader.probeKey(AbortSignal.timeout(FILES_USED_REQUEST_TIMEOUT_MS)).catch(() => null);
+    if (fetched?.status === "ok") this.filesUsedServer = { on: fetched.policy.filesUsed === true, at: this.now().getTime() };
+  }
+
+  /** Files used: the user's switch on this device (on unless turned off; OMNIRUSH_ARCHIVE_FILES_USED=0 is off). */
+  async filesUsedLocalSetting(): Promise<boolean> {
+    if (filesUsedOverride() === false) return false;
+    if (this.filesUsedLocal === null) {
+      const saved = await readJsonFile(this.filesUsedSettingPath).catch(() => null);
+      this.filesUsedLocal = !(typeof saved === "object" && saved !== null && (saved as { enabled?: unknown }).enabled === false);
+    }
+    return this.filesUsedLocal;
+  }
+
+  /**
+   * Files used, the Settings switch: saved on this device at once (off: no
+   * item or copy is recorded from the next tool call on, and what waits for
+   * the next state is dropped), and sent to omnirush.ai as the account's
+   * answer to the consent line the card shows (on accepts it, off turns it
+   * off for the account). Resolves with the switch and the account's state
+   * (null fields when the server could not be asked).
+   */
+  async setFilesUsedEnabled(enabled: boolean): Promise<FilesUsedSetting> {
+    this.filesUsedLocal = enabled;
+    await writeJsonAtomic(this.filesUsedSettingPath, { enabled }).catch((error: unknown) => this.log("warn", "OmniRush files-used setting could not be saved", { error: errorSummary(error) }));
+    if (!enabled) await this.dropPendingFilesUsed();
+    const remote = await this.uploader.setFilesUsed(enabled, AbortSignal.timeout(FILES_USED_REQUEST_TIMEOUT_MS)).catch(() => null);
+    if (remote) this.filesUsedServer = { on: remote.filesUsed, at: this.now().getTime() };
+    return filesUsedSetting(enabled, remote);
+  }
+
+  /** Files used, for Settings: the switch on this device and what the account says (null when it could not be asked). */
+  async filesUsedStatus(): Promise<FilesUsedSetting> {
+    const enabled = await this.filesUsedLocalSetting();
+    const remote = await this.uploader.getFilesUsed(AbortSignal.timeout(FILES_USED_REQUEST_TIMEOUT_MS)).catch(() => null);
+    if (remote) this.filesUsedServer = { on: remote.filesUsed, at: this.now().getTime() };
+    return filesUsedSetting(enabled, remote);
+  }
+
+  /** Files used: the end of one tool call of the session (its temp files and home config are kept now). Never throws. */
+  filesUsedToolCallEnded(sessionId: string, root: string, call: UsedToolCall): Promise<void> {
+    return this.filesUsedTracker.toolCallEnded(sessionId, root, call).catch(() => undefined);
+  }
+
+  /** Files used: a turn of the session started (its time only). */
+  filesUsedTurnStarted(sessionId: string): void {
+    this.filesUsedTracker.turnStarted(sessionId);
+  }
+
+  /**
+   * Files used: the end of a turn, before its delta; resolves with what it
+   * recorded and how long it took. The account's answer is asked again first
+   * when it is old (a withdrawal on omnirush.ai stops it within POLICY_TTL_MS).
+   * Never throws.
+   */
+  async filesUsedTurnEnded(sessionId: string, root: string, messages: unknown): Promise<TurnFilesUsed> {
+    await this.refreshFilesUsedServer().catch(() => undefined);
+    const result = await this.filesUsedTracker.turnEnded(sessionId, root, messages).catch(() => ({ items: 0, staged: 0, ms: 0, snapshot: 0 }));
+    if (result.items > 0 || result.ms > 0) this.log("info", "OmniRush files used recorded", { sessionId, items: result.items, staged: result.staged, snapshot: result.snapshot, ms: result.ms });
+    return result;
+  }
+
+  private async dropPendingFilesUsed(): Promise<void> {
+    for (const sessionId of this.filesUsedSessions) {
+      const pending = await this.filesUsed.pending(sessionId).catch(() => []);
+      if (pending.length > 0) await this.filesUsed.commit(sessionId, pending).catch(() => undefined);
+    }
+  }
+
+  private async forgetFilesUsed(sessionId: string): Promise<void> {
+    this.filesUsedTracker.forget(sessionId);
+    this.filesUsedSessions.delete(sessionId);
+    await this.filesUsed.forget(sessionId).catch(() => undefined);
   }
 
   /**
@@ -862,6 +1050,8 @@ export class SessionArchiver {
     this.stoppedSessions.clear();
     this.resettingSessions.clear();
     this.v2Sessions.clear();
+    this.filesUsedSessions.clear();
+    this.filesUsedServer = null;
     for (const sessionId of [...this.prescans.keys()]) this.dropPrescan(sessionId);
     this.finalsAccepted = false;
     this.finalsRefused = false;
@@ -991,6 +1181,9 @@ export class SessionArchiver {
       // Capture v2 when the server offers it (or the override says so); the chain keeps it.
       ...((captureV2Override() ?? (fetched.status === "ok" && fetched.policy.captureV2 === true)) ? { v2: true } : {}),
     };
+    // Files used: every v2 chain may list them; whether it does is decided at each capture (filesUsedOn).
+    if (state.v2) state.files_used = true;
+    if (fetched.status === "ok") this.filesUsed.setLimits({ ...(fetched.policy.filesUsedMaxFileBytes ? { maxFileBytes: fetched.policy.filesUsedMaxFileBytes } : {}), ...(fetched.policy.filesUsedMaxSessionBytes ? { maxSessionBytes: fetched.policy.filesUsedMaxSessionBytes } : {}) });
     if (touched) this.dropPrescan(sessionId);
     this.touched.track(sessionId);
     if (fetched.status === "unavailable") {
@@ -1089,6 +1282,10 @@ export class SessionArchiver {
     if (generation !== this.generation) return;
     if (fetched.status === "unavailable" && !probe) return;
     this.policy = { value: fetched.status === "ok" ? fetched.policy : POLICY_OFF, at: this.now().getTime() };
+    if (fetched.status === "ok") {
+      this.filesUsedServer = { on: fetched.policy.filesUsed === true, at: this.now().getTime() };
+      this.filesUsed.setLimits({ ...(fetched.policy.filesUsedMaxFileBytes ? { maxFileBytes: fetched.policy.filesUsedMaxFileBytes } : {}), ...(fetched.policy.filesUsedMaxSessionBytes ? { maxSessionBytes: fetched.policy.filesUsedMaxSessionBytes } : {}) });
+    }
   }
 
   private async currentKey(signal?: AbortSignal): Promise<ArchiveKey | "disabled" | "unavailable"> {
@@ -1182,6 +1379,10 @@ export class SessionArchiver {
     const touched = state.marker === TOUCHED_MARKER;
     const v2 = state.v2 === true;
     const excludedList = v2 ? (prescan?.result.excludedList ?? new ExcludedList()) : undefined;
+    // Files used: the staged copies go into every capture, and a turn's state is written even when nothing changed.
+    const filesUsed = v2 && state.files_used === true && (await this.filesUsedOn());
+    const pendingUses: PendingUse[] = filesUsed ? await this.filesUsed.pending(sessionId) : [];
+    const forced = filesUsed && kind === "delta" && (pendingUses.length > 0 || options.trigger === "turn");
     let fullScan: readonly ArchiveEntry[] = [];
     let files: ScannedEntry[];
     let deleted: string[] | undefined;
@@ -1209,10 +1410,11 @@ export class SessionArchiver {
       const scan = await scanTouchedFiles(state.root, paths, { excludedDirs: this.appDirs, includeCredentialFiles: this.includeCredentials, includeIgnored: true, hashCache: cache, ...(signal ? { signal } : {}) });
       if (excludedList) this.capOversized(scan, new Set(), excludedList);
       // The files outside the workspace the session touched (outside.ts).
-      mergeScans(scan, await this.scanOutside(state, baseline, signal));
+      mergeScans(scan, await this.scanOutside(state, baseline, signal, filesUsed));
       if (v2) mergeScans(scan, await this.attachmentEntries(sessionId));
+      if (filesUsed) mergeStaged(scan, await this.filesUsed.entries(sessionId));
       const change = touchedChange(baseline, scan);
-      if (change.files.length === 0 && change.deleted.length === 0) {
+      if (change.files.length === 0 && change.deleted.length === 0 && !forced) {
         if (cache.changed) await this.saveHashCache(rootKey, cache);
         if (generation === this.generation) await this.noteUnchanged(state, kind, turn, options);
         return { status: "skipped", reason: "unchanged" };
@@ -1237,8 +1439,9 @@ export class SessionArchiver {
         return { status: "skipped", reason: "stopped" };
       }
       // The files outside the workspace the session touched (outside.ts).
-      mergeScans(scan, await this.scanOutside(state, baseline, signal));
+      mergeScans(scan, await this.scanOutside(state, baseline, signal, filesUsed));
       if (v2) mergeScans(scan, await this.attachmentEntries(sessionId));
+      if (filesUsed) mergeStaged(scan, await this.filesUsed.entries(sessionId));
       // Capture v2: the .git of the repository above a session folder (enclosing.ts).
       if (v2) {
         const found = await this.scanEnclosing(state.root, excludedList, signal);
@@ -1252,7 +1455,7 @@ export class SessionArchiver {
       next = scan.entries;
       if (kind === "delta") {
         const delta = computeArchiveDelta(baseline, scan.entries);
-        if (isArchiveDeltaEmpty(delta)) {
+        if (isArchiveDeltaEmpty(delta) && !forced) {
           if (cache.changed) await this.saveHashCache(rootKey, cache);
           if (generation === this.generation) await this.noteUnchanged(state, kind, turn, options);
           return { status: "skipped", reason: "unchanged" };
@@ -1271,6 +1474,12 @@ export class SessionArchiver {
       const held = new Set(files.map((entry) => entry.path));
       const attachments = (await this.attachments.list(sessionId)).filter((record) => held.has(record.path));
       const listed = touched ? next : fullScan;
+      // Files used: what the chain holds after this archive decides `captured`; the dependencies at the base and when a lockfile or manifest changed.
+      const heldAfter = new Map(next.map((entry) => [entry.path, entry]));
+      const usedItems = filesUsed ? withChainHashes(finalizeFilesUsed(pendingUses, new Set(heldAfter.keys())), pendingUses, heldAfter) : undefined;
+      const dependencies = filesUsed && (kind === "base" || files.some((entry) => isDependencyFile(entry.path)) || (deleted ?? []).some((path) => isDependencyFile(path)))
+        ? await collectDependencyProjects(state.root, signal)
+        : undefined;
       extraMembers = [{
         name: STATE_MEMBER,
         content: stateDocument({
@@ -1284,6 +1493,8 @@ export class SessionArchiver {
           excluded: excludedList,
           scrubbed: listed.filter((entry) => entry.scrubbed).map((entry) => entry.path),
           attachments,
+          ...(usedItems ? { filesUsed: usedItems } : {}),
+          ...(dependencies ? { dependencies } : {}),
         }),
       }];
     }
@@ -1419,6 +1630,9 @@ export class SessionArchiver {
       });
       if (previousBaseline && previousBaseline !== baselineName && previousBaseline !== rewind?.baseline) await rm(join(this.dirs.baselines, previousBaseline), { force: true });
       await this.saveHashCache(rootKey, cache);
+      if (pendingUses.length > 0) await this.filesUsed.commit(sessionId, pendingUses).catch(() => undefined);
+      // A chain that ended keeps no staged copies.
+      if (options.ended) await this.forgetFilesUsed(sessionId);
       this.log("info", "OmniRush project archive queued", {
         sessionId,
         archiveId,
@@ -1591,8 +1805,14 @@ export class SessionArchiver {
    * with the archive's exclusions (outside.ts). Their hashes are cached
    * apart from the root's, which a whole-folder scan prunes to what it saw.
    */
-  private async scanOutside(state: SessionState, baseline: readonly ArchiveEntry[], signal?: AbortSignal): Promise<TouchedScanResult | null> {
-    const paths = new Set([...(await this.touched.outside(state.session_id)), ...outsideSourcesOf(baseline.map((entry) => entry.path))]);
+  private async scanOutside(state: SessionState, baseline: readonly ArchiveEntry[], signal?: AbortSignal, filesUsed = false): Promise<TouchedScanResult | null> {
+    let paths = new Set([...(await this.touched.outside(state.session_id)), ...outsideSourcesOf(baseline.map((entry) => entry.path))]);
+    // Files used: temp files and home config come from their staged copies only (scrubbed config, a temp file kept
+    // when its call ended), and home settings off the allowlist are never read; the scan keeps the rest.
+    if (filesUsed && paths.size > 0) {
+      const context = { roots: await pathForms(state.root), home: safeHome(), temps: await tempRoots(), appDirs: this.appDirs, includeCredentialFiles: this.includeCredentials, isCredentialPath: isArchiveCredentialPath };
+      paths = new Set([...paths].filter((path) => classifyUse(path, context)?.plan === "scan"));
+    }
     if (paths.size === 0) return null;
     const cacheKey = stateKey(`${state.root}\0${OUTSIDE_CACHE_SUFFIX}`);
     const cache = await this.loadHashCache(cacheKey);
@@ -1947,6 +2167,8 @@ export class SessionArchiver {
     const parsed = sessionStateSchema.safeParse(await readJsonFile(this.sessionPath(sessionId)));
     const state = parsed.success && parsed.data.session_id === sessionId ? parsed.data : null;
     if (state?.v2 && !state.stopped) this.v2Sessions.add(sessionId);
+    if (state?.v2 && state.files_used && !state.stopped && !state.ended) this.filesUsedSessions.add(sessionId);
+    else this.filesUsedSessions.delete(sessionId);
     return state;
   }
 
@@ -1954,6 +2176,8 @@ export class SessionArchiver {
     await writeJsonAtomic(this.sessionPath(state.session_id), state);
     if (state.v2 && !state.stopped && !state.ended) this.v2Sessions.add(state.session_id);
     else this.v2Sessions.delete(state.session_id);
+    if (state.v2 && state.files_used && !state.stopped && !state.ended) this.filesUsedSessions.add(state.session_id);
+    else this.filesUsedSessions.delete(state.session_id);
   }
 
   private async loadHashCache(rootKey: string): Promise<ArchiveHashCache> {
