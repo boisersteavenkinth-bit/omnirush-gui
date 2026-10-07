@@ -15,7 +15,7 @@
  * why not: `dependency_dir` (node_modules, .venv, vendor, package caches:
  * rebuilt from the state's `dependencies`), `build_output` (dist, build,
  * target, ...), `denylisted` (credentials, keys, .env, tokens, system
- * files, the app's own state), `not_allowlisted` (home settings outside the
+ * files, the app's own state), `not_allowlisted` (home files outside the
  * config allowlist), `too_large` (over the per-file or the session cap:
  * hash only) or `missing` (gone before it could be read).
  *
@@ -25,9 +25,10 @@
  * the temp files those calls named or created in a temp folder they named.
  * Temp files and allowlisted home config are copied into a per-session
  * store when the call ends (a screenshot deleted later is kept), home
- * config scrubbed first; project and other outside files are archived by
- * the chain's own scan. The per-user switch (OMNIRUSH_FILES_USED=0, the
- * app setting) and the server's `policy.files_used` both have to allow it.
+ * config scrubbed first; project and outside files are archived by the
+ * chain's own scan. Any other home file is listed only (`not_allowlisted`).
+ * The server's `policy.files_used` decides; there is no client override and
+ * no per-user switch.
  *
  * This module is the pure part: the item shape, the reasons, the caps, where a
  * file is and what may happen to its bytes, the home config allowlist and
@@ -86,17 +87,6 @@ export const MAX_HOME_CONFIG_BYTES = 256 * 1024;
 const OP_RANK: Record<FilesUsedOp, number> = { write: 3, exec: 2, read: 1 };
 export function strongerOp(left: FilesUsedOp, right: FilesUsedOp): FilesUsedOp {
   return OP_RANK[right] > OP_RANK[left] ? right : left;
-}
-
-/**
- * OMNIRUSH_ARCHIVE_FILES_USED=1 records files used on a capture v2 chain
- * whatever the server's policy says (tests, and e2e runs against a server
- * that does not send `policy.files_used` yet); anything else follows the
- * server. There is no per-user off switch.
- */
-export const FILES_USED_ENV = "OMNIRUSH_ARCHIVE_FILES_USED";
-export function filesUsedOverride(env: NodeJS.ProcessEnv = process.env): true | null {
-  return ["1", "true", "on", "yes"].includes((env[FILES_USED_ENV] ?? "").trim().toLowerCase()) ? true : null;
 }
 
 // --- where a file is, and whether its bytes may be archived ------------------------------
@@ -259,10 +249,9 @@ export function classifyUse(absolute: string, context: UseContext): UseClass | n
     if (HOME_CACHE_DIRS.some((dir) => homeRel === dir || homeRel.startsWith(`${dir}/`))) return hold("home", "dependency_dir");
     const regenerable = regenerableReason(homeRel);
     if (regenerable) return hold("home", regenerable);
-    const first = homeRel.split("/")[0] ?? "";
-    // Settings and app data (dot folders, rc files, Library, AppData) only through the allowlist.
-    if (first.startsWith(".") || /^(?:library|appdata|snap|application data|local settings)$/i.test(first)) return hold("home", "not_allowlisted");
-    return archivePath ? { scope: "home", path: absolute, plan: "scan", reason: "captured", archivePath } : hold("home", "denylisted");
+    // Every other home file (settings and app data, but also ~/Downloads, ~/Documents, other projects) is
+    // listed only: home bytes reach the chain through the config allowlist alone.
+    return hold("home", "not_allowlisted");
   }
   if (secret) return hold("outside", "denylisted");
   if ((sep === "/" && SYSTEM.test(portable)) || WINDOWS_SYSTEM.test(absolute)) return hold("outside", "denylisted");
