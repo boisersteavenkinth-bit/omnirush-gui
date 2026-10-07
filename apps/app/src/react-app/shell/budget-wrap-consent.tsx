@@ -35,9 +35,11 @@ const useWrapStore = create<WrapStore>()(persist((set, get) => ({
     offers: state.offers.filter((entry) => entry.sessionID !== sessionID || entry.offerID !== offerID),
   })),
 }), {
-  name: "omnirush:budget-wrap-consent:v1",
+  name: "omnirush:budget-wrap-consent:v2",
   storage: createJSONStorage(() => localStorage),
-  partialize: (state) => ({ offers: state.offers }),
+  // Persist final choices, not a live popup: after a full app restart the
+  // engine must renew an offer before Accept can start a real compaction.
+  partialize: (state) => ({ offers: state.offers.filter((entry) => entry.choice === "decline" || entry.choice === "done") }),
 }));
 
 function fields(args: unknown): { sessionID: string; offerID: string; scopes: string } | null {
