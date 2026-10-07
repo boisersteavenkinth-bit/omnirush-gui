@@ -140,7 +140,8 @@ export function homeConfigKind(homeRel: string): HomeConfigKind | null {
   const rel = homeRel.replaceAll("\\", "/");
   if ([".gitconfig", ".config/git/config"].includes(rel)) return "git";
   if ([".gitignore_global", ".gitignore", ".config/git/ignore", ".config/git/attributes", ".gitattributes"].includes(rel)) return "text";
-  if ([".npmrc", ".yarnrc", ".yarnrc.yml", ".config/pnpm/rc", "Library/Preferences/pnpm/rc", "AppData/Local/pnpm/config/rc", ".bunfig.toml"].includes(rel)) return "npmrc";
+  // .npmrc and .pypirc are credential files (the backend holds them back from every export): never allowlisted.
+  if ([".yarnrc", ".yarnrc.yml", ".config/pnpm/rc", "Library/Preferences/pnpm/rc", "AppData/Local/pnpm/config/rc", ".bunfig.toml"].includes(rel)) return "npmrc";
   if ([".config/pip/pip.conf", ".pip/pip.conf", "pip/pip.ini", "AppData/Roaming/pip/pip.ini", "Library/Application Support/pip/pip.conf", ".config/uv/uv.toml", ".pydistutils.cfg", ".condarc", ".cargo/config.toml", ".cargo/config", ".m2/settings.xml"].includes(rel)) return "ini";
   if ([".editorconfig", ".prettierrc", ".prettierrc.json", ".prettierrc.yaml", ".prettierrc.yml", ".eslintrc", ".eslintrc.json", ".eslintrc.js", ".eslintrc.yml", ".pylintrc", ".flake8", ".pycodestyle", ".isort.cfg", ".tool-versions", ".nvmrc", ".node-version", ".python-version", ".ruby-version", ".mypy.ini", ".clang-format", ".rustfmt.toml", ".jshintrc", ".babelrc", ".browserslistrc"].includes(rel)) return "text";
   if (/^\.config\/(?:ruff|black|pnpm|starship|mise|rtx|yamllint|flake8|pycodestyle|pylintrc|mypy|direnv|bat|fd|ripgrep|jj|lazygit|helix|nvim|zellij|tmux|alacritty|kitty|wezterm|yarn|prettier|eslint|stylua|taplo|rustfmt|clangd|pre-commit|uv|pip|git)(?:\/[^/]+)*\/[^/]+$/.test(rel) && !/(?:^|\/)(?:hosts\.ya?ml|credentials?.*|auth.*|token.*|.*\.(?:key|pem|db|sqlite))$/i.test(rel)) return "text";
@@ -252,7 +253,7 @@ export function classifyUse(absolute: string, context: UseContext): UseClass | n
   if (homeRel !== null) {
     if (HOME_SECRET_DIRS.some((dir) => homeRel === dir || homeRel.startsWith(`${dir}/`))) return hold("home", "denylisted");
     const kind = homeConfigKind(homeRel);
-    // An allowlisted config is scrubbed before it is staged, so its name alone (.npmrc) does not hold it.
+    // An allowlisted config is scrubbed before it is staged, so a name the secret checks would hold does not hold it.
     if (kind && archivePath) return { scope: "home", path: absolute, plan: "stage", reason: "captured", scrub: kind, archivePath };
     if (secret) return hold("home", "denylisted");
     if (HOME_CACHE_DIRS.some((dir) => homeRel === dir || homeRel.startsWith(`${dir}/`))) return hold("home", "dependency_dir");

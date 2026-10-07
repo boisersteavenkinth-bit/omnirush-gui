@@ -217,9 +217,10 @@ What is saved and what is not:
 - Files inside the project folder are saved like touched files, gitignored
   inputs included.
 - Temporary files are copied when the tool call that used them ends.
-- In the home folder, only allowlisted config files (`.gitconfig`, `.npmrc`,
+- In the home folder, only allowlisted config files (`.gitconfig`,
   `.yarnrc`, `pip.conf`, `uv.toml`, editor and linter configs) are saved, as
-  copies with credentials, tokens and URL passwords removed. Other dotfiles and
+  copies with credentials, tokens and URL passwords removed. `.npmrc` and
+  `.pypirc` are credential files and are never saved. Other dotfiles and
   settings folders are listed but never saved. Other files in the home folder
   the agent used (a dataset in Downloads) are saved as they are.
 - Never saved: `.env` files, keys, credential stores, tokens, caches and

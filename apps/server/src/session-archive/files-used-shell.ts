@@ -17,7 +17,12 @@
  *     write); `source`/`.` and `./script` run a file; `node -r ./x` reads;
  *   - build and test tools read the config files they always load
  *     (`package.json`, `tsconfig.json`, `pytest.ini`, `Makefile`, ...) and
- *     the ones named with `-f`/`-c`/`--config`/`-r`.
+ *     the ones named with `-f`/`-c`/`--config`/`-r`;
+ *   - every `git` command reads the user's git config (`~/.gitconfig`,
+ *     `~/.config/git/config`: `implicit`, so one that is not there is not
+ *     listed); `git config` keys and values are never paths (`--file x`
+ *     is, and a write to `--global` writes `~/.gitconfig`, to the repository
+ *     `.git/config`); other git commands name files only after `--`.
  *
  * Any other path-looking word counts as a read. Candidates are absolute;
  * whether each is a file is checked later. Nothing here touches the disk.
@@ -26,7 +31,8 @@
 import { isAbsolute, join, resolve } from "node:path";
 
 export type ShellUseOp = "read" | "write" | "exec";
-export type ShellUse = { path: string; op: ShellUseOp };
+/** `implicit`: the program reads it without naming it (a config it always loads): not listed when it is not there. */
+export type ShellUse = { path: string; op: ShellUseOp; implicit?: true };
 
 const MAX_COMMAND_CHARS = 256 * 1024;
 const MAX_PATH_CHARS = 4_096;
@@ -239,6 +245,14 @@ const TOOL_CONFIGS: Record<string, string[]> = {
   alembic: ["alembic.ini"],
   manage: [],
 };
+/** The user's git config files, which every git command loads (home scope: allowlisted, scrubbed). */
+const GIT_HOME_CONFIGS = ["~/.gitconfig", "~/.config/git/config"];
+/** git's global options that take a value (`-c key=value`, `--git-dir x`). */
+const GIT_VALUE_OPTIONS = new Set(["-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--config-env"]);
+/** `git config` options that change the file. */
+const GIT_CONFIG_WRITES = new Set(["--unset", "--unset-all", "--add", "--replace-all", "--rename-section", "--remove-section", "--edit", "-e"]);
+/** `git config` options that take a value (`--type bool`, `--default x`). */
+const GIT_CONFIG_VALUE_OPTIONS = new Set(["--type", "--default", "--blob", "--comment", "--value"]);
 /** Options naming a file the tool reads (`-f Makefile`, `--config x`, `-r requirements.txt`). */
 const FILE_OPTIONS = new Set(["-f", "--file", "-c", "--config", "--config-file", "--rcfile", "-r", "--requirement", "--constraint", "-p", "--project", "--env-file", "--settings", "-C"]);
 const FILE_OPTION_TOOLS = new Set(["make", "docker", "docker-compose", "awk", "gawk", "pip", "pip3", "pytest", "tsc", "eslint", "prettier", "jest", "vitest", "mypy", "ruff", "pylint", "flake8", "black", "uv", "terraform", "alembic", "gradle", "mvn", "cmake", "helm", "kubectl", "ansible-playbook"]);
@@ -300,7 +314,7 @@ export function shellCommandUses(command: string, cwd: string, home: string | nu
   const seen = new Set<string>();
   try {
     let dir = cwd;
-    const add = (raw: string | undefined, op: ShellUseOp, at = dir) => {
+    const add = (raw: string | undefined, op: ShellUseOp, at = dir, implicit = false) => {
       if (out.length >= MAX_USES || raw === undefined) return;
       const word = cleanPathWord(raw);
       if (!word) return;
@@ -313,7 +327,7 @@ export function shellCommandUses(command: string, cwd: string, home: string | nu
       const key = `${op}\0${path}`;
       if (seen.has(key)) return;
       seen.add(key);
-      out.push({ path, op });
+      out.push(implicit ? { path, op, implicit: true } : { path, op });
     };
     const tokens = shellTokens(command);
     // Simple commands between control operators.
@@ -540,6 +554,56 @@ export function shellCommandUses(command: string, cwd: string, home: string | nu
       }
       if (WRITERS.has(name)) {
         for (const word of operands(args)) add(word, "write", commandDir);
+        continue;
+      }
+      if (name === "git") {
+        // The user's git config, which every git command loads.
+        for (const file of GIT_HOME_CONFIGS) add(file, "read", commandDir, true);
+        let at = commandDir;
+        let index = 0;
+        // Global options before the sub-command (`-C dir`, `-c key=value`, `--git-dir=x`).
+        while (index < args.length && args[index]!.startsWith("-")) {
+          const option = args[index]!;
+          if (option === "-C" && args[index + 1] !== undefined) {
+            const target = args[index + 1]!;
+            const expanded = target === "~" || target.startsWith("~/") ? (home ? join(home, target.slice(2)) : null) : target;
+            if (expanded) at = resolve(at, expanded);
+            index += 2;
+            continue;
+          }
+          index += GIT_VALUE_OPTIONS.has(option) ? 2 : 1;
+        }
+        const sub = args[index];
+        const rest = args.slice(index + 1);
+        if (sub === "config") {
+          // Keys and values are not paths; only `--file`/`-f` names one, and a write goes to its file.
+          let file: string | null = null;
+          let scope: "global" | "system" | "local" = "local";
+          let write = false;
+          const positional: string[] = [];
+          for (let at2 = 0; at2 < rest.length; at2 += 1) {
+            const word = rest[at2]!;
+            if (word === "-f" || word === "--file") {
+              file = rest[at2 + 1] ?? null;
+              at2 += 1;
+            } else if (word.startsWith("--file=")) file = word.slice("--file=".length);
+            else if (word === "--global") scope = "global";
+            else if (word === "--system") scope = "system";
+            else if (GIT_CONFIG_WRITES.has(word) || GIT_CONFIG_WRITES.has(word.split("=")[0]!)) write = true;
+            else if (GIT_CONFIG_VALUE_OPTIONS.has(word)) at2 += 1;
+            else if (!word.startsWith("-")) positional.push(word);
+          }
+          // `git config set|unset ...` (git 2.46+), or `git config <key> <value>`.
+          if (positional[0] === "set" || positional[0] === "unset" || positional[0] === "rename-section" || positional[0] === "remove-section") write = true;
+          else if (positional[0] !== "get" && positional[0] !== "list" && positional.length >= 2) write = true;
+          if (file) add(file, write ? "write" : "read", at);
+          else if (write && scope === "global") add("~/.gitconfig", "write", at);
+          else if (write && scope === "local") add(".git/config", "write", at);
+          continue;
+        }
+        // Other sub-commands: only explicit pathspecs after `--`.
+        const separator = rest.indexOf("--");
+        if (separator >= 0) for (const word of rest.slice(separator + 1)) if (looksLikePath(word)) add(word, "read", at);
         continue;
       }
       if (name === "tar") {

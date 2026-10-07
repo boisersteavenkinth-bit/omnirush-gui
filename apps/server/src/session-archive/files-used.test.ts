@@ -69,9 +69,23 @@ describe("shell command parsing (shared with the CLI)", () => {
     expect(uses("sed -i 's/a/b/' conf.ini")).toEqual(["write /w/conf.ini"]);
   });
 
+  test("git: every command loads the user's git config (implicit); config keys and values are not paths; pathspecs only after --", () => {
+    const git = (command: string) => shell.shellCommandUses(command, "/w", "/home/u").map((use) => `${use.op} ${use.path}${use.implicit ? " (implicit)" : ""}`).sort();
+    const config = ["read /home/u/.config/git/config (implicit)", "read /home/u/.gitconfig (implicit)"];
+    expect(git("git config --global --get user.name")).toEqual(config);
+    expect(git("git config --get-all remote.origin.url")).toEqual(config);
+    expect(git("git log -1")).toEqual(config);
+    expect(git("git add src/a.py")).toEqual(config);
+    expect(git("git config user.email a@b.c")).toEqual([...config, "write /w/.git/config"].sort());
+    expect(git("git config --global core.editor vim")).toEqual([...config, "write /home/u/.gitconfig"].sort());
+    expect(git("git config -f ci/git.cfg --get x.y")).toEqual([...config, "read /w/ci/git.cfg"].sort());
+    expect(git("git -C sub diff HEAD~1 -- src/a.py README.md")).toEqual([...config, "read /w/sub/README.md", "read /w/sub/src/a.py"].sort());
+  });
+
   test("variables, globs, URLs and options are never paths", () => {
     expect(uses("curl -s https://example.com/a.json -o $OUT; ls *.py; echo $HOME/x")).toEqual([]);
-    expect(uses("git commit -m 'fix: a.b'")).toEqual([]);
+    // A commit message is no path (git's own config reads are the only uses).
+    expect(uses("git commit -m 'fix: a.b'")).toEqual(["read /home/u/.config/git/config", "read /home/u/.gitconfig"]);
   });
 });
 
@@ -94,7 +108,10 @@ describe("policy (shared with the CLI)", () => {
 
   test("home settings only through the allowlist; dependency and build folders hash only; system files never", () => {
     expect(classify("/home/u/.gitconfig")).toBe("home stage captured");
-    expect(classify("/home/u/.npmrc")).toBe("home stage captured");
+    expect(classify("/home/u/.npmrc")).toBe("home hold denylisted");
+    expect(classify("/home/u/.pypirc")).toBe("home hold denylisted");
+    expect(classify("/home/u/.yarnrc.yml")).toBe("home stage captured");
+    expect(classify("/home/u/.config/pip/pip.conf")).toBe("home stage captured");
     expect(classify("/home/u/.bashrc")).toBe("home hold not_allowlisted");
     expect(classify("/home/u/.cache/pip/x.whl")).toBe("home hold dependency_dir");
     expect(classify("/w/node_modules/a/index.js")).toBe("project hold dependency_dir");
@@ -303,7 +320,7 @@ describe("a files-used chain", () => {
     const script = write(join(scratch, "gen.py"), "print(open('config.local.yaml').read())\n");
     const call1 = toolPart("call_1", "write", { filePath: script, content: "..." });
     await tracker.toolCallEnded(sessionId, root, callOf(call1));
-    const call2 = toolPart("call_2", "bash", { command: `python3 ${script} config.local.yaml && cat ~/.gitconfig ~/.npmrc ~/.bashrc .env node_modules/a/index.js && rm ${script}` });
+    const call2 = toolPart("call_2", "bash", { command: `python3 ${script} config.local.yaml && git config --global --get user.name && cat ~/.npmrc ~/.bashrc .env node_modules/a/index.js && rm ${script}` });
     await tracker.toolCallEnded(sessionId, root, callOf(call2));
     rmSync(script);
     // Written by the script without being named: only the end-of-turn snapshot sees it.
@@ -324,11 +341,14 @@ describe("a files-used chain", () => {
     expectItem("config.local.yaml", "project", "read", true, "captured");
     expectItem("results/report.csv", "project", "write", true, "captured");
     expectItem(join(home, ".gitconfig"), "home", "read", true, "captured");
-    expectItem(join(home, ".npmrc"), "home", "read", true, "captured");
+    expectItem(join(home, ".npmrc"), "home", "read", false, "denylisted");
     expectItem(join(home, ".bashrc"), "home", "read", false, "not_allowlisted");
     expectItem(".env", "project", "read", false, "denylisted");
     expectItem("node_modules/a/index.js", "project", "read", false, "dependency_dir");
     expect(items.get(script)!.call_id).toBe("call_1");
+    // git loaded ~/.gitconfig without naming it (listed, scrubbed); ~/.config/git/config is not there (not listed).
+    expect(items.has(join(home, ".config", "git", "config"))).toBe(false);
+    expect([...items.keys()].some((key) => key.endsWith("user.name"))).toBe(false);
     // Hashes the turn end left to the scan come from the chain.
     expect(items.get("config.local.yaml")!.sha256).toBe(sha256("mode: local\n"));
     expect(items.get("results/report.csv")!.sha256).toBe(sha256("a,b\n1,2\n"));

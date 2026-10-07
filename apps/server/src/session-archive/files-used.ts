@@ -367,9 +367,12 @@ function patchPaths(value: unknown): string[] {
 }
 
 /** The files one tool call names, absolute, with how it used them: file tool paths and shell command words. */
-export function toolCallUses(call: UsedToolCall, root: string, home: string | null): Array<{ path: string; op: FilesUsedOp }> {
+export function toolCallUses(call: UsedToolCall, root: string, home: string | null): Array<{ path: string; op: FilesUsedOp; implicit?: true }> {
   const out = new Map<string, FilesUsedOp>();
-  const add = (raw: unknown, op: FilesUsedOp, cwd: string) => {
+  /** Paths only ever read implicitly (a config a program loads): not listed when they are not there. */
+  const implicit = new Set<string>();
+  const explicit = new Set<string>();
+  const add = (raw: unknown, op: FilesUsedOp, cwd: string, unnamed = false) => {
     if (out.size >= MAX_CALL_USES || typeof raw !== "string") return;
     const value = raw.trim();
     if (!value || value.length > 4_096 || value.includes("\0") || value.includes("\n") || value.includes("://")) return;
@@ -377,6 +380,7 @@ export function toolCallUses(call: UsedToolCall, root: string, home: string | nu
     if (!expanded) return;
     const path = resolve(cwd, expanded);
     out.set(path, strongerOp(out.get(path) ?? op, op));
+    (unnamed ? implicit : explicit).add(path);
   };
   const input = call.input;
   const cwdValue = CWD_KEYS.map((key) => text(input[key])).find(Boolean);
@@ -385,7 +389,7 @@ export function toolCallUses(call: UsedToolCall, root: string, home: string | nu
     for (const key of ["command", "cmd", "script"]) {
       const value = input[key];
       const command = typeof value === "string" ? value : Array.isArray(value) && value.every((item) => typeof item === "string") ? value.join(" ") : null;
-      if (command) for (const use of shellCommandUses(command, cwd, home)) add(use.path, use.op, cwd);
+      if (command) for (const use of shellCommandUses(command, cwd, home)) add(use.path, use.op, cwd, use.implicit === true);
     }
   } else {
     const op: FilesUsedOp | null = WRITE_TOOLS.has(call.tool) ? "write" : READ_TOOLS.has(call.tool) ? "read" : null;
@@ -396,7 +400,7 @@ export function toolCallUses(call: UsedToolCall, root: string, home: string | nu
     }
     for (const key of ["patchText", "patch", "input", "content"]) for (const path of patchPaths(input[key])) add(path, "write", cwd);
   }
-  return [...out].map(([path, op]) => ({ path, op }));
+  return [...out].map(([path, op]) => (implicit.has(path) && !explicit.has(path) ? { path, op, implicit: true as const } : { path, op }));
 }
 
 /** The files under a temp folder a call named that changed during the call (mtime or ctime in its window). */
@@ -611,7 +615,7 @@ export class FilesUsedTracker {
   }
 
   /** A call's files: what it names, and the files changed during it in a temp folder it names. */
-  private async callFiles(call: UsedToolCall, root: string, context: UseContext): Promise<Array<{ path: string; op: FilesUsedOp }>> {
+  private async callFiles(call: UsedToolCall, root: string, context: UseContext): Promise<Array<{ path: string; op: FilesUsedOp; implicit?: true }>> {
     const uses = toolCallUses(call, root, this.home);
     if (!SHELL_TOOLS.has(call.tool) || call.start === null) return uses;
     const out = [...uses];
@@ -690,15 +694,17 @@ export class FilesUsedTracker {
       state.turn += 1;
       const context = await this.useContext(root);
       const limits = store.currentLimits;
-      const uses = new Map<string, { op: FilesUsedOp; callId: string | null }>();
+      const uses = new Map<string, { op: FilesUsedOp; callId: string | null; implicit: boolean }>();
       const calls = usedToolCalls(messages);
       for (const call of calls) {
         result.staged += await this.keepCall(sessionId, root, call);
         for (const use of await this.callFiles(call, root, context)) {
           const absolute = (await canonicalFile(use.path)) ?? resolve(use.path);
           const known = uses.get(absolute);
-          if (known) known.op = strongerOp(known.op, use.op);
-          else if (uses.size < MAX_FILES_USED_ITEMS) uses.set(absolute, { op: use.op, callId: state.firstCall.get(absolute) ?? call.callId });
+          if (known) {
+            known.op = strongerOp(known.op, use.op);
+            known.implicit &&= use.implicit === true;
+          } else if (uses.size < MAX_FILES_USED_ITEMS) uses.set(absolute, { op: use.op, callId: state.firstCall.get(absolute) ?? call.callId, implicit: use.implicit === true });
         }
       }
       // The end-of-turn snapshot: files of the project created or changed during the turn (gitignored ones
@@ -708,7 +714,7 @@ export class FilesUsedTracker {
         const realRoot = (await pathForms(root)).at(-1) ?? root;
         for (const file of await changedSince(realRoot, since, Math.min(deadline, started + SNAPSHOT_BUDGET_MS))) {
           if (uses.has(file) || uses.size >= MAX_FILES_USED_ITEMS) continue;
-          uses.set(file, { op: "write", callId: null });
+          uses.set(file, { op: "write", callId: null, implicit: false });
           result.snapshot += 1;
         }
       }
@@ -720,7 +726,8 @@ export class FilesUsedTracker {
         // hashed here while the budget lasts; a denylisted one never is.
         const hashBytes = kind.plan === "hold" && kind.reason !== "denylisted" && this.now() < deadline ? limits.maxFileBytes : -1;
         const facts = await fileFacts(absolute, hashBytes);
-        if (facts === "not_file") continue;
+        // A config a program loads without naming it is listed only when it is there.
+        if (facts === "not_file" || (facts === "missing" && use.implicit)) continue;
         const present = facts !== "missing";
         let size = present ? facts.size : null;
         let sha256 = present ? facts.sha256 : null;
