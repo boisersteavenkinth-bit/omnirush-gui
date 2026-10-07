@@ -3,6 +3,7 @@ import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
 
 import { Button } from "@/components/ui/button";
+import { toast } from "@/components/ui/sonner";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { useControlAction, type OmniRushControlAction } from "./control/control-provider";
 
@@ -69,8 +70,13 @@ export function BudgetWrapConsent() {
       const operation = "operation" in args ? args.operation : undefined;
       const store = useWrapStore.getState();
       if (operation === "offer") return { choice: store.offer(parsed.sessionID, parsed.offerID, parsed.scopes) };
-      if (operation === "finish") store.choose(parsed.sessionID, parsed.offerID, "done");
-      else if (operation === "fail") store.choose(parsed.sessionID, parsed.offerID, "pending", "The wrap could not finish. Choose whether to retry.");
+      if (operation === "finish") {
+        store.choose(parsed.sessionID, parsed.offerID, "done");
+        toast.success("Wrap up complete", { description: "Your handoff is saved. You can keep working while tokens remain." });
+      } else if (operation === "fail") {
+        store.choose(parsed.sessionID, parsed.offerID, "pending", "The wrap could not finish. Choose whether to retry.");
+        toast.warning("Wrap up did not finish", { description: "Choose Wrap up again to retry, or keep working." });
+      }
       else if (operation === "clear") store.clear(parsed.sessionID, parsed.offerID);
       else return { ok: false, error: "Unknown wrap operation" };
       return { ok: true };
@@ -92,7 +98,10 @@ export function BudgetWrapConsent() {
           if (pending) useWrapStore.getState().choose(pending.sessionID, pending.offerID, "decline");
         }}>Keep working</Button>
         <Button data-testid="budget-wrap-accept" onClick={() => {
-          if (pending) useWrapStore.getState().choose(pending.sessionID, pending.offerID, "accept");
+          if (pending) {
+            useWrapStore.getState().choose(pending.sessionID, pending.offerID, "accept");
+            toast.info("Wrapping up", { description: "Saving a handoff for this session." });
+          }
         }}>Wrap up</Button>
       </DialogFooter>
     </DialogContent>

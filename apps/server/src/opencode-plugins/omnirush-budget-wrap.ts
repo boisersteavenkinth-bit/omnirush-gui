@@ -136,18 +136,8 @@ export const OmniRushBudgetWrap = async (input: {
     } catch {
       // The headless adapter may not implement the native TUI endpoint.
     }
-    // The desktop shell has its own notification center. The server-scoped
-    // control request is consumed by the connected window and never becomes a
-    // session message or trace part.
-    if (!server || !token) return;
-    await fetcher(server + "/experimental/ui-control/request", {
-      method: "POST",
-      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-      body: JSON.stringify({
-        kind: "command",
-        input: { id: "notifications.show", args: { title, body: message, severity: variant } },
-      }),
-    }).catch(() => undefined);
+    // The desktop shell shows its own local toast when the person accepts and
+    // when the offer settles. It needs no Control Mode command here.
   }
 
   async function compact(sessionID: string): Promise<void> {
