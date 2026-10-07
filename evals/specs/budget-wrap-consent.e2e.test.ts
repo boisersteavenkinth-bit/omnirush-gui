@@ -59,9 +59,24 @@ test("a quota handoff waits for a choice, honors decline, and offers again after
     expect(await offer("allowance-two")).toMatchObject({ ok: true, result: { choice: "done" } });
   });
 
+  await step("a full app restart waits for the server to renew an unanswered offer", async () => {
+    expect(await offer("allowance-three")).toMatchObject({ ok: true, result: { choice: "pending" } });
+    await user.see({ testId: "budget-wrap-consent" });
+    await user.reload();
+    await probe.eventually(
+      () => probe.eval(() => window.__omnirushControl?.listActions().some((action) => action.id === "budget.wrap.update")),
+      { within: 15_000, until: (value) => value === true, label: "wrap control after reload" },
+    );
+    await user.notSee({ testId: "budget-wrap-consent" });
+    expect(await offer("allowance-three")).toMatchObject({ ok: true, result: { choice: "pending" } });
+    await user.see({ testId: "budget-wrap-consent" });
+    await user.click({ role: "button", label: "Keep working" });
+    await dismissed();
+  });
+
   evidence.recordAssertionEvidence(
-    "An unanswered wrap stays visible; decline is remembered for one allowance; a changed allowance asks again",
-    "The desktop shell showed a persistent choice for the first offer. Decline dismissed it and subsequent sync returned decline. A second allowance reopened it; acceptance and completion dismissed it without a stop screen.",
+    "An unanswered wrap stays visible; decline is remembered; a changed allowance asks again; a restart requires renewal",
+    "The desktop shell kept the choice open while running. Decline was remembered for that allowance. A changed allowance reopened it; acceptance and completion dismissed it. After a full app reload, an unanswered offer stayed hidden until the server renewed it.",
     true,
   );
 });
