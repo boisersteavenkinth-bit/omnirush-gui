@@ -26,6 +26,10 @@ test("a quota handoff waits for a choice, honors decline, and offers again after
     }, [offerID, operation]),
     { awaitPromise: true },
   );
+  const dismissed = () => probe.eventually(
+    () => probe.eval(() => !document.querySelector('[data-testid="budget-wrap-consent"]')),
+    { within: 10_000, until: (value) => value === true, label: "wrap dialog exit animation finished" },
+  );
 
   await step("the offer stays visible until answered", async () => {
     expect(await offer("allowance-one")).toMatchObject({ ok: true, result: { choice: "pending" } });
@@ -38,6 +42,7 @@ test("a quota handoff waits for a choice, honors decline, and offers again after
 
   await step("declining suppresses that allowance's offer", async () => {
     await user.click({ role: "button", label: "Keep working" });
+    await dismissed();
     await user.notSee({ testId: "budget-wrap-consent" });
     expect(await offer("allowance-one")).toMatchObject({ ok: true, result: { choice: "decline" } });
     await user.notSee({ testId: "budget-wrap-consent" });
@@ -47,6 +52,7 @@ test("a quota handoff waits for a choice, honors decline, and offers again after
     expect(await offer("allowance-two")).toMatchObject({ ok: true, result: { choice: "pending" } });
     await user.see({ testId: "budget-wrap-consent" });
     await user.click({ role: "button", label: "Wrap up" });
+    await dismissed();
     await user.notSee({ testId: "budget-wrap-consent" });
     expect(await offer("allowance-two")).toMatchObject({ ok: true, result: { choice: "accept" } });
     expect(await offer("allowance-two", "finish")).toMatchObject({ ok: true });
