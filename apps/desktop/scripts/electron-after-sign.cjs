@@ -1,5 +1,6 @@
 const { spawnSync } = require("node:child_process");
 const { existsSync, mkdtempSync, rmSync } = require("node:fs");
+const { notaryCredentials, notarizeFile, runWithRetry, staple } = require("./macos-notarize.cjs");
 const { tmpdir } = require("node:os");
 const path = require("node:path");
 
@@ -10,29 +11,6 @@ function run(command, args) {
   if (result.status !== 0) {
     throw new Error(`${command} ${args.join(" ")} failed with status ${result.status}`);
   }
-}
-
-async function runWithRetry(command, args, attempts, baseDelayMs = 30_000) {
-  for (let attempt = 1; ; attempt++) {
-    const result = spawnSync(command, args, { stdio: "inherit" });
-    if (result.status === 0) return;
-    if (attempt >= attempts) {
-      throw new Error(`${command} ${args.join(" ")} failed with status ${result.status} after ${attempts} attempts`);
-    }
-    const delayMs = baseDelayMs * attempt;
-    console.warn(
-      `[electron-after-sign] ${command} ${args.join(" ")} failed with status ${result.status}; retrying in ${delayMs / 1000}s (attempt ${attempt}/${attempts}).`,
-    );
-    await new Promise((resolve) => setTimeout(resolve, delayMs));
-  }
-}
-
-function requireEnv(name) {
-  const value = process.env[name];
-  if (!value) {
-    throw new Error(`${name} is required to notarize the Electron macOS app`);
-  }
-  return value;
 }
 
 function computerUseHelperPath(appPath) {
@@ -91,31 +69,21 @@ async function afterSign(context) {
     console.warn("[electron-after-sign] MACOS_NOTARIZE is not true; skipping notarization.");
     return;
   }
-  verifyComputerUseHelper(appPath, process.env.MACOS_NOTARIZE === "true");
+  const display = spawnSync("codesign", ["--display", "--verbose=2", appPath], { encoding: "utf8" });
+  if (!/Authority=Developer ID Application/.test(`${display.stdout || ""}${display.stderr || ""}`)) {
+    throw new Error("MACOS_NOTARIZE is true but the app is not Developer ID signed; check the signing certificate.");
+  }
+  verifyComputerUseHelper(appPath, true);
 
+  const credentials = notaryCredentials();
   const notaryTempDir = mkdtempSync(path.join(tmpdir(), "omnirush-electron-notary-"));
-  const notaryZipPath = path.join(notaryTempDir, `${context.packager.appInfo.productFilename}-notary.zip`);
-  const keyPath = requireEnv("APPLE_API_KEY_PATH");
-  const keyId = requireEnv("APPLE_API_KEY");
-  const issuer = requireEnv("APPLE_API_ISSUER");
-
+  const notaryZipPath = path.join(notaryTempDir, `${context.packager.appInfo.productFilename}.zip`);
   try {
     run("ditto", ["-c", "-k", "--keepParent", appPath, notaryZipPath]);
-    run("xcrun", [
-      "notarytool",
-      "submit",
-      notaryZipPath,
-      "--key",
-      keyPath,
-      "--key-id",
-      keyId,
-      "--issuer",
-      issuer,
-      "--wait",
-    ]);
-    // Notarization tickets can take minutes to propagate to Apple's CDN after acceptance; stapler can transiently fail with status 65 ("CloudKit query failed").
-    await runWithRetry("xcrun", ["stapler", "staple", appPath], 5);
-    run("xcrun", ["stapler", "validate", appPath]);
+    await notarizeFile(notaryZipPath, credentials);
+    // electron-builder builds the DMG and the updater zip after this hook, so
+    // both carry the stapled app.
+    await staple(appPath);
   } finally {
     rmSync(notaryTempDir, { recursive: true, force: true });
   }

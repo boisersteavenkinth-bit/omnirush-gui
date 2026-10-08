@@ -65,7 +65,8 @@ jobs:
   build:
     name: Build ${{ matrix.name }}
     needs: prepare
-    timeout-minutes: 120
+    # Apple's notarization review of the app and the DMG can take an hour each.
+    timeout-minutes: ${{ matrix.platform == 'macos' && 300 || 120 }}
     strategy:
       fail-fast: false
       matrix:
@@ -74,7 +75,7 @@ jobs:
             runner: macos-14
             platform: macos
             target: aarch64-apple-darwin
-            builder_args: --mac --arm64
+            builder_args: --mac --arm64 -c.mac.forceCodeSigning=true
             update_manifest: latest-mac.yml
           # No Windows build: Windows installs and updates are no longer
           # offered, so no installer and no latest.yml feed are published.
@@ -149,13 +150,47 @@ jobs:
         shell: bash
         run: pnpm --filter @omnirush/desktop build:electron
 
+      # Developer ID signature, hardened runtime and notarization. Refuses to
+      # package a mac build without the signing secrets.
+      - name: Prepare macOS signing
+        if: matrix.platform == 'macos'
+        env:
+          MAC_CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+          MAC_CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+          APPLE_API_KEY_P8_BASE64: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+        shell: bash
+        run: scripts/release/macos-signing-env.sh
+
       - name: Package installer
+        env:
+          CSC_LINK: ${{ matrix.platform == 'macos' && secrets.MAC_CSC_LINK || '' }}
+          CSC_KEY_PASSWORD: ${{ matrix.platform == 'macos' && secrets.MAC_CSC_KEY_PASSWORD || '' }}
+          CSC_IDENTITY_AUTO_DISCOVERY: ${{ matrix.platform == 'macos' && 'true' || 'false' }}
         shell: bash
         run: |
           pnpm --dir apps/desktop exec electron-builder \
             --config electron-builder.yml \
             ${{ matrix.builder_args }} \
             --publish never
+
+      # The app was notarized and stapled before electron-builder zipped it;
+      # the DMG is signed, notarized and stapled here, and its sha512 in
+      # latest-mac.yml rewritten to match.
+      - name: Notarize macOS disk image
+        if: matrix.platform == 'macos'
+        shell: bash
+        run: |
+          node apps/desktop/scripts/macos-notarize.cjs \
+            --dist apps/desktop/dist-electron \
+            --manifest "apps/desktop/dist-electron/${{ matrix.update_manifest }}" \
+            --keychain "$MACOS_SIGNING_KEYCHAIN"
+
+      - name: Verify macOS signature and notarization
+        if: matrix.platform == 'macos'
+        shell: bash
+        run: scripts/release/verify-macos-signing.sh apps/desktop/dist-electron
 
       - name: Verify packaged server imports
         shell: bash
