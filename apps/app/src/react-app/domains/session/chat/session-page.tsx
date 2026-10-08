@@ -1181,9 +1181,10 @@ export function SessionPage(props: SessionPageProps) {
     return status === "thinking" || status === "responding" || status === "compacting" || status === "waiting";
   }, [props.sidebar.sessionStatusById]);
 
-  // Leaving a session whose turn runs (switching away, deleting it) asks
-  // first; a second request, after "Wait for it", goes ahead. The guard
-  // re-arms when a turn ends or a new one starts (the CLI's createQuitGuard).
+  // Ending a session whose turn runs asks first; a second request, after
+  // "Wait for it", goes ahead. Switching sessions is navigation, not
+  // termination, so it must not use this guard. The guard re-arms when a turn
+  // ends or a new one starts (the CLI's createQuitGuard).
   const leaveGuard = useRef(createQuitGuard());
   const runningTurns = Object.entries(props.sidebar.sessionStatusById)
     .filter(([, status]) => status === "thinking" || status === "responding" || status === "compacting" || status === "waiting")
@@ -1200,13 +1201,6 @@ export function SessionPage(props: SessionPageProps) {
     }
     proceed();
   }, []);
-
-  // The sidebar's switch.
-  const guardedOpenSessionTab = useCallback((workspaceId: string, sessionId: string) => {
-    const currentSessionId = props.sidebar.selectedSessionId ?? null;
-    const running = leavingRunningTurn({ action: "switch", turnRunning: sessionTurnRunning(currentSessionId), currentSessionId, targetSessionId: sessionId });
-    guardLeave(running, () => openSessionTab(workspaceId, sessionId));
-  }, [guardLeave, openSessionTab, props.sidebar.selectedSessionId, sessionTurnRunning]);
 
   const closeSecondaryWorkbenchPane = useCallback(() => {
     setWorkbenchSplit(null);
@@ -1434,7 +1428,7 @@ export function SessionPage(props: SessionPageProps) {
           workspaceConnectionStateById={props.sidebar.workspaceConnectionStateById}
           newTaskDisabled={props.sidebar.newTaskDisabled}
           onSelectWorkspace={props.sidebar.onSelectWorkspace}
-          onOpenSession={guardedOpenSessionTab}
+          onOpenSession={openSessionTab}
           onPrefetchSession={props.sidebar.onPrefetchSession}
           onCreateTaskInWorkspace={props.sidebar.onCreateTaskInWorkspace}
           onCreateSplitTaskInWorkspace={props.sidebar.onCreateSplitTaskInWorkspace}

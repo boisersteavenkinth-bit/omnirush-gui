@@ -351,12 +351,16 @@ describe("the nudge", () => {
 });
 
 describe("the don't-leave-mid-turn guard", () => {
-  test("leaving a running turn: quit, close, delete; switching only to another session", () => {
+  test("only explicit termination actions guard a running turn", () => {
     expect(leavingRunningTurn({ action: "quit", turnRunning: true })).toBe(true);
     expect(leavingRunningTurn({ action: "close", turnRunning: true })).toBe(true);
     expect(leavingRunningTurn({ action: "delete", turnRunning: true })).toBe(true);
     expect(leavingRunningTurn({ action: "quit", turnRunning: false })).toBe(false);
-    expect(leavingRunningTurn({ action: "switch", turnRunning: true, currentSessionId: "a", targetSessionId: "b" })).toBe(true);
+  });
+
+  test("switching between active sessions never asks to quit either session", () => {
+    expect(leavingRunningTurn({ action: "switch", turnRunning: true, currentSessionId: "a", targetSessionId: "b" })).toBe(false);
+    expect(leavingRunningTurn({ action: "switch", turnRunning: true, currentSessionId: "b", targetSessionId: "a" })).toBe(false);
     expect(leavingRunningTurn({ action: "switch", turnRunning: true, currentSessionId: "a", targetSessionId: "a" })).toBe(false);
   });
 
