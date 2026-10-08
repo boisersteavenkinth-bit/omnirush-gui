@@ -350,8 +350,13 @@ export function outsideProject(file: unknown, root: unknown): boolean {
   const normSplit = homeSplit(norm);
   if (baseSplit && normSplit && (baseSplit.home === "~" || normSplit.home === "~" || baseSplit.home === normSplit.home)) {
     // Both sides sit under the same home folder (`~/...` matches its absolute form):
-    // compare the part below the home folder.
-    return normSplit.rest !== baseSplit.rest && !normSplit.rest.startsWith(`${baseSplit.rest}/`);
+    // expand the home prefix again so dot segments and scratch paths use the
+    // same rules as ordinary absolute paths.
+    const home = baseSplit.home === "~" ? normSplit.home : baseSplit.home;
+    norm = resolveDots(`${home}/${normSplit.rest}`);
+    const resolvedBase = resolveDots(`${home}/${baseSplit.rest}`);
+    if (isScratch(`${norm}/`)) return false;
+    return norm !== resolvedBase && !norm.startsWith(`${resolvedBase}/`);
   }
   if (/^(~|\$home|\$\{home\})(\/|$)/.test(norm)) {
     // `~/x`: under the home folder the project folder sits in, when it sits in one.
@@ -484,6 +489,8 @@ export type GoodSessionInput = {
   lastTurn?: "pass" | "cut";
   /** Native Windows (not WSL). */
   nativeWindows?: boolean;
+  /** Remote workspaces do not necessarily have a local project folder. */
+  isRemoteWorkspace?: boolean;
   /** The server checked this session after upload and it is a Good session ★. */
   serverGood?: boolean;
 };
@@ -494,7 +501,7 @@ function plural(count: number, word: string): string {
 
 /** The checklist for a session, from its tool calls. */
 export function goodSessionChecklist({
-  calls = [], workspaceRoot = "", turnRunning = false, lastTurn = "cut", nativeWindows = false, serverGood = false,
+  calls = [], workspaceRoot = "", turnRunning = false, lastTurn = "cut", nativeWindows = false, isRemoteWorkspace = false, serverGood = false,
 }: GoodSessionInput = {}): GoodSessionChecklist {
   const codeFiles = new Map<string, number>();
   let testRuns = 0;
@@ -552,7 +559,7 @@ export function goodSessionChecklist({
     ? ` (${fileCount} of ${FLOOR_FILES} files)`
     : lines < FLOOR_LINES ? ` (${lines} of ${FLOOR_LINES} lines)` : "";
   const finished = turnRunning ? "pending" : lastTurn === "pass" ? "pass" : "cut";
-  const noRoot = unknownRoot && calls.some((call) => !call.notRun);
+  const noRoot = !isRemoteWorkspace && unknownRoot && calls.some((call) => !call.notRun);
   const checks: GoodSessionCheck[] = [
     {
       id: "code",

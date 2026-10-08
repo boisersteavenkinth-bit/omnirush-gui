@@ -3299,6 +3299,7 @@ export function SessionSurface(props: SessionSurfaceProps) {
           sessionId={props.sessionId}
           messages={renderedMessages}
           workspaceRoot={props.workspaceRoot}
+          isRemoteWorkspace={props.isRemoteWorkspace}
           turnRunning={chatStreaming || (effectiveActivityStatus !== "idle" && effectiveActivityStatus !== "error")}
         />
         <ReactSessionComposer
