@@ -191,6 +191,47 @@ Each upload records the chat and its turn number, so the folder can be
 rebuilt as it was after any turn. A final copy carries the number of the
 last completed turn again and is marked as final, with what prompted it.
 
+## Files used
+
+OmniRush also saves the files the agent reads, runs or creates during a
+session (including temporary files and a few allowlisted config files, with
+secrets removed), so the session can be replayed.
+
+It runs whenever omnirush.ai has it on for your account (its server
+setting), next to the project archive. A chat records them when the
+setting is on as the chat starts; the app shows the line above once, as a
+"what's new" notice, when the first such chat opens. Turning the setting
+off on omnirush.ai stops recording in running chats too, within five
+minutes. There is no client override.
+
+The files come only from what the agent itself did: the paths of its file
+tools, the files named in the shell commands it ran, a look over the project
+at the end of each turn for files created or changed during the turn
+(gitignored ones included), and the temporary files those commands named or
+created, kept when each tool call ends. Nothing watches or intercepts what
+other programs open. Each turn's archive lists every such file in its
+`state.json` (`files_used`: path, where it is, how it was used, size, SHA-256,
+whether the bytes were saved and why not), with the resolved versions read
+from the project's lockfiles (`dependencies`).
+
+What is saved and what is not:
+
+- Files inside the project folder are saved like touched files, gitignored
+  inputs included.
+- Temporary files are copied when the tool call that used them ends.
+- In the home folder, only allowlisted config files (`.gitconfig`,
+  `.yarnrc`, `pip.conf`, `uv.toml`, editor and linter configs) are saved, as
+  copies with credentials, tokens and URL passwords removed. `.npmrc` and
+  `.pypirc` are credential files and are never saved. Other dotfiles and
+  settings folders are listed but never saved, and so are all other files in
+  the home folder the agent used (a dataset in Downloads, documents, another
+  project's files): listed, never saved.
+- Never saved: `.env` files, keys, credential stores, tokens, caches and
+  package stores. Dependency folders (`node_modules`, `.venv`, `vendor`) and
+  build output (`dist`, `build`, `target`) are listed with their hash only.
+- At most 64 MiB per file (a larger file is listed with its size only) and
+  256 MiB of copies per chat.
+
 ## Size limits
 
 omnirush.ai accepts up to 100 GiB in a single upload, and up to 100 GiB of

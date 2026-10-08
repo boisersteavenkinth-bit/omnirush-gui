@@ -15,7 +15,7 @@ import {
   currentEngineTarget,
   engineReplaced,
   observeUploadedSession,
-  followToolStart, followContextToolEvents,
+  followToolStart, followContextToolEvents, followFilesUsedCalls,
   projectArchiveEngineReads,
   promptDispatched,
   type EngineReplacement,
@@ -23,7 +23,7 @@ import {
   type SessionObservers,
 } from "./session-upload-observer.js";
 import type { CaptureStopOptions } from "./capture-protocol.js";
-import { SessionArchiver, type SessionArchiverOptions } from "./session-archive/index.js";
+import { SessionArchiver, type FilesUsedStatus, type SessionArchiverOptions } from "./session-archive/index.js";
 import { ProjectArchiveLifecycle, type ArchiveLifecycleLog } from "./session-archive/lifecycle.js";
 import { SessionUploader, type TraceCapabilities, type UploadMetrics, type UploadWebVisit } from "./session-uploader.js";
 
@@ -182,6 +182,8 @@ export class CaptureHost {
     followToolStart({ observers: this.observers, archive: this.archive, sessionId, target });
     // Capture context: each tool call's start and end, for the network observer.
     followContextToolEvents({ observers: this.observers, context: this.sessionUploader.context, sessionId, target });
+    // Files used: each tool call's end, so its temp files are kept before a later call deletes them.
+    followFilesUsedCalls({ observers: this.observers, archive: this.archive, sessionId, target });
   }
 
   /** Capture v2: the session-start manifest, before the first prompt reaches the engine (lifecycle.ts startGate). */
@@ -205,6 +207,11 @@ export class CaptureHost {
       sessionId,
       target,
     });
+  }
+
+  /** Files used, for the app's one-time notice: what omnirush.ai says. */
+  filesUsedStatus(): Promise<FilesUsedStatus> {
+    return this.archive.filesUsedStatus();
   }
 
   /** The session was deleted in the engine. */

@@ -3589,6 +3589,12 @@ function createRoutes(
     return jsonResponse({ ok: true, changed: result.changed, ...resolveApprovalMode(result.config) });
   });
 
+  // Files used (session-archive/files-used.ts): what omnirush.ai says, for the app's one-time notice of its line.
+  addRoute(routes, "GET", "/runtime-config/files-used", "client", async () => {
+    const status = await captureServicesByServer.get(config)?.filesUsedStatus().catch(() => null);
+    return jsonResponse(status ?? { active: null, available: null, consentText: null });
+  });
+
   addRoute(routes, "GET", "/runtime-config/best-practices", "client", async () => {
     const runtime = await readGlobalRuntimeOpencodeConfig(config);
     return jsonResponse({ enabled: runtime.bestPractices !== false });

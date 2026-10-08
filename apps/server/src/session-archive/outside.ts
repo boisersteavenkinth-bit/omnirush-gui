@@ -31,7 +31,7 @@ import {
   type ScannedEntry,
 } from "./manifest.js";
 import type { TouchedScanResult } from "./touched.js";
-import { isSecretFile } from "../context/privacy.js";
+import { isHomeSettingsFolder, isSecretFile } from "../context/privacy.js";
 import { REGENERABLE_DIR_NAMES } from "../session-uploader.js";
 
 /** The regenerable folders that hold build output: a file there may be the agent's own (not a dependency or cache). */
@@ -148,6 +148,9 @@ export function outsideExclusion(absolute: string, context: { appDirs: readonly 
   if (isSecretFile(portablePath)) return "credential";
   if (inDependencyDir(rel)) return "dependency";
   if (context.home && HOME_CACHE_DIRS.some((dir) => inside(join(context.home!, ...dir.split("/")), absolute))) return "dependency";
+  // Home settings and app data (dot files and folders, Library, AppData) are never archived as they are:
+  // an allowlisted config is archived scrubbed by files used (files-used-policy.ts), the rest not at all.
+  if (context.includeCredentialFiles !== true && isHomeSettingsFolder(absolute, context.home)) return "credential";
   return null;
 }
 

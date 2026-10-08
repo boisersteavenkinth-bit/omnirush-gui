@@ -15,12 +15,13 @@ import { realpath } from "node:fs/promises";
 
 import { attachmentsFromMessages } from "./attachments.js";
 import type { StartCapture } from "./capture-v2.js";
-import type { CaptureResult, DrainResult, FinalReason, SessionArchiver } from "./index.js";
+import type { CaptureResult, DrainResult, FilesUsedStatus, FinalReason, SessionArchiver } from "./index.js";
+import type { UsedToolCall } from "./files-used.js";
 
 export type ProjectArchiver = Pick<
   SessionArchiver,
   "captureBase" | "captureDelta" | "captureFinal" | "startFinalCandidates" | "recordTouched" | "forgetTouched" | "drain" | "signOut" | "stop"
-> & Partial<Pick<SessionArchiver, "startManifest" | "hasStartManifest" | "captureState" | "recordAttachments" | "recordBinary">>;
+> & Partial<Pick<SessionArchiver, "startManifest" | "hasStartManifest" | "captureState" | "recordAttachments" | "recordBinary" | "filesUsedToolCallEnded" | "filesUsedTurnStarted" | "filesUsedTurnEnded" | "filesUsedMaybe" | "filesUsedStatus">>;
 
 /** Engine reads for one session, resolving to the parsed JSON, or null when it cannot be read. */
 export type ArchiveEngineReads = {
@@ -386,6 +387,52 @@ export class ProjectArchiveLifecycle {
   turnFollowed(sessionId: string): void {
     const record = this.sessions.get(sessionId);
     if (record) this.cancelIdleFinal(record);
+    // Files used: the turn's start time, for its end-of-turn snapshot (nothing is read now).
+    if (record && this.active && !this.consentOff) this.archiver.filesUsedTurnStarted?.(sessionId);
+  }
+
+  /** Files used, for the app's one-time notice: what omnirush.ai says. Never rejects. */
+  async filesUsedStatus(): Promise<FilesUsedStatus> {
+    try {
+      if (this.archiver.filesUsedStatus) return await this.archiver.filesUsedStatus();
+    } catch (error) {
+      this.warn("files-used", error);
+    }
+    return { active: null, available: null, consentText: null };
+  }
+
+  /** Files used: whether tool calls are worth following now (the account's last answer). */
+  filesUsedMaybe(): boolean {
+    return this.active && !this.consentOff && this.archiver.filesUsedMaybe?.() === true;
+  }
+
+  /**
+   * Files used: one tool call of the session ended. The temp files it named
+   * or made and the allowlisted home config it read are kept right away (a
+   * scratch file deleted later in the turn is not lost); this is not a step
+   * of the session's queue, so a capture in progress does not hold it.
+   */
+  toolCallEnded(sessionId: string, call: UsedToolCall): void {
+    const record = this.sessions.get(sessionId);
+    const root = record?.root ?? record?.start?.root;
+    if (!this.active || this.consentOff || !record || !root || !this.archiver.filesUsedToolCallEnded) return;
+    this.track(this.archiver.filesUsedToolCallEnded(sessionId, root, call));
+  }
+
+  /**
+   * Files used: a settled turn's messages. Every file its tool calls used is
+   * listed for the turn's state, queued ahead of its delta (call before
+   * turnCompleted), with the end-of-turn snapshot of the project.
+   */
+  turnFilesUsed(sessionId: string, messages: unknown): void {
+    const record = this.sessions.get(sessionId);
+    if (!this.active || this.consentOff || !record || !this.archiver.filesUsedTurnEnded) return;
+    const ended = this.archiver.filesUsedTurnEnded.bind(this.archiver);
+    this.schedule(sessionId, "files_used", async () => {
+      if (this.sessions.get(sessionId) !== record) return;
+      const root = record.root ?? record.start?.root;
+      if (root) await ended(sessionId, root, messages);
+    });
   }
 
   /**

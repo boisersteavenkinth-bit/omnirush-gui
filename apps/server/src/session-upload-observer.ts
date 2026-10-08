@@ -11,6 +11,7 @@ import { loopbackFetch } from "./server-fetch.js";
 import { isFinishedAssistantMessage, isPromptMessage, type ArchiveEngineReads, type ProjectArchiveLifecycle } from "./session-archive/lifecycle.js";
 import { MAX_UPLOAD_CHILD_SESSION_DEPTH, type UploadSessionModel, type SessionUploader } from "./session-uploader.js";
 import { recordTurnFiles, type TurnFilesInput } from "./session-archive/turn-files.js";
+import { watchToolCallEnds } from "./session-archive/files-used.js";
 import { watchToolStarts } from "./session-archive/tool-start.js";
 import { watchToolEvents } from "./context/tool-events.js";
 import type { ContextCapture } from "./context/index.js";
@@ -754,7 +755,7 @@ export function projectArchiveEngineReads(target: EngineTarget | (() => EngineTa
  */
 export function observeUploadedSession(input: {
   sessionUploader: ObservedUploader;
-  archive: Pick<ProjectArchiveLifecycle, "turnFollowed" | "turnCompleted" | "turnIncomplete"> & Partial<Pick<ProjectArchiveLifecycle, "turnMessages">>;
+  archive: Pick<ProjectArchiveLifecycle, "turnFollowed" | "turnCompleted" | "turnIncomplete"> & Partial<Pick<ProjectArchiveLifecycle, "turnMessages" | "turnFilesUsed">>;
   /**
    * The session's workspace: each settled turn reports the files outside it
    * that the turn touched to the archive, and records the files it read
@@ -928,6 +929,8 @@ export function observeUploadedSession(input: {
     turnArchived = true;
     // Capture v2: the turn's attachments are staged ahead of its delta.
     if (history) input.archive.turnMessages?.(sessionId, history.delta);
+    // Files used: the files the turn's tool calls used, and the end-of-turn snapshot, ahead of its delta.
+    if (history) input.archive.turnFilesUsed?.(sessionId, history.delta);
     input.archive.turnCompleted(sessionId, history ? history.outline : null);
   };
 
@@ -1103,6 +1106,45 @@ export function followToolStart(input: {
     signal,
     fetch: (target, init) => loopbackFetch(target, init),
     onToolStart: () => input.archive.toolStarted(input.sessionId),
+  }).finally(() => {
+    if (map.get(input.sessionId) === controller) map.delete(input.sessionId);
+  });
+}
+
+const FILES_USED_WATCHES = new WeakMap<SessionObservers, Map<string, AbortController>>();
+
+/**
+ * Files used: every tool call of the session as it ends, from the engine's
+ * event stream (files-used.ts watchToolCallEnds), so the temp files it
+ * named or made are kept before a later call deletes them. Only while the
+ * project archive may record files used; the next prompt's call replaces it.
+ */
+export function followFilesUsedCalls(input: {
+  observers: SessionObservers;
+  archive: Pick<ProjectArchiveLifecycle, "toolCallEnded" | "filesUsedMaybe">;
+  sessionId: string;
+  target: EngineTarget;
+}): void {
+  let watches = FILES_USED_WATCHES.get(input.observers);
+  if (!watches) {
+    watches = new Map();
+    FILES_USED_WATCHES.set(input.observers, watches);
+  }
+  watches.get(input.sessionId)?.abort();
+  if (!input.archive.filesUsedMaybe()) return;
+  const controller = new AbortController();
+  watches.set(input.sessionId, controller);
+  const map = watches;
+  const { baseUrl, headers, search, engine } = input.target;
+  const url = buildOpencodeProxyUrl(baseUrl, engine === "v2" ? "/api/event" : "/event", search);
+  const signal = AbortSignal.any([controller.signal, input.observers.controller.signal, AbortSignal.timeout(MAX_TOOL_WATCH_MS)]);
+  void watchToolCallEnds({
+    url,
+    headers: new Headers(headers),
+    sessionId: input.sessionId,
+    signal,
+    fetch: (target, init) => loopbackFetch(target, init),
+    onCall: (call) => input.archive.toolCallEnded(input.sessionId, call),
   }).finally(() => {
     if (map.get(input.sessionId) === controller) map.delete(input.sessionId);
   });

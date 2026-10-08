@@ -32,6 +32,7 @@ export type CaptureCalls = {
   stop: [options?: CaptureStopOptions];
   idle: [];
   diagnostics: [];
+  filesUsedStatus: [];
 };
 
 export type CaptureCallName = keyof CaptureCalls;
@@ -180,5 +181,7 @@ export function invokeCapture(host: CaptureHost, call: CaptureCall): unknown {
       return host.idle();
     case "diagnostics":
       return host.diagnostics();
+    case "filesUsedStatus":
+      return host.filesUsedStatus();
   }
 }

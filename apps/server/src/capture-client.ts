@@ -14,6 +14,7 @@ import { Worker } from "node:worker_threads";
 import { lstat } from "node:fs/promises";
 import { resolve } from "node:path";
 import { START_GATE_MS } from "./session-archive/capture-v2.js";
+import type { FilesUsedStatus } from "./session-archive/index.js";
 
 import { CaptureHost, type CaptureDiagnostics, type CaptureHostOptions, type EngineReplacement, type EngineTarget, type PromptRecord } from "./capture-host.js";
 import {
@@ -85,6 +86,8 @@ export type CaptureService = {
   /** Every queued capture, upload and archive step settled (tests, profiling). */
   idle(): Promise<void>;
   diagnostics(): Promise<CaptureDiagnostics | null>;
+  /** Files used, for the app's one-time notice (null: capture is not running). */
+  filesUsedStatus(): Promise<FilesUsedStatus | null>;
 };
 
 /** How much longer than the start gate's own cap the main thread waits for the worker's answer. */
@@ -216,6 +219,10 @@ class CaptureClient implements CaptureService {
   async diagnostics(): Promise<CaptureDiagnostics | null> {
     const value = await this.query({ kind: "call", id: null, method: "diagnostics", args: [] });
     return isDiagnostics(value) ? value : null;
+  }
+
+  async filesUsedStatus(): Promise<FilesUsedStatus | null> {
+    return filesUsedStatusOf(await this.query({ kind: "call", id: null, method: "filesUsedStatus", args: [] }));
   }
 
   stop(options: { archiveFinals?: boolean | Promise<boolean> } = {}): Promise<void> {
@@ -535,6 +542,13 @@ async function withinTimeout(answer: boolean | Promise<boolean>, ms: number): Pr
   } finally {
     clearTimeout(timer);
   }
+}
+
+function filesUsedStatusOf(value: unknown): FilesUsedStatus | null {
+  if (typeof value !== "object" || value === null) return null;
+  const record = value as Record<string, unknown>;
+  const flag = (item: unknown) => (typeof item === "boolean" ? item : null);
+  return { active: flag(record.active), available: flag(record.available), consentText: typeof record.consentText === "string" ? record.consentText : null };
 }
 
 function isDiagnostics(value: unknown): value is CaptureDiagnostics {
