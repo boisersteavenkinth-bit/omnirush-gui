@@ -1,7 +1,7 @@
 /** @jsxImportSource react */
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { UIMessage } from "ai";
-import { AlertTriangle, Star, X } from "lucide-react";
+import { AlertTriangle, CircleCheck, CircleX, Star, X } from "lucide-react";
 
 import {
   AlertDialog,
@@ -71,13 +71,17 @@ function CheckMark({ check }: { check: GoodSessionCheck }) {
       data-check={check.id}
       data-state={check.state}
       className={cn(
-        "whitespace-nowrap",
+        "inline-flex items-center gap-1 whitespace-nowrap",
         check.state === "pass" && "text-foreground",
         check.state === "fail" && "text-amber-11",
       )}
     >
       {check.label}
-      {check.state === "pending" ? null : <span aria-hidden="true">{check.state === "pass" ? " ✓" : " ✗"}</span>}
+      {check.state === "pending" ? null : check.state === "pass" ? (
+        <CircleCheck className="size-3.5 shrink-0" strokeWidth={2.5} aria-hidden="true" />
+      ) : (
+        <CircleX className="size-3.5 shrink-0" strokeWidth={2.5} aria-hidden="true" />
+      )}
     </span>
   );
 }
@@ -104,6 +108,7 @@ export type GoodSessionChecklistBarProps = {
   sessionId: string;
   messages: readonly UIMessage[];
   workspaceRoot: string;
+  isRemoteWorkspace: boolean;
   turnRunning: boolean;
 };
 
@@ -152,9 +157,10 @@ export function GoodSessionChecklistBar(props: GoodSessionChecklistBarProps) {
   const local = useMemo(() => goodSessionChecklist({
     ...facts,
     workspaceRoot: props.workspaceRoot,
+    isRemoteWorkspace: props.isRemoteWorkspace,
     turnRunning: props.turnRunning,
     nativeWindows,
-  }), [facts, nativeWindows, props.turnRunning, props.workspaceRoot]);
+  }), [facts, nativeWindows, props.isRemoteWorkspace, props.turnRunning, props.workspaceRoot]);
   const serverGood = useServerGood(props.sessionId, local.onTrack);
   const checklist = useMemo(
     () => (serverGood && local.onTrack ? { ...local, verdict: "good" as const, text: checklistText(local.checks, "good") } : local),

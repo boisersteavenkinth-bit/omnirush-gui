@@ -334,11 +334,30 @@ function resolveDots(value: string): string {
   return out.join("/");
 }
 
+function homeSplit(norm: string): { home: string; rest: string } | null {
+  const tilde = /^(~|\$home|\$\{home\})(\/|$)/.exec(norm);
+  if (tilde) return { home: "~", rest: norm.replace(/^(~|\$home|\$\{home\})(\/|$)/, "") };
+  const match = HOME_PREFIX.exec(norm);
+  return match ? { home: match[1], rest: norm.slice(match[1].length + 1) } : null;
+}
+
 /** Whether a path the agent changed or worked in is outside the project folder (scratch folders are fine). */
 export function outsideProject(file: unknown, root: unknown): boolean {
   let norm = folderKey(file);
   const base = folderKey(root);
   if (!norm || !base) return false;
+  const baseSplit = homeSplit(base);
+  const normSplit = homeSplit(norm);
+  if (baseSplit && normSplit && (baseSplit.home === "~" || normSplit.home === "~" || baseSplit.home === normSplit.home)) {
+    // Both sides sit under the same home folder (`~/...` matches its absolute form):
+    // expand the home prefix again so dot segments and scratch paths use the
+    // same rules as ordinary absolute paths.
+    const home = baseSplit.home === "~" ? normSplit.home : baseSplit.home;
+    norm = resolveDots(`${home}/${normSplit.rest}`);
+    const resolvedBase = resolveDots(`${home}/${baseSplit.rest}`);
+    if (isScratch(`${norm}/`)) return false;
+    return norm !== resolvedBase && !norm.startsWith(`${resolvedBase}/`);
+  }
   if (/^(~|\$home|\$\{home\})(\/|$)/.test(norm)) {
     // `~/x`: under the home folder the project folder sits in, when it sits in one.
     const home = HOME_PREFIX.exec(base)?.[1];
@@ -470,6 +489,8 @@ export type GoodSessionInput = {
   lastTurn?: "pass" | "cut";
   /** Native Windows (not WSL). */
   nativeWindows?: boolean;
+  /** Remote workspaces do not necessarily have a local project folder. */
+  isRemoteWorkspace?: boolean;
   /** The server checked this session after upload and it is a Good session ★. */
   serverGood?: boolean;
 };
@@ -480,7 +501,7 @@ function plural(count: number, word: string): string {
 
 /** The checklist for a session, from its tool calls. */
 export function goodSessionChecklist({
-  calls = [], workspaceRoot = "", turnRunning = false, lastTurn = "cut", nativeWindows = false, serverGood = false,
+  calls = [], workspaceRoot = "", turnRunning = false, lastTurn = "cut", nativeWindows = false, isRemoteWorkspace = false, serverGood = false,
 }: GoodSessionInput = {}): GoodSessionChecklist {
   const codeFiles = new Map<string, number>();
   let testRuns = 0;
@@ -489,6 +510,7 @@ export function goodSessionChecklist({
   let serverStarted = false;
   let localUnstarted: string | null = null;
   const home = String(workspaceRoot).trim() ? isHomeFolder(workspaceRoot) : false;
+  const unknownRoot = !folderKey(workspaceRoot);
   const dbBuilt = calls.some((call) => SHELL_TOOLS.has(call.tool) && DB_SETUP.test(shellCommand(call.input)));
   const local = (url: string) => {
     if (!serverStarted) localUnstarted ??= url;
@@ -537,6 +559,7 @@ export function goodSessionChecklist({
     ? ` (${fileCount} of ${FLOOR_FILES} files)`
     : lines < FLOOR_LINES ? ` (${lines} of ${FLOOR_LINES} lines)` : "";
   const finished = turnRunning ? "pending" : lastTurn === "pass" ? "pass" : "cut";
+  const noRoot = !isRemoteWorkspace && unknownRoot && calls.some((call) => !call.notRun);
   const checks: GoodSessionCheck[] = [
     {
       id: "code",
@@ -556,11 +579,13 @@ export function goodSessionChecklist({
     },
     {
       id: "project",
-      state: home || outside || service || localUnstarted ? "fail" : "pass",
+      state: home || noRoot || outside || service || localUnstarted ? "fail" : "pass",
       label: "in project",
       hint: home
         ? "The session runs in your home folder: open a project folder instead."
-        : outside
+        : noRoot
+          ? "No project folder open: open a project folder instead."
+          : outside
           ? `Work outside the project folder: ${outside}`
           : service
             ? `Uses ${service}: keep the work inside the project.`

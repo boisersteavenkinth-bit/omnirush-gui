@@ -52,10 +52,11 @@ function transcript(...assistantParts: unknown[][]): UIMessage[] {
   return messages;
 }
 
-function states(messages: UIMessage[], options: { turnRunning?: boolean; nativeWindows?: boolean; root?: string; serverGood?: boolean } = {}) {
+function states(messages: UIMessage[], options: { turnRunning?: boolean; nativeWindows?: boolean; root?: string; serverGood?: boolean; remote?: boolean } = {}) {
   const result = goodSessionChecklist({
     ...messageFacts(messages),
     workspaceRoot: options.root ?? ROOT,
+    isRemoteWorkspace: options.remote ?? false,
     turnRunning: options.turnRunning ?? false,
     nativeWindows: options.nativeWindows ?? false,
     serverGood: options.serverGood ?? false,
@@ -162,6 +163,10 @@ describe("folders", () => {
     expect(outsideProject("~/projects/todo-api/src/a.ts", ROOT)).toBe(false);
     expect(outsideProject("$HOME/.zshrc", ROOT)).toBe(true);
     expect(outsideProject(`${ROOT}/../secret`, ROOT)).toBe(true);
+    expect(outsideProject("/home/yasakei/proj/a.ts", "~/proj")).toBe(false);
+    expect(outsideProject("~/proj/../other/a.ts", "/home/yasakei/proj")).toBe(true);
+    expect(outsideProject("/home/yasakei/proj/../other/a.ts", "/home/yasakei/proj")).toBe(true);
+    expect(outsideProject("c:/users/yasakei/appdata/local/temp/x.txt", "c:/users/yasakei/proj")).toBe(false);
   });
 });
 
@@ -250,6 +255,10 @@ describe("the live checklist", () => {
     expect(states(transcript([tool("browser_navigate", { url: "https://github.com" })])).by.project).toBe("fail");
     // Reading outside is fine (the server restores files read in full), and so is scratch space.
     expect(states(transcript([tool("read", { filePath: "/etc/hosts" }), tool("write", { filePath: "/tmp/x.py" })])).by.project).toBe("pass");
+  });
+
+  test("a remote workspace without a local root is not treated as missing a project", () => {
+    expect(states(transcript([tool("write", { filePath: "src/a.ts", content: BODY })]), { root: "", remote: true }).by.project).toBe("pass");
   });
 
   test("localhost: fine once the session started the server, not before", () => {
