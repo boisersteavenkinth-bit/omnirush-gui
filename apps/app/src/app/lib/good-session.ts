@@ -334,11 +334,25 @@ function resolveDots(value: string): string {
   return out.join("/");
 }
 
+function homeSplit(norm: string): { home: string; rest: string } | null {
+  const tilde = /^(~|\$home|\$\{home\})(\/|$)/.exec(norm);
+  if (tilde) return { home: "~", rest: norm.replace(/^(~|\$home|\$\{home\})(\/|$)/, "") };
+  const match = HOME_PREFIX.exec(norm);
+  return match ? { home: match[1], rest: norm.slice(match[1].length + 1) } : null;
+}
+
 /** Whether a path the agent changed or worked in is outside the project folder (scratch folders are fine). */
 export function outsideProject(file: unknown, root: unknown): boolean {
   let norm = folderKey(file);
   const base = folderKey(root);
   if (!norm || !base) return false;
+  const baseSplit = homeSplit(base);
+  const normSplit = homeSplit(norm);
+  if (baseSplit && normSplit && (baseSplit.home === "~" || normSplit.home === "~" || baseSplit.home === normSplit.home)) {
+    // Both sides sit under the same home folder (`~/...` matches its absolute form):
+    // compare the part below the home folder.
+    return normSplit.rest !== baseSplit.rest && !normSplit.rest.startsWith(`${baseSplit.rest}/`);
+  }
   if (/^(~|\$home|\$\{home\})(\/|$)/.test(norm)) {
     // `~/x`: under the home folder the project folder sits in, when it sits in one.
     const home = HOME_PREFIX.exec(base)?.[1];
@@ -489,6 +503,7 @@ export function goodSessionChecklist({
   let serverStarted = false;
   let localUnstarted: string | null = null;
   const home = String(workspaceRoot).trim() ? isHomeFolder(workspaceRoot) : false;
+  const unknownRoot = !folderKey(workspaceRoot);
   const dbBuilt = calls.some((call) => SHELL_TOOLS.has(call.tool) && DB_SETUP.test(shellCommand(call.input)));
   const local = (url: string) => {
     if (!serverStarted) localUnstarted ??= url;
@@ -537,6 +552,7 @@ export function goodSessionChecklist({
     ? ` (${fileCount} of ${FLOOR_FILES} files)`
     : lines < FLOOR_LINES ? ` (${lines} of ${FLOOR_LINES} lines)` : "";
   const finished = turnRunning ? "pending" : lastTurn === "pass" ? "pass" : "cut";
+  const noRoot = unknownRoot && calls.some((call) => !call.notRun);
   const checks: GoodSessionCheck[] = [
     {
       id: "code",
@@ -556,11 +572,13 @@ export function goodSessionChecklist({
     },
     {
       id: "project",
-      state: home || outside || service || localUnstarted ? "fail" : "pass",
+      state: home || noRoot || outside || service || localUnstarted ? "fail" : "pass",
       label: "in project",
       hint: home
         ? "The session runs in your home folder: open a project folder instead."
-        : outside
+        : noRoot
+          ? "No project folder open: open a project folder instead."
+          : outside
           ? `Work outside the project folder: ${outside}`
           : service
             ? `Uses ${service}: keep the work inside the project.`
