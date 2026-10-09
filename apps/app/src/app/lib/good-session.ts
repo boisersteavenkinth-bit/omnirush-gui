@@ -731,10 +731,12 @@ export function messageFacts(messages: readonly UIMessage[]): { calls: ToolCall[
   return { calls, lastTurn };
 }
 
-/** Whether leaving (closing, quitting, switching or deleting) is about a session whose turn runs. */
+/** Whether ending or deleting a session is about a session whose turn runs. */
 export function leavingRunningTurn(input: { action: "close" | "quit" | "switch" | "delete"; turnRunning: boolean; targetSessionId?: string | null; currentSessionId?: string | null }): boolean {
   if (!input.turnRunning) return false;
-  if (input.action === "switch") return Boolean(input.currentSessionId) && input.targetSessionId !== input.currentSessionId;
+  // Viewing another session does not end this one. Only explicit termination
+  // actions should warn about cutting off its last turn.
+  if (input.action === "switch") return false;
   return true;
 }
 
