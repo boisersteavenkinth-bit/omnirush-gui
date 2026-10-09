@@ -11,6 +11,7 @@ import {
   deleteNativeSession,
   getNativeSession,
   getNativeSessionMessages,
+  isMissingSessionError,
   type NativeSessionOperations,
 } from "../src/app/lib/opencode-session-native";
 import { classifyRouteSessionReadError } from "../src/react-app/shell/route-workspaces";
@@ -198,6 +199,36 @@ describe("native OpenCode session operations", () => {
       expect(error).toBeInstanceOf(Error);
       expect(error).toMatchObject({ status: 404, code: "session_not_found" });
     }
+  });
+
+  test("only a 404 that names the session marks it as missing", async () => {
+    const read = async (error: unknown, status: number) => {
+      try {
+        await composeNativeSessionSnapshot(endpoint, "ses_gone", undefined, {
+          createOperations: () => operations({ get: async () => failedResult(error, status) }),
+        });
+      } catch (thrown) {
+        return thrown;
+      }
+      throw new Error("Expected the snapshot read to fail");
+    };
+
+    // The local server's ownership check, and the engine's own answer.
+    const server = await read({ code: "session_not_found", message: "Session not found" }, 404);
+    const engine = await read({ name: "NotFoundError", data: { message: "Session not found: ses_gone" } }, 404);
+    expect(server).toMatchObject({ status: 404, code: "session_not_found" });
+    expect(isMissingSessionError(server)).toBe(true);
+    expect(isMissingSessionError(engine)).toBe(true);
+
+    // A bare 404 keeps its route classification but is no proof the chat is gone.
+    const bare = await read({ message: "missing" }, 404);
+    expect(bare).toMatchObject({ status: 404, code: "session_not_found" });
+    expect(isMissingSessionError(bare)).toBe(false);
+    expect(isMissingSessionError(await read("404 Not Found", 404))).toBe(false);
+    expect(isMissingSessionError(await read({ name: "NotFoundError", data: { message: "Project not found" } }, 404))).toBe(false);
+    expect(isMissingSessionError(await read({ code: "session_not_found" }, 502))).toBe(false);
+    expect(isMissingSessionError(await read({ code: "opencode_engine_unreachable" }, 503))).toBe(false);
+    expect(isMissingSessionError(new TypeError("Failed to fetch"))).toBe(false);
   });
 
   test("a request with no response keeps its own error and stays retryable", async () => {

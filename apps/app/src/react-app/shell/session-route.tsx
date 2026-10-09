@@ -511,6 +511,7 @@ export function SessionRoute() {
     handleRuntimeSessionUpdated,
     handleRuntimeSessionDeleted,
     forgetDeletedSession,
+    forgetMissingSession,
     handleRemoteWorkspaceConnectionSaved,
     runRemoteWorkspaceConnectionCheck,
   } = useWorkspaceRouteState({
@@ -1585,9 +1586,11 @@ export function SessionRoute() {
       onApplyEnvironmentChanges: isDesktopRuntime() && selectedWorkspace?.workspaceType !== "remote"
         ? handleApplyEnvironmentChanges
         : undefined,
+      onSessionMissing: forgetMissingSession,
     };
   }, [
     client,
+    forgetMissingSession,
     modelPicker.compactOpen,
     handleOpenExtensions,
     handleOpenSettings,

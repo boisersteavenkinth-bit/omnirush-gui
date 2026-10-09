@@ -96,9 +96,36 @@ export function unwrapNativeSessionResult<T>(result: FieldsResult<T>, notFoundCo
           ? notFoundCode
           : undefined;
       if (code) Object.assign(error, { code });
+      if (status === 404 && isMissingSessionBody(result.error)) Object.assign(error, { sessionMissing: true });
     }
     throw error;
   }
+}
+
+/**
+ * A 404 body that names the session itself as missing: the local server's
+ * `session_not_found` (its ownership check reads the session from the engine
+ * first) or the engine's own NotFoundError ("Session not found: ses_…").
+ * A bare 404 (an unknown route, a proxy page) is not proof the chat is gone.
+ */
+function isMissingSessionBody(body: unknown): boolean {
+  if (!body || typeof body !== "object") return false;
+  const record = body as Record<string, unknown>;
+  if (record.code === "session_not_found") return true;
+  if (record.name !== "NotFoundError") return false;
+  const data = record.data && typeof record.data === "object" ? record.data as Record<string, unknown> : null;
+  return typeof data?.message === "string" && /^Session not found\b/i.test(data.message);
+}
+
+/**
+ * True only when the engine confirmed the session does not exist. Callers use
+ * it to drop a stale chat from the sidebar, tabs and saved lists, so transport
+ * failures, restarts and other 404s must never match.
+ */
+export function isMissingSessionError(error: unknown): boolean {
+  return error instanceof Error
+    && "sessionMissing" in error
+    && error.sessionMissing === true;
 }
 
 const unwrapSessionResult = unwrapNativeSessionResult;

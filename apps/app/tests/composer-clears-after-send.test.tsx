@@ -96,6 +96,7 @@ test("a new-session send clears the handed-off text and attachment chips, later 
   }));
   mock.module("@/app/lib/opencode-session-native", () => ({
     composeNativeSessionSnapshot: async () => createSnapshot(sessionId),
+    isMissingSessionError: () => false,
   }));
   const { SessionSurface } = await import("../src/react-app/domains/session/surface/session-surface");
   const { snapshotKey } = await import("../src/react-app/domains/session/sync/session-sync");
