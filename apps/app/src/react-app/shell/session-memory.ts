@@ -112,6 +112,14 @@ export function writeLastSessionFor(workspaceId: string, sessionId: string | nul
   safeSet(SESSION_BY_WORKSPACE_KEY, Object.keys(map).length ? JSON.stringify(map) : null);
 }
 
+/** Forget the remembered chat for a workspace, but only while it is still `sessionId`. */
+export function forgetLastSessionFor(workspaceId: string, sessionId: string): void {
+  const wsId = workspaceId?.trim();
+  const id = sessionId?.trim();
+  if (!wsId || !id || readLastSessionFor(wsId) !== id) return;
+  writeLastSessionFor(wsId, null);
+}
+
 function readWorkspaceProjectDimensionMap(): Record<string, WorkspaceProjectDimension> {
   const raw = safeGet(WORKSPACE_PROJECT_DIMENSION_KEY);
   if (!raw) return {};

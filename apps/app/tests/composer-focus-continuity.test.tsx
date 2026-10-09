@@ -138,6 +138,7 @@ test("composer focus and optimistic sends preserve drafts through snapshots and 
   mock.module("@/react-app/domains/session/surface/composer/subagent-model-menu", () => ({ SubagentModelMenu: () => null }));
   mock.module("@/app/lib/opencode-session-native", () => ({
     composeNativeSessionSnapshot: async () => fetchedSnapshot,
+    isMissingSessionError: () => false,
   }));
   const { SessionSurface } = await import("../src/react-app/domains/session/surface/session-surface");
   const { snapshotKey, transcriptKey } = await import("../src/react-app/domains/session/sync/session-sync");

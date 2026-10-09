@@ -643,6 +643,8 @@ export type SessionSurfaceProps = {
   onForkAtMessage?: (messageId: string | null, sessionId: string) => void;
   /** Open a sub-agent (child) session in the main chat surface. */
   onOpenSubagentSession?: (sessionId: string) => void;
+  /** The engine confirmed this chat does not exist; the shell forgets it and moves on. */
+  onSessionMissing?: (workspaceId: string, sessionId: string) => void;
   onOpenTarget?: (target: OpenTarget, options?: OpenTargetOptions, sessionId?: string) => void;
   environmentRuntimeKey?: string | null;
   onApplyEnvironmentChanges?: () => Promise<ApplyEnvironmentChangesResult>;
@@ -1292,6 +1294,33 @@ export function SessionSurface(props: SessionSurfaceProps) {
   });
 
   const currentSnapshot = snapshotQuery.data?.session.id === props.sessionId ? snapshotQuery.data : null;
+  const snapshotSessionMissing = opencodeSessionNative.isMissingSessionError(snapshotQuery.error);
+  const onSessionMissingRef = useRef(props.onSessionMissing);
+  onSessionMissingRef.current = props.onSessionMissing;
+  // A chat the sidebar or a saved tab still lists but the engine does not
+  // have. Confirm with one more read (a stale answer must not drop a real
+  // chat), then let the shell forget it instead of showing a dead end.
+  useEffect(() => {
+    if (!snapshotSessionMissing) return;
+    const { workspaceId, sessionId } = props;
+    let cancelled = false;
+    void opencodeSessionNative.getNativeSession(
+      { opencodeBaseUrl: props.opencodeBaseUrl, token: props.omnirushToken },
+      sessionId,
+    ).then(
+      () => {
+        if (!cancelled) void snapshotQuery.refetch();
+      },
+      (error: unknown) => {
+        if (cancelled || !opencodeSessionNative.isMissingSessionError(error)) return;
+        onSessionMissingRef.current?.(workspaceId, sessionId);
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [snapshotSessionMissing, props.workspaceId, props.sessionId, props.opencodeBaseUrl, props.omnirushToken]);
   const inspectorOpencodeBaseUrl = useMemo(() => {
     try {
       const url = new URL(props.opencodeBaseUrl);
@@ -3156,7 +3185,9 @@ export function SessionSurface(props: SessionSurfaceProps) {
                   <div className="mx-auto max-w-xl rounded-3xl border border-red-6/40 bg-red-3/20 px-6 py-5 text-sm text-red-11">
                     {props.developerMode && snapshotQuery.error instanceof Error
                       ? snapshotQuery.error.message
-                      : describeOpencodeSessionError(snapshotQuery.error, "Failed to load session.")}
+                      : snapshotSessionMissing
+                        ? t("session.missing_chat_inline")
+                        : describeOpencodeSessionError(snapshotQuery.error, "Failed to load session.")}
                   </div>
                 )}
               </div>

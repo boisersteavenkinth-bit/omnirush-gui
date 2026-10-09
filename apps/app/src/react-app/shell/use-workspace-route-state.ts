@@ -24,11 +24,12 @@ import {
 } from "@/app/lib/desktop";
 import { createClient, unwrap } from "@/app/lib/opencode";
 import { createClientV2 } from "@/app/lib/opencode-v2-adapter";
-import { getNativeSession } from "@/app/lib/opencode-session-native";
+import { getNativeSession, isMissingSessionError } from "@/app/lib/opencode-session-native";
 import { createOmniRushServerClient, OmniRushServerError, type OmniRushServerClient } from "@/app/lib/omnirush-server";
 import { isDesktopRuntime } from "@/app/lib/runtime-env";
 import { toast } from "@/components/ui/sonner";
 import { showFilesUsedNoticeOnce } from "./files-used-notice";
+import { forgetMissingChatMemory } from "./missing-chat";
 import type { ResolvedWorkspaceEndpoint } from "@/app/lib/workspace-endpoint";
 import type { WorkspaceConnectionState } from "@/app/types";
 import { normalizeDirectoryPath } from "@/app/utils";
@@ -220,6 +221,10 @@ export function useWorkspaceRouteState(input: UseWorkspaceRouteStateInput) {
   const [routeRefreshVersion, setRouteRefreshVersion] = useState(0);
   const [legacySelectedWorkspaceId, setLegacySelectedWorkspaceId] = useState<string>(() => readActiveWorkspaceId() ?? "");
   const selectedWorkspaceId = routeWorkspaceId || legacySelectedWorkspaceId;
+  const selectedWorkspaceIdRef = useRef(selectedWorkspaceId);
+  selectedWorkspaceIdRef.current = selectedWorkspaceId;
+  const selectedSessionIdRef = useRef(selectedSessionId);
+  selectedSessionIdRef.current = selectedSessionId;
   const selectedWorkspace = useMemo(
     () => workspaces.find((workspace) => workspace.id === selectedWorkspaceId) ?? (selectedWorkspaceId ? null : workspaces[0] ?? null),
     [selectedWorkspaceId, workspaces],
@@ -965,6 +970,40 @@ export function useWorkspaceRouteState(input: UseWorkspaceRouteStateInput) {
     setSessionsByWorkspaceId(lists);
   }, [selectedWorkspaceId]);
   const handleRuntimeSessionDeleted = forgetDeletedSession;
+  /**
+   * The engine confirmed this workspace has no such chat. Drop it from the
+   * sidebar, the saved list, the remembered chat and the tabs, and move off it
+   * when it is the open chat, instead of a dead-end "not found" page. Unlike a
+   * delete it is not blocked from coming back: a chat still being carried
+   * over from the earlier engine shows up again on a later list.
+   */
+  const forgetMissingSession = useCallback((workspaceId: string, sessionId: string) => {
+    const wsId = workspaceId.trim();
+    const id = sessionId.trim();
+    if (!wsId || !id) return;
+    const pending = pendingCreatedSessionIdsRef.current[wsId];
+    if (pending) delete pending[id];
+    if (hydratedRouteSessionIdsRef.current[wsId] === id) delete hydratedRouteSessionIdsRef.current[wsId];
+    const current = sessionsByWorkspaceIdRef.current;
+    const list = current[wsId] ?? [];
+    const nextList = removeWorkspaceRouteSession(list, id);
+    if (nextList !== list) {
+      const next = { ...current, [wsId]: nextList };
+      sessionsByWorkspaceIdRef.current = next;
+      setSessionsByWorkspaceId(next);
+    }
+    forgetMissingChatMemory({ workspaceId: wsId, sessionId: id });
+    recordInspectorEvent("route.session.missing", { workspaceId: wsId, sessionId: id });
+    if (wsId === selectedWorkspaceIdRef.current && id === selectedSessionIdRef.current) {
+      navigateToWorkspaceSession(wsId, null, { replace: true });
+    }
+    toast.info(t("session.missing_chat_title"), {
+      id: `missing-chat:${id}`,
+      description: t("session.missing_chat_description"),
+    });
+  }, [navigateToWorkspaceSession]);
+  const forgetMissingSessionRef = useRef(forgetMissingSession);
+  forgetMissingSessionRef.current = forgetMissingSession;
 
   useEffect(() => {
     workspacesRef.current = workspaces;
@@ -1323,6 +1362,11 @@ export function useWorkspaceRouteState(input: UseWorkspaceRouteStateInput) {
           : await getNativeSession(selectedWorkspaceEndpoint, selectedSessionId),
       });
       if (cancelled || outcome.status === "cancelled") return;
+      if (outcome.status === "not-found" && isMissingSessionError(outcome.error)) {
+        setModernRouteSessionResolution(null);
+        forgetMissingSessionRef.current(selectedWorkspaceId, selectedSessionId);
+        return;
+      }
       if (outcome.status !== "loaded") {
         setModernRouteSessionResolution({
           key: modernRouteSessionLoadKey,
@@ -1505,6 +1549,7 @@ export function useWorkspaceRouteState(input: UseWorkspaceRouteStateInput) {
     handleRuntimeSessionUpdated,
     handleRuntimeSessionDeleted,
     forgetDeletedSession,
+    forgetMissingSession,
     handleRemoteWorkspaceConnectionSaved,
     runRemoteWorkspaceConnectionCheck,
   };
