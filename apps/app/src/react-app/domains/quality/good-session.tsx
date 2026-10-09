@@ -39,6 +39,7 @@ import {
   localDay,
   shouldNudge,
   showWslBanner,
+  windowsNotCounted,
   type GoodSessionCheck,
 } from "../../../app/lib/good-session";
 import { readPref, useAccountQuality, writePref } from "../../../app/lib/quality";
@@ -51,15 +52,17 @@ export function isNativeWindowsHost(): boolean {
   return isWindowsPlatform();
 }
 
-/** The four steps, plus the WSL tip. */
-export function GoodSessionGuide({ className }: { className?: string }) {
+/** The four steps, plus the WSL tip unless the server counts native Windows (`windowsCounts`). */
+export function GoodSessionGuide({ className, windowsCounts = false }: { className?: string; windowsCounts?: boolean }) {
   return (
     <div className={cn("text-xs", className)} data-testid="good-session-guide">
       <p className="font-medium text-foreground">{GOOD_SESSION_GUIDE_LINK}</p>
       <ol className="mt-1 list-decimal space-y-0.5 ps-4 leading-5 text-muted-foreground marker:text-muted-foreground/60">
         {GOOD_SESSION_GUIDE.map((step) => <li key={step}>{step}</li>)}
       </ol>
-      <p className="mt-1 leading-5 text-muted-foreground" data-testid="good-session-wsl-tip">{GOOD_SESSION_WSL_TIP}</p>
+      {windowsCounts ? null : (
+        <p className="mt-1 leading-5 text-muted-foreground" data-testid="good-session-wsl-tip">{GOOD_SESSION_WSL_TIP}</p>
+      )}
     </div>
   );
 }
@@ -152,6 +155,7 @@ function useServerGood(sessionId: string, ask: boolean): boolean {
  * missing.
  */
 export function GoodSessionChecklistBar(props: GoodSessionChecklistBarProps) {
+  const windowsCounts = useAccountQuality()?.windowsCounts === true;
   const nativeWindows = useMemo(() => isNativeWindowsHost(), []);
   const facts = useMemo(() => messageFacts(props.messages), [props.messages]);
   const local = useMemo(() => goodSessionChecklist({
@@ -159,8 +163,8 @@ export function GoodSessionChecklistBar(props: GoodSessionChecklistBarProps) {
     workspaceRoot: props.workspaceRoot,
     isRemoteWorkspace: props.isRemoteWorkspace,
     turnRunning: props.turnRunning,
-    nativeWindows,
-  }), [facts, nativeWindows, props.isRemoteWorkspace, props.turnRunning, props.workspaceRoot]);
+    nativeWindows: windowsNotCounted({ nativeWindows, windowsCounts }),
+  }), [facts, nativeWindows, props.isRemoteWorkspace, props.turnRunning, props.workspaceRoot, windowsCounts]);
   const serverGood = useServerGood(props.sessionId, local.onTrack);
   const checklist = useMemo(
     () => (serverGood && local.onTrack ? { ...local, verdict: "good" as const, text: checklistText(local.checks, "good") } : local),
@@ -219,7 +223,7 @@ export function GoodSessionChecklistBar(props: GoodSessionChecklistBarProps) {
             {GOOD_SESSION_GUIDE_LINK}
           </PopoverTrigger>
           <PopoverContent side="top" align="end" className="w-72 gap-2 rounded-2xl p-3">
-            <GoodSessionGuide />
+            <GoodSessionGuide windowsCounts={windowsCounts} />
           </PopoverContent>
         </Popover>
       </div>
@@ -227,8 +231,12 @@ export function GoodSessionChecklistBar(props: GoodSessionChecklistBarProps) {
   );
 }
 
-/** "Sessions from native Windows don't count as Good sessions. Switch to WSL": dismissible, back the next day. */
+/**
+ * "Sessions from native Windows don't count as Good sessions. Switch to WSL":
+ * dismissible, back the next day; none while the server counts native Windows.
+ */
 export function WslBanner({ className }: { className?: string }) {
+  const windowsCounts = useAccountQuality()?.windowsCounts === true;
   const nativeWindows = useMemo(() => isNativeWindowsHost(), []);
   const [dismissedDay, setDismissedDay] = useState(() => readPref(WSL_BANNER_DISMISSED_KEY));
   // Comes back on the next day even when the app stays open.
@@ -237,7 +245,7 @@ export function WslBanner({ className }: { className?: string }) {
     const timer = window.setInterval(() => setNow(new Date()), 60 * 60_000);
     return () => window.clearInterval(timer);
   }, []);
-  if (!showWslBanner({ nativeWindows, dismissedDay, now })) return null;
+  if (!showWslBanner({ nativeWindows, windowsCounts, dismissedDay, now })) return null;
   const dismiss = () => {
     const day = localDay();
     writePref(WSL_BANNER_DISMISSED_KEY, day);
