@@ -33,6 +33,7 @@ export const SPIN_REFUSALS = /** @type {const} */ (["no_spins", "wheel_resting",
  *   nextSpinHint: { progress: number, text: string, sessionId: string | null } | null,
  *   biggestWinToday: { tokens: number, at: string | null } | null,
  *   nudge: { id: string, text: string } | null,
+ *   windowsCounts: boolean,
  * }} AccountQuality
  * @typedef {{ tokens: number, weight: number }} WheelSegment
  * @typedef {{
@@ -144,6 +145,8 @@ export function parseAccountQuality(value) {
     nextSpinHint: parseNextSpinHint(value.next_spin_hint),
     biggestWinToday: parseBiggestWin(value.biggest_win_today),
     nudge: parseNudge(value.nudge),
+    // The server counts native-Windows sessions for a Good session ★ (absent: it does not).
+    windowsCounts: value.windows_counts === true,
   };
 }
 

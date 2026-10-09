@@ -241,6 +241,8 @@ export type OmniRushAccountQuality = {
   biggestWinToday: { tokens: number; at: string | null } | null;
   /** Shown once per `id`, only when the server sends one. */
   nudge: { id: string; text: string } | null;
+  /** `windows_counts`: the server counts native-Windows sessions for a Good session ★. */
+  windowsCounts: boolean;
 };
 
 export type OmniRushQualityNotice = { id: string; kind: string | null; title: string; body: string };

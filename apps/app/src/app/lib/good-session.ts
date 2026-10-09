@@ -18,7 +18,10 @@
 //            local_service) and no machine-specific program (V3
 //            host_only_program)
 //   finished the last turn finished (V3 unrecorded_turn, V2 `finished`)
-//   windows  not native Windows (V3 windows_host); WSL is fine
+//   windows  not native Windows (V3 windows_host); WSL is fine. Left out
+//            while the server counts native Windows: `windows_counts` in the
+//            account's quality block (/device/me, GET /me/quality); the
+//            desktop then passes `nativeWindows: false` (`windowsNotCounted`)
 //
 // Sub-agents and many turns are not required.
 //
@@ -751,6 +754,15 @@ export function localDay(now: Date | number = Date.now()): string {
   return `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())}`;
 }
 
-export function showWslBanner(input: { nativeWindows: boolean; dismissedDay: string | null; now?: Date }): boolean {
-  return input.nativeWindows && input.dismissedDay !== localDay(input.now);
+/**
+ * Native Windows the server does not count (`windowsCounts`: its
+ * `windows_counts`, absent or false on older servers): the checklist's
+ * `windows` check and the WSL banner show only then.
+ */
+export function windowsNotCounted(input: { nativeWindows: boolean; windowsCounts?: boolean }): boolean {
+  return input.nativeWindows && input.windowsCounts !== true;
+}
+
+export function showWslBanner(input: { nativeWindows: boolean; windowsCounts?: boolean; dismissedDay: string | null; now?: Date }): boolean {
+  return windowsNotCounted(input) && input.dismissedDay !== localDay(input.now);
 }

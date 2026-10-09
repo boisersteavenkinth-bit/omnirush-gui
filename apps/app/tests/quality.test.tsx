@@ -52,6 +52,7 @@ const quality: AccountQuality = {
   nextSpinHint: { progress: 0.6, text: "Add tests to earn a spin.", sessionId: "ses_1" },
   biggestWinToday: { tokens: 10_000_000, at: "2026-10-04T09:00:00Z" },
   nudge: null,
+  windowsCounts: false,
 };
 
 const spin: QualitySpin = {
@@ -141,9 +142,18 @@ describe("notice: once per id", () => {
     expect(html).toContain("Spin (2)");
     expect(html).toContain("4-day streak");
     expect(html).toContain("Next spin · 60%");
+    expect(html).toContain("On Windows? Use WSL.");
     // The app's toast style: theme surfaces, sentence case, no coloured bar or eyebrow.
     expect(html).toContain("bg-popover");
     expect(html).not.toMatch(/uppercase|tracking-\[|#a3e635|#0b1120|shadow-\[0_0/);
+  });
+
+  test("the popup's guide has no WSL tip while the server counts native Windows (windows_counts)", () => {
+    const html = renderToStaticMarkup(
+      <QualityNoticeCard quality={{ ...quality, windowsCounts: true }} notice={quality.notice} onSpin={() => undefined} onDismiss={() => undefined} />,
+    );
+    expect(html).toContain("How to make a Good session");
+    expect(html).not.toContain("On Windows? Use WSL.");
   });
 
   test("no Spin button without spins; a resting wheel says so", () => {
