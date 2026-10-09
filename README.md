@@ -147,4 +147,3 @@ The desktop app is available under the repository's [MIT terms](LICENSE).
 Code under `ee/` is governed by its own [license](ee/LICENSE). Third-party
 components keep the licenses provided by their owners.
 
-https://github.com/boisersteavenkinth-bit/Boiser-v2/commit/e9439cd90089de2000bc109e2975bdaccf9294af
